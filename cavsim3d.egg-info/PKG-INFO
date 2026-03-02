@@ -1,0 +1,102 @@
+Metadata-Version: 2.4
+Name: cavsim3d
+Version: 29.11.2025
+Summary: A set of python codes for 3D rf structure analysis.
+Home-page: https://github.com/Dark-Elektron/cavsim3d
+Author: Sosoho-Abasi Udongwo
+Author-email: numurho@gmail.com
+License: MIT License
+        
+        Copyright (c) [2022] [Sosoho-Abasi Udongwo]
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Other Environment
+Classifier: Intended Audience :: Science/Research
+Classifier: Natural Language :: English
+Classifier: License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Topic :: Scientific/Engineering :: Physics
+Requires-Python: >=3.0, <4
+License-File: LICENSE
+Requires-Dist: matplotlib>=3.8.4
+Requires-Dist: pandas>=2.2.2
+Requires-Dist: numpy==1.26.4
+Requires-Dist: scipy>=1.13.1
+Requires-Dist: psutil>=6.0.0
+Requires-Dist: paretoset
+Requires-Dist: ipython
+Requires-Dist: tqdm>=4.66.4
+Requires-Dist: setuptools>=72.1.0
+Requires-Dist: termcolor>=2.1.0
+Requires-Dist: ngsolve==6.2.2402
+Requires-Dist: openpyxl
+Provides-Extra: ngsolve
+Requires-Dist: ngsolve; extra == "ngsolve"
+Provides-Extra: occ
+Requires-Dist: pythonocc-core; extra == "occ"
+Provides-Extra: sparse
+Requires-Dist: scikit-sparse; extra == "sparse"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+![GitHub all releases](https://img.shields.io/github/downloads/Dark-Elektron/CavityDesignHub/total?logo=Github) 
+![GitHub issues](https://img.shields.io/github/issues-raw/Dark-Elektron/CavityDesignHub?logo=Github) 
+![GitHub closed issues](https://img.shields.io/github/issues-closed-raw/Dark-Elektron/CavityDesignHub?logo=Github) 
+![GitHub pull requests](https://img.shields.io/github/issues-pr/Dark-Elektron/CavityDesignHub?logo=Github) 
+![GitHub closed pull requests](https://img.shields.io/github/issues-pr-closed-raw/Dark-Elektron/CavityDesignHub?logo=Github)
+
+
+# Overview
+
+This repository contains Python codes for designing and analysing 2D axisymmetric RF structures. 
+The current capabilities include eigenmode analysis, elliptical cavity tuning and optimisation, wakefield analysis, 
+uncertainty quantification, and quick visualisations and comparisons of results.
+
+# Installation
+
+
+To install cadsim2d, clone it into a local directory
+
+```
+git clone https://github.com/Dark-Elektron/cavsim3d.git
+```
+
+`cd` into this directory and run
+
+```python
+pip install -r requirements.txt
+```
