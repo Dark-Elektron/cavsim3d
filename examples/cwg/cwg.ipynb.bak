@@ -1,0 +1,312 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "4c9d4129fbe20446",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T09:01:58.193555Z",
+     "start_time": "2026-02-20T09:01:58.187678Z"
+    },
+    "collapsed": true,
+    "jupyter": {
+     "outputs_hidden": true
+    }
+   },
+   "source": [
+    "# Circular Waveguide Analysis\n",
+    "\n",
+    "This notebook demonstrates a complete circular waveguide analysis workflow:\n",
+    "\n",
+    "1. Geometry creation\n",
+    "2. Frequency-domain analysis\n",
+    "3. Model order reduction\n",
+    "4. Comparison with analytical solution"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "235fd022ed9a46ce",
+   "metadata": {
+    "jupyter": {
+     "is_executing": true
+    }
+   },
+   "outputs": [],
+   "source": [
+    "from utils.visualization import *\n",
+    "from geometry.primitives import RectangularWaveguide, CircularWaveguide\n",
+    "from solvers.frequency_domain import FrequencyDomainSolver\n",
+    "from rom.reduction import ModelOrderReduction\n",
+    "from analytical.circular_waveguide import CWGAnalytical\n",
+    "from ngsolve.webgui import Draw # must import Draw, otherwise may run into problems showing mesh\n",
+    "\n",
+    "%matplotlib widget\n",
+    "plt.rcParams['figure.dpi'] = 100"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3946fc78eff70e0",
+   "metadata": {},
+   "source": [
+    "## 1. Define Geometry\n",
+    "\n",
+    "Create a circular waveguide with specified dimensions and mesh parameters."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ac644f5124b0a9e7",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T16:33:38.345510Z",
+     "start_time": "2026-02-20T16:33:38.211031Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# Waveguide parameters\n",
+    "radius = 150e-3  # Width: 100 mm\n",
+    "L = 300e-3  # Length: 200 mm\n",
+    "maxh = 0.04  # Mesh size\n",
+    "\n",
+    "# Create waveguide geometry\n",
+    "cwg = CircularWaveguide(radius, L, maxh=maxh)\n",
+    "# save step file\n",
+    "cwg.save_step(r\"./circular_waveguide.step\")\n",
+    "\n",
+    "print(f\"Dimensions: radius={radius * 1e3:.0f}mm, L={cwg.length * 1e3:.0f}mm, L={L * 1e3:.0f}mm\")\n",
+    "# print(f\"Cutoff frequency (TE10): {cwg.cutoff_frequency_TE11 / 1e9:.3f} GHz\")\n",
+    "print(f\"Mesh DOFs: ~{cwg.mesh.nv} vertices\")\n",
+    "\n",
+    "cwg.show('mesh')\n",
+    "cwg.print_info()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ee12b50a62ecb489",
+   "metadata": {},
+   "source": [
+    "## 2. Analytical Solution\n",
+    "\n",
+    "Compute the analytical Z-parameters for comparison with numerical results."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e58f24d673921315",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T16:33:38.378076Z",
+     "start_time": "2026-02-20T16:33:38.366964Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# 2. Analytical\n",
+    "analytical = CWGAnalytical(radius=radius, length=L)\n",
+    "\n",
+    "# 3. FOM solve\n",
+    "%time fds = FrequencyDomainSolver(cwg, order=3)\n",
+    "%time fds.assemble_matrices(nportmodes=3)\n",
+    "%time fds.solve(0.1, 1.5, 30, store_snapshots=True)\n",
+    "\n",
+    "# 4. Quick comparison plots - just pass the objects!\n",
+    "frequencies = np.linspace(0.1, 1.5, 1000) * 1e9\n",
+    "plot_z_comparison([analytical, fds], frequencies=frequencies, mode_pairs=[(3, 3), (3, 3)])\n",
+    "plot_s_comparison([analytical, fds], frequencies=frequencies, mode_pairs=[(3, 3), (3, 3)])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fbfab542-5cb4-4d95-805c-d5ba1b2c586c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fds.port_solver.print_info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2859cb77-ca62-4487-8adc-e928be618157",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fds.plot_port_mode('port1', 1)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "43a823f8-ce20-40a2-95f1-a5cd5ef885c6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fds.plot_port_mode('port2', 1)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7262565b-8a26-444c-9079-e79fe08240a6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fds.plot_field(14)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "1773225c-9d18-4ee8-9980-7a8249ecbc97",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# # 6. Eigenfrequency comparison\n",
+    "# fig, ax = plot_eigenfrequencies([fds], analytical=analytical, n_modes=50)\n",
+    "# ax.set_ylim(0.1, 5)\n",
+    "# ax.set_xlim(0.1, 5)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5f78ff0a-f8f9-42e0-8536-825e02bd2b36",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# After ROM is working...\n",
+    "from rom.reduction import ModelOrderReduction\n",
+    "\n",
+    "rom = ModelOrderReduction(fds)\n",
+    "rom.reduce(max_rank=50, tol=1e-6)\n",
+    "rom.solve(0.1, 1.5, 1000)\n",
+    "\n",
+    "# Compare all three\n",
+    "plot_z_comparison([analytical, fds, rom], frequencies=frequencies,\n",
+    "                  labels=['Analytical', 'FOM', 'ROM'])\n",
+    "plot_s_comparison([analytical, fds, rom], frequencies=frequencies,\n",
+    "                  labels=['Analytical', 'FOM', 'ROM'])\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d21067d2-c547-453b-9fbb-c62461441463",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# fig, ax = plot_eigenfrequencies([fds, rom], analytical=analytical,\n",
+    "#                       labels=['FOM', 'ROM'], n_modes=50)\n",
+    "# ax.set_ylim(1, 5)\n",
+    "# ax.set_xlim(1, 5)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "26713cd9-2828-4f05-9ece-ab34a11c38b8",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Compare all three\n",
+    "plot_z_comparison([analytical, fds, rom], frequencies=frequencies,\n",
+    "                  labels=['Analytical', 'FOM', 'ROM'], mode_pairs=[(3, 3), (3, 3)])\n",
+    "plot_s_comparison([analytical, fds, rom], frequencies=frequencies,\n",
+    "                  labels=['Analytical', 'FOM', 'ROM'], mode_pairs=[(3, 3), (3, 3)])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f8e0589a-e160-406c-a287-a6e958d1f404",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fig, ax = plot_eigenfrequencies([fds, rom], analytical=analytical,\n",
+    "                      labels=['FOM', 'ROM'], n_modes=50)\n",
+    "ax.set_ylim(0.1, 2)\n",
+    "ax.set_xlim(0.1, 2)\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fcbd5b3c-95c2-4bfc-ac53-0372ab74edd1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Eigenvalue access\n",
+    "eigs = fds.eigenvalues  # Dict with 'global', domain keys\n",
+    "freqs = fds.get_resonant_frequencies(n_modes=20)\n",
+    "fds.print_eigenfrequencies(n_modes=30)\n",
+    "\n",
+    "# Eigenmode visualization\n",
+    "fds.plot_eigenmode(mode_index=0, component='abs')\n",
+    "fds.plot_eigenmodes(n_modes=5)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f2061f01-d28c-4eff-86b3-0aa31c1151c6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Same interface!\n",
+    "eigs = rom.eigenvalues\n",
+    "freqs = rom.get_resonant_frequencies(n_modes=20)\n",
+    "rom.plot_eigenmode(mode_index=0)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "8ea8610a-d0c0-4e89-a829-c2c9f10d6ad4",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Same interface!\n",
+    "eigs = concat.eigenvalues\n",
+    "freqs = concat.get_resonant_frequencies(n_modes=20)\n",
+    "concat.plot_eigenmode(mode_index=0)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.14"
+  },
+  "widgets": {
+   "application/vnd.jupyter.widget-state+json": {
+    "state": {},
+    "version_major": 2,
+    "version_minor": 0
+   }
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

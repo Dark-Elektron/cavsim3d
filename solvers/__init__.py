@@ -2,7 +2,8 @@
 
 from .base import BaseEMSolver, ParameterConverter
 from .frequency_domain import FrequencyDomainSolver
-from .concatenation import ConcatenatedSystem, ReducedConcatenatedSystem, reduce_concatenated_system
+from .concatenation import ConcatenatedSystem, ReducedConcatenatedSystem
+from .results import FOMResult, FOMCollection, ROMCollection
 from .ports import PortEigenmodeSolver
 
 __all__ = [
@@ -11,6 +12,8 @@ __all__ = [
     'FrequencyDomainSolver',
     'ConcatenatedSystem',
     'ReducedConcatenatedSystem',
-    'reduce_concatenated_system',
+    'FOMResult',
+    'FOMCollection',
+    'ROMCollection',
     'PortEigenmodeSolver',
 ]

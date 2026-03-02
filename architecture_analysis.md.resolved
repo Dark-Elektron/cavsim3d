@@ -1,0 +1,193 @@
+# Frequency-Domain Solver Architecture Analysis
+
+## Current vs. Proposed Object Hierarchy
+
+### Current Architecture (as-is)
+
+```mermaid
+graph TD
+    FDS["FrequencyDomainSolver"]
+    
+    FDS -->|".fom"| FOMResult["FOMResult (global)"]
+    FDS -->|".foms"| FOMColl["FOMCollection (per-domain)"]
+    
+    FOMResult -->|".rom"| ROMResult1["ROMResult"]
+    
+    FOMColl -->|"[i]"| FOMResultD["FOMResult (domain i)"]
+    FOMColl -->|".roms"| ROMColl["ROMCollection"]
+    FOMColl -->|".concat"| ConcatR1["ConcatResult (FOM concat)"]
+    
+    ROMColl -->|"[i]"| ROMResultD["ROMResult (domain i)"]
+    ROMColl -->|".concat"| ConcatR2["ConcatResult (ROM concat)"]
+    
+    ConcatR1 -->|".rom"| ROMResult3["ROMResult"]
+    ConcatR2 -->|".rom"| ROMResult4["ROMResult"]
+    
+    subgraph "Active System Objects"
+        MOR["ModelOrderReduction"]
+        CS["ConcatenatedSystem"]
+    end
+    
+    ROMResult1 -.->|"_rom_ref"| MOR
+    ConcatR2 -.->|"_concat_system"| CS
+```
+
+**Key observations about current state:**
+- [ROMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#151-218) is a **passive data container** — it stores Z/S/frequencies but has no [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797) or [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542) method
+- [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) is already an **active system object** with [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542), [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797), [concatenate()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#671-716), and eigenvalue methods
+- [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) is already an **active system object** with [couple()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#294-348), [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797), and eigenvalue methods
+- The result wrappers ([FOMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#40-145), [ROMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#151-218), [ConcatResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#224-323)) hold back-references to active objects but don't expose their methods
+- [_build_cascaded_matrices()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#1160-1221) still exists alongside [_build_concatenated_z_matrices()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#2567-2714)
+
+---
+
+### Proposed Architecture (your request)
+
+```mermaid
+graph TD
+    FDS["FrequencyDomainSolver"]
+    
+    subgraph "Single Solid (orange)"
+        FDS -->|".fom"| FOM["FOM: owns K, M, W, B, A"]
+        FOM -->|".reduce()"| ROM1["ModelOrderReduction: owns A_r, B_r, W"]
+        ROM1 -->|".solve()"| ROM1
+    end
+    
+    subgraph "Multi Solid (green)"
+        FDS -->|".foms"| FOMS["FOMCollection: per-solid"]
+        FOMS -->|"[i]"| FOMi["FOM (solid i): owns K_i, M_i, etc."]
+        FOMS -->|".reduce()"| ROMS["ROMCollection: per-solid reduced"]
+        FOMS -->|".concatenate()"| CS1["ConcatenatedSystem: global A, B"]
+        ROMS -->|".concatenate()"| CS2["ConcatenatedSystem: global A_r, B_r"]
+        CS1 -->|".reduce()"| ROM_CS1["ModelOrderReduction"]
+        CS2 -->|".reduce()"| ROM_CS2["ModelOrderReduction"]
+    end
+```
+
+---
+
+## Consistency Analysis
+
+### ✅ Internally Consistent Aspects
+
+| Aspect | Status | Reasoning |
+|--------|--------|-----------|
+| Each state owns complete matrices | ✅ | Already mostly true. [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) stores `_A_r`, `_B_r`, `_W` per domain; [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) stores `A_coupled`, `B_coupled`, `W_coupled` |
+| A always built from K, M, W (and Q) | ✅ | Reduction does A_r = W^T K_free W, which encodes the K/M relationship. A_r is the reduced stiffness projected into the POD basis |
+| [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542) returns [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) | ✅ | Already the case internally; only the wiring through result objects needs changing |
+| `ModelOrderReduction.solve()` is re-invocable | ✅ | Already works — [solve(fmin, fmax, n)](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797) recomputes Z/S over new frequencies without re-reducing |
+| Eigenmodes per-solid vs. global | ✅ | [EigenMixinBase](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/eigen_mixin.py#18-807) already supports both paths; `ModelOrderReduction.get_eigenvalues(domain=...)` can select per-domain or global |
+| `.A` naming consistency | ✅ | `ModelOrderReduction._A_r[domain]` for per-domain, `.A_global` for concatenated; `ConcatenatedSystem.A_coupled` for concatenated system |
+
+### ⚠️ Structural Contradictions / Issues to Resolve
+
+#### 1. `fds.fom.reduce()` vs current `fds.fom.rom` (lazy factory)
+
+**Current:** `FOMResult.rom` is a `@property` that lazily calls [_rom_factory()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#824-826), which creates a **new** [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027), calls [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542) and [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797), then wraps the result in a passive [ROMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#151-218).
+
+**Proposed:** `fds.fom.reduce()` should return the [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) object itself. This means:
+- [FOMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#40-145) needs a `.reduce()` method (not a `.rom` property)
+- The returned [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) should be the live object, not a snapshot
+- `.solve()` on it should be callable multiple times with different frequency ranges
+
+> [!IMPORTANT]
+> **Decision needed:** Do you want to **keep** `.rom` as a convenience shortcut that calls `.reduce().solve(same_freqs)` under the hood, or **remove** it entirely in favor of the explicit two-step? Keeping both is possible (`.rom` as syntactic sugar) but could cause confusion.
+
+#### 2. `fds.foms.reduce()` — Collection-level reduce
+
+**Current:** `FOMCollection._build_roms()` creates **one** [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) that reduces all domains, then wraps per-domain results into [ROMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#151-218) objects inside a [ROMCollection](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#562-708).
+
+**Proposed:** `fds.foms.reduce()` should return `fds.foms.roms` (a [ROMCollection](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#562-708), still per-solid but reduced).
+
+**Issue:** A single [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) already handles all domains. Having `fds.foms.reduce()` return a [ROMCollection](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#562-708) that wraps individual per-domain views is fine, but internally there's one shared [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) — not N independent ones. This is already how it works; the naming just needs to change from `.roms` (property) to `.reduce()` (explicit method).
+
+> [!WARNING]
+> **Semantic subtlety:** If the user calls `fds.foms.reduce()` twice with different tolerances, should it return a new [ROMCollection](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#562-708) each time, or should it invalidate the previous one? The current architecture caches results. Making [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542) a method (not a property) naturally implies "this is an action that creates a new thing," which is cleaner.
+
+#### 3. `fds.fom.concatenate()` — Warning for single-solid
+
+**Proposed:** Calling `.concatenate()` on single-solid should warn.
+
+**No contradiction.** This is straightforward to implement as a guard clause. Currently, `ModelOrderReduction.concatenate()` already raises `ValueError("Single-domain ROM requires 'others' parameter for concatenation")`.
+
+#### 4. `ConcatenatedSystem.reduce()` — Reducing the concatenated system
+
+**Current:** `ConcatResult.rom` (property) calls `reduce_concatenated_system()`, which does POD on the concatenated system snapshots.
+
+**Proposed:** [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) should have a `.reduce()` method returning [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027).
+
+**Issue:** The current [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) doesn't have snapshots of its own — it's a reduced system assembled from per-domain reduced structures. A further "reduce" would be a second-level POD (compressing the already-reduced coupled system), which is what `reduce_concatenated_system()` does now. This needs to be carefully integrated.
+
+> [!IMPORTANT]
+> **Clarification needed:** When you say `ConcatenatedSystem.reduce()`, are you referring to:
+> - **(a)** A second-level POD that further compresses the coupled system? (This is what `reduce_concatenated_system()` does now)
+> - **(b)** Just returning the already-reduced coupled matrices as a [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027)-compatible object?
+> 
+> Option (a) creates a new smaller system. Option (b) wraps the existing coupled system in a [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) interface. Both are valid but serve different purposes.
+
+#### 5. Remove cascade entirely
+
+**Current:** [_build_cascaded_matrices()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#1160-1221) exists at lines 1160-1220 in [frequency_domain.py](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py), and `global_method='cascade'` is an option in [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797).
+
+**No contradiction.** Removing cascade is a clean deletion. The `'concatenate'` method already provides Kirchhoff-based coupling at the FOM level.
+
+> [!TIP]
+> After removing cascade, the [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797) method's `global_method` parameter simplifies to `{'coupled', 'concatenate', None}`.
+
+#### 6. `fds.foms.concatenate()` should return [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624)
+
+**Current:** `FOMCollection.concat` (property) triggers [_build_concat()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#528-549), which runs the solver's FOM-level concatenation and wraps the result in [ConcatResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#224-323) (a passive container with a [_FDSConcatProxy](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#748-756)).
+
+**Proposed:** `fds.foms.concatenate()` should return a [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) object.
+
+**Issue:** At the FOM level, concatenation currently works by assembling per-domain Z-matrices into a global Z using Kirchhoff constraints — but this happens inside `FrequencyDomainSolver._build_concatenated_z_matrices()`, which operates on **full-order** Z matrices (not reduced structures). [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) currently only works with [ReducedStructure](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/structures.py#8-108) objects.
+
+> [!CAUTION]
+> **This is the most significant structural contradiction.** [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) takes [ReducedStructure](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/structures.py#8-108) objects as input (with `Ard`, `Brd` matrices). To use it at the FOM level, you'd need to either:
+> - **(a)** Create [ReducedStructure](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/structures.py#8-108) objects from the full-order matrices (using identity projection, i.e., W=I), making the full system look like a "reduced" system with r=n_full
+> - **(b)** Generalize [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) to accept either full or reduced structures
+> - **(c)** Keep FOM-level concatenation separate (as it is now) and only expose [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) through the ROM path
+>
+> Option (a) is elegant but creates huge dense matrices. Option (c) is the pragmatic current approach.
+
+---
+
+## Recommended Refactored Hierarchy
+
+Based on the analysis, here's a hierarchy that resolves all contradictions:
+
+```mermaid
+graph TD
+    FDS["FrequencyDomainSolver"]
+    
+    subgraph "Single Solid"
+        FDS -->|".fom (after solve)"| FOM["FOM: Z, S, eigenmodes"]
+        FOM -->|".reduce(tol=...)"| MOR1["ModelOrderReduction"]
+        MOR1 -->|".solve(fmin, fmax, n)"| MOR1
+        MOR1 -->|".get_eigenvalues()"| EV1["eigenvalues"]
+    end
+    
+    subgraph "Multi Solid"
+        FDS -->|".foms (after solve, per_domain)"| FOMS["FOMCollection"]
+        FOMS -->|".reduce(tol=...)"| ROMS["ROMCollection + shared MOR"]
+        FOMS -->|".concatenate()"| FOMConcat["ConcatResult (FOM-level Z concat)"]
+        ROMS -->|".concatenate()"| CS["ConcatenatedSystem"]
+        CS -->|".solve(fmin, fmax, n)"| CS
+        CS -->|".get_eigenvalues()"| EV2["eigenvalues"]
+        FOMConcat -->|".reduce()"| MOR2["ModelOrderReduction"]
+    end
+```
+
+**Key changes from current state:**
+1. Replace `.rom` property with explicit `.reduce()` method on [FOMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#40-145) and [FOMCollection](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#329-556)
+2. Replace `.concat` property with explicit `.concatenate()` method
+3. Remove [ROMResult](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/results.py#151-218) as a top-level navigation node — users interact directly with [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) and [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624)
+4. Delete cascade method entirely
+5. Add guards: `fds.fom.concatenate()` → warning; `fds.foms[i].reduce()` works per-solid
+6. Keep FOM-level concatenation separate from ROM-level [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) (option c above)
+
+**What stays the same:**
+- [ModelOrderReduction](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#13-1027) as the active ROM object with [reduce()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#411-542), [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797), [concatenate()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/reduction.py#671-716)
+- [ConcatenatedSystem](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#31-624) as the active coupled-ROM object with [couple()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/concatenation.py#294-348), [solve()](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/frequency_domain.py#650-797)
+- [EigenMixinBase](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/solvers/eigen_mixin.py#18-807) for eigenvalue computation across all types
+- [ReducedStructure](file:///c:/Users/Soske/Documents/git_projects/cavsim3d/rom/structures.py#8-108) as the data container for ROM→concatenation handoff

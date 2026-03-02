@@ -246,5 +246,59 @@ class TestConcatenation:
         )
 
 
+class TestIterativeSolver:
+    """Test iterative (GMRES) solver path."""
+
+    @pytest.fixture
+    def rwg_geometry(self):
+        """Create standard test geometry."""
+        a = 100e-3   # 100 mm width
+        L = 200e-3   # 200 mm length
+        maxh = 0.04  # Mesh size
+        return RectangularWaveguide(a=a, L=L, maxh=maxh)
+
+    def test_iterative_solver_completes(self, rwg_geometry):
+        """Iterative solver should complete without crash and produce finite S-params."""
+        fds = FrequencyDomainSolver(rwg_geometry, order=3)
+        fds.assemble_matrices(nportmodes=2)
+
+        # Small sweep -- enough to cover above-cutoff (indefinite) regime
+        result = fds.solve(
+            fmin=0.1, fmax=3, nsamples=10,
+            store_snapshots=False,
+            solver_type='iterative',
+        )
+
+        # Basic sanity: result exists and S-params are finite
+        assert result is not None
+        S = fds.get_param('S', '1(1)1(1)')
+        assert S is not None
+        assert len(S) == 10
+        assert np.all(np.isfinite(S)), "S-parameters contain NaN/Inf"
+
+    def test_iterative_vs_direct(self, rwg_geometry):
+        """Iterative and direct solves should produce similar S-parameters."""
+        fmin, fmax, nf = 1.6, 2.5, 10  # above cutoff only
+
+        # Direct solve (reference)
+        fds_d = FrequencyDomainSolver(rwg_geometry, order=3)
+        fds_d.assemble_matrices(nportmodes=1)
+        fds_d.solve(fmin, fmax, nf, store_snapshots=False, solver_type='direct')
+
+        # Iterative solve
+        fds_i = FrequencyDomainSolver(rwg_geometry, order=3)
+        fds_i.assemble_matrices(nportmodes=1)
+        fds_i.solve(fmin, fmax, nf, store_snapshots=False, solver_type='iterative')
+
+        S11_d = fds_d.get_param('S', '1(1)1(1)')
+        S11_i = fds_i.get_param('S', '1(1)1(1)')
+
+        # Relative error should be small (< 5 %)
+        rel_err = np.max(np.abs(S11_d - S11_i) / (np.abs(S11_d) + 1e-30))
+        assert rel_err < 0.05, (
+            f"Iterative vs direct S11 max relative error: {rel_err:.2%}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

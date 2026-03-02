@@ -213,8 +213,15 @@ class STEPImporter(BaseGeometry):
         self._plane_corners = []  # Store corner coordinates for reference
         self._is_split = False
 
+        # Set source link for geometry linking
+        self._source_link = str(filepath)
+
         # Load the raw OCC shape
         self._load_occ_shape()
+
+        # Record import in history
+        self._record('import_step', filepath=str(filepath), unit=unit,
+                     auto_build=auto_build, maxh=maxh)
 
         # Auto-build if requested
         if auto_build:
@@ -357,6 +364,11 @@ class STEPImporter(BaseGeometry):
         self._planes.append(face)
         self._plane_corners.append((corner1, corner2, normal_axis))
 
+        # Record in history
+        self._record('add_splitting_plane',
+                     corner1=list(corner1), corner2=list(corner2),
+                     normal_axis=normal_axis)
+
         return self
 
     def add_splitting_plane_at_x(
@@ -457,23 +469,25 @@ class STEPImporter(BaseGeometry):
 
     def split(self) -> 'STEPImporter':
         """
-        Split geometry using added planes.
+        Split geometry using added planes, then auto-rebuild.
+
+        After splitting, :meth:`build` is called automatically so that
+        solids, ports, and wall boundaries are named deterministically.
+        Call :meth:`generate_mesh` next.
 
         Returns
         -------
         self : STEPImporter
             Returns self for method chaining
         """
-        if self.geo is not None:
-            raise RuntimeError(
-                "Cannot split after build(). "
-                "Use auto_build=False in constructor."
-            )
-
         if not self._planes:
             raise ValueError(
                 "No splitting planes added. Use add_splitting_plane() first."
             )
+
+        # Reset geometry if re-splitting
+        self.geo = None
+        self._bc_explicitly_set = False
 
         splitter = BOPAlgo_Splitter()
         splitter.SetNonDestructive(False)
@@ -485,6 +499,12 @@ class STEPImporter(BaseGeometry):
         splitter.Perform()
         self._occ_shape = splitter.Shape()
         self._is_split = True
+
+        # Record in history
+        self._record('split')
+
+        # Auto-rebuild: build() will name solids, ports, and walls
+        self.build()
 
         return self
 
@@ -507,6 +527,12 @@ class STEPImporter(BaseGeometry):
         This converts the internal OCC shape to an NGSolve-compatible
         OCCGeometry object. If the geometry was split, solids are
         glued together for proper mesh connectivity.
+
+        After building:
+        - All faces are named ``'wall'``
+        - If split: solids are named ``cell_1``, ``cell_2``, etc. and
+          port faces are named ``port1``, ``port2``, etc.
+        - ``self.bc`` is set to ``'wall'``
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
@@ -526,6 +552,18 @@ class STEPImporter(BaseGeometry):
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+        # --- Deterministic boundary naming ---
+        # Step 1: Name ALL faces 'wall'
+        self._name_all_faces_wall()
+
+        # Step 2: If split, auto-name solids and ports
+        if self._is_split:
+            self._auto_name_split_geometry()
+
+        # Step 3: Set boundary condition
+        self.bc = 'wall'
+        self._bc_explicitly_set = True
 
     def finalize(self, maxh: Optional[float] = None) -> 'STEPImporter':
         """
@@ -548,6 +586,8 @@ class STEPImporter(BaseGeometry):
 
         self.build()
         self.generate_mesh(maxh=self.maxh)
+
+        self._record('finalize', maxh=self.maxh)
         return self
 
     # ==================== OCC VISUALIZATION ====================
@@ -874,26 +914,26 @@ class STEPImporter(BaseGeometry):
             print_info: bool = False,
     ) -> 'STEPImporter':
         """
-        Name solids in the geometry (useful after splitting).
+        Name solids in the geometry.
+
+        .. deprecated::
+            For split geometries, :meth:`split` now auto-names everything.
+            For single-solid, use :meth:`define_ports` instead.
+            This method is kept for backward compatibility.
 
         Solids are sorted by their centroid position along the specified axis
         before naming, ensuring consistent port assignment regardless of
         internal OCC ordering.
 
-        For n solids, creates n+1 ports numbered sequentially:
-        - port1: external (Min face of first solid)
-        - port2, port3, ..., port_n: internal interfaces
-        - port_{n+1}: external (Max face of last solid)
-
         Parameters
         ----------
         naming_func : callable, optional
-            Function that takes (index, solid) and returns a material name string.
-            Default names solids as 'cell_1', 'cell_2', etc.
+            Function that takes (index, solid) and returns a material name.
+            Default: 'cell_1', 'cell_2', etc.
         sort_axis : str
-            Axis to sort solids by ('X', 'Y', or 'Z'). Default 'Z'.
+            Axis to sort solids by. Default 'Z'.
         port_axis : str, optional
-            Axis for port faces. Defaults to same as sort_axis.
+            Axis for port faces. Defaults to sort_axis.
         port_prefix : str
             Prefix for port names. Default 'port'.
 
@@ -903,6 +943,83 @@ class STEPImporter(BaseGeometry):
         """
         if self.geo is None:
             raise ValueError("Geometry not built. Call build() first.")
+
+        # Step 1: Name all faces 'wall' first
+        self._name_all_faces_wall()
+
+        # Step 2: Name solids and ports
+        self._auto_name_split_geometry(
+            sort_axis=sort_axis,
+            port_axis=port_axis,
+            port_prefix=port_prefix,
+            naming_func=naming_func,
+            print_info=print_info,
+        )
+
+        # Step 3: Set boundary condition
+        self.bc = 'wall'
+        self._bc_explicitly_set = True
+
+        self._record('name_solids', sort_axis=sort_axis, port_axis=port_axis,
+                     port_prefix=port_prefix, print_info=print_info)
+
+        return self
+
+    # ==================== INTERNAL NAMING HELPERS ====================
+
+    def _name_all_faces_wall(self) -> None:
+        """
+        Name every face on the geometry ``'wall'``.
+
+        Called from :meth:`build` before port assignment, so that all
+        non-port boundaries have a deterministic PEC-compatible name.
+        """
+        if self.geo is None:
+            return
+
+        try:
+            solids = list(self.geo.solids)
+            for solid in solids:
+                for face in solid.faces:
+                    face.name = 'wall'
+        except AttributeError:
+            # Single OCC shape without .solids
+            try:
+                for face in self.geo.faces:
+                    face.name = 'wall'
+            except AttributeError:
+                pass
+
+    def _auto_name_split_geometry(
+            self,
+            sort_axis: str = 'Z',
+            port_axis: str = None,
+            port_prefix: str = 'port',
+            naming_func=None,
+            print_info: bool = True,
+    ) -> None:
+        """
+        Name solids and ports for a split geometry.
+
+        Solids are sorted by centroid along *sort_axis* and named
+        ``cell_1``, ``cell_2``, …  Port faces are named sequentially
+        ``port1``, ``port2``, …  All other faces remain ``'wall'``.
+
+        Parameters
+        ----------
+        sort_axis : str
+            Axis to sort solids by ('X', 'Y', 'Z').
+        port_axis : str, optional
+            Axis for port faces.  Defaults to *sort_axis*.
+        port_prefix : str
+            Prefix for port names.
+        naming_func : callable, optional
+            ``(index, solid) -> str`` for material names.
+        print_info : bool
+            Print naming summary.
+        """
+        if self.geo is None:
+            return
 
         if naming_func is None:
             naming_func = lambda i, s: f"cell_{i + 1}"
@@ -914,9 +1031,9 @@ class STEPImporter(BaseGeometry):
         axis_index = {'X': 0, 'Y': 1, 'Z': 2}
 
         if sort_axis.upper() not in axis_map:
-            raise ValueError(f"Invalid sort_axis: {sort_axis}. Use 'X', 'Y', or 'Z'.")
+            raise ValueError(f"Invalid sort_axis: {sort_axis}")
         if port_axis.upper() not in axis_map:
-            raise ValueError(f"Invalid port_axis: {port_axis}. Use 'X', 'Y', or 'Z'.")
+            raise ValueError(f"Invalid port_axis: {port_axis}")
 
         ax = axis_map[port_axis.upper()]
         sort_idx = axis_index[sort_axis.upper()]
@@ -926,76 +1043,49 @@ class STEPImporter(BaseGeometry):
             n_solids = len(solids)
 
             if n_solids <= 1:
-                # Single solid case
+                # Single solid — name material, assign 2 ports
                 solid = solids[0] if n_solids == 1 else self.geo
                 solid.mat(naming_func(0, solid))
                 solid.faces.Min(ax).name = f'{port_prefix}1'
                 solid.faces.Max(ax).name = f'{port_prefix}2'
-                print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
-                return self
+                if print_info:
+                    print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
+                return
 
-            # Sort solids by centroid position along the specified axis
+            # Sort solids by centroid position along sort_axis
             def get_solid_centroid(solid):
-                """Get centroid of solid's bounding box."""
                 bb = solid.bounding_box
                 pmin, pmax = bb
-                centroid = [(pmin[i] + pmax[i]) / 2 for i in range(3)]
-                return centroid[sort_idx]
+                return (pmin[sort_idx] + pmax[sort_idx]) / 2
 
-            # Create list of (centroid_position, original_index, solid)
             solids_with_pos = [(get_solid_centroid(s), i, s) for i, s in enumerate(solids)]
-
-            # Sort by position
             solids_with_pos.sort(key=lambda x: x[0])
 
-            if print_info:
-                print(f"\nSolid ordering along {sort_axis}-axis:")
-                print("-" * 50)
-
             # Name solids and ports in sorted order
-            # Pattern: solid i (0-indexed) has Min face = port{i+1}, Max face = port{i+2}
             for new_idx, (pos, orig_idx, solid) in enumerate(solids_with_pos):
                 mat_name = naming_func(new_idx, solid)
                 solid.mat(mat_name)
 
-                # Port numbers for this solid
                 min_port_num = new_idx + 1
                 max_port_num = new_idx + 2
 
-                # Determine if ports are external or internal
-                is_first = (new_idx == 0)
-                is_last = (new_idx == n_solids - 1)
-
-                min_type = "external" if is_first else "internal"
-                max_type = "external" if is_last else "internal"
-
-                # Name the faces
                 solid.faces.Min(ax).name = f'{port_prefix}{min_port_num}'
                 solid.faces.Max(ax).name = f'{port_prefix}{max_port_num}'
 
-                if print_info:
-                    print(f"  {mat_name}: centroid {sort_axis}={pos:.6f} (orig idx {orig_idx})")
-                    print(f"    -> Min({port_axis}): {port_prefix}{min_port_num} ({min_type})")
-                    print(f"    -> Max({port_axis}): {port_prefix}{max_port_num} ({max_type})")
-
             if print_info:
-                print("-" * 50)
-                print(f"Named {n_solids} solids")
-                print(f"Total ports: {n_solids + 1}")
+                print(f"Named {n_solids} solids, {n_solids + 1} ports")
                 print(f"  External: {port_prefix}1, {port_prefix}{n_solids + 1}")
-            if n_solids > 1:
-                internal_ports = ", ".join([f"{port_prefix}{i}" for i in range(2, n_solids + 1)])
-                if print_info:
-                    print(f"  Internal: {internal_ports}")
+                if n_solids > 1:
+                    internal = ', '.join(f"{port_prefix}{i}" for i in range(2, n_solids + 1))
+                    print(f"  Internal: {internal}")
 
         except AttributeError:
             # Fallback for geometry without .solids attribute
             self.geo.mat(naming_func(0, self.geo))
             self.geo.faces.Min(ax).name = f'{port_prefix}1'
             self.geo.faces.Max(ax).name = f'{port_prefix}2'
-            print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
-
-        return self
+            if print_info:
+                print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
 
     def name_faces_by_position(
             self,
@@ -1070,6 +1160,113 @@ class STEPImporter(BaseGeometry):
         """Number of splitting planes."""
         return len(self._planes)
 
+    # === Persistence ===
+
+    def save_geometry(self, project_path) -> None:
+        """
+        Save STEPImporter geometry to project.
+
+        Copies the source STEP file and writes the history so that
+        the geometry can be reconstructed on load.
+        """
+        from pathlib import Path as _Path
+        project_path = _Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy source STEP file
+        source_hash = None
+        source_filename = None
+        src = _Path(self.filepath)
+        if src.exists():
+            source_filename = f'source_model{src.suffix}'
+            dest = geo_dir / source_filename
+            import shutil
+            shutil.copy2(str(src), str(dest))
+            source_hash = self._file_hash(dest)
+            self._source_hash = source_hash
+
+        # Build history JSON — rewrite filepath to project-relative
+        history_for_save = []
+        for entry in self._history:
+            e = dict(entry)
+            if e.get('op') == 'import_step' and source_filename:
+                e['filepath'] = f'geometry/{source_filename}'
+            history_for_save.append(e)
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': str(self._source_link) if self._source_link else None,
+            'source_filename': source_filename,
+            'source_hash': source_hash,
+            'history': history_for_save,
+        }
+
+        import json
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)
+
+    @classmethod
+    def _rebuild_from_history(cls, history, project_path, source_file=None):
+        """
+        Reconstruct a STEPImporter by replaying its operation history.
+        """
+        from pathlib import Path as _Path
+        project_path = _Path(project_path)
+
+        geo = None
+        for entry in history:
+            op = entry['op']
+
+            if op == 'import_step':
+                # Resolve filepath: use project-local copy
+                filepath = str(source_file) if source_file else entry['filepath']
+                # If filepath is project-relative, resolve it
+                fp = _Path(filepath)
+                if not fp.is_absolute():
+                    fp = project_path / fp
+                geo = cls(
+                    filepath=str(fp),
+                    unit=entry.get('unit', 'mm'),
+                    auto_build=False,
+                    maxh=entry.get('maxh'),
+                )
+
+            elif op == 'add_splitting_plane' and geo is not None:
+                geo.add_splitting_plane(
+                    corner1=tuple(entry['corner1']),
+                    corner2=tuple(entry['corner2']),
+                    normal_axis=entry.get('normal_axis', 'auto'),
+                )
+
+            elif op == 'split' and geo is not None:
+                geo.split()
+
+            elif op == 'finalize' and geo is not None:
+                geo.finalize(maxh=entry.get('maxh'))
+
+            elif op == 'name_solids' and geo is not None:
+                geo.name_solids(
+                    sort_axis=entry.get('sort_axis', 'Z'),
+                    port_axis=entry.get('port_axis'),
+                    port_prefix=entry.get('port_prefix', 'port'),
+                    print_info=entry.get('print_info', False),
+                )
+
+            elif op == 'generate_mesh' and geo is not None:
+                geo.generate_mesh(
+                    maxh=entry.get('maxh'),
+                    curve_order=entry.get('curve_order', 3),
+                )
+
+            # Other ops (build, etc.) are handled implicitly by split/finalize
+
+        if geo is None:
+            raise ValueError("History does not contain an 'import_step' operation.")
+
+        return geo
+
 
 # ==================== GMSH IMPORTER (unchanged, but add show_occ compatibility) ====================
 
@@ -1103,7 +1300,14 @@ class GMSHImporter(BaseGeometry):
         self._boundary_map = {}
         self._2d_shape = None
 
+        # Set source link for geometry linking
+        self._source_link = str(filepath)
+
         self._load()
+
+        # Record import in history
+        self._record('import_gmsh', filepath=str(filepath), revolve=revolve,
+                     auto_build=auto_build, maxh=maxh)
 
         if auto_build:
             self.build()
@@ -1190,6 +1394,77 @@ class GMSHImporter(BaseGeometry):
     def boundary_map(self) -> dict:
         """Get mapping of line IDs to boundary names from GMSH."""
         return self._boundary_map.copy()
+
+    # === Persistence ===
+
+    def save_geometry(self, project_path) -> None:
+        """Save GMSHImporter geometry to project."""
+        from pathlib import Path as _Path
+        import shutil as _shutil
+        import json as _json
+
+        project_path = _Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        source_hash = None
+        source_filename = None
+        src = _Path(self.filepath)
+        if src.exists():
+            source_filename = f'source_model{src.suffix}'
+            dest = geo_dir / source_filename
+            _shutil.copy2(str(src), str(dest))
+            source_hash = self._file_hash(dest)
+            self._source_hash = source_hash
+
+        history_for_save = []
+        for entry in self._history:
+            e = dict(entry)
+            if e.get('op') == 'import_gmsh' and source_filename:
+                e['filepath'] = f'geometry/{source_filename}'
+            history_for_save.append(e)
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': str(self._source_link) if self._source_link else None,
+            'source_filename': source_filename,
+            'source_hash': source_hash,
+            'history': history_for_save,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            _json.dump(meta, f, indent=2, default=str)
+
+    @classmethod
+    def _rebuild_from_history(cls, history, project_path, source_file=None):
+        """Reconstruct a GMSHImporter by replaying its operation history."""
+        from pathlib import Path as _Path
+        project_path = _Path(project_path)
+
+        geo = None
+        for entry in history:
+            op = entry['op']
+            if op == 'import_gmsh':
+                filepath = str(source_file) if source_file else entry['filepath']
+                fp = _Path(filepath)
+                if not fp.is_absolute():
+                    fp = project_path / fp
+                geo = cls(
+                    filepath=str(fp),
+                    revolve=entry.get('revolve', False),
+                    auto_build=False,
+                    maxh=entry.get('maxh', 0.05),
+                )
+            elif op == 'generate_mesh' and geo is not None:
+                geo.generate_mesh(
+                    maxh=entry.get('maxh'),
+                    curve_order=entry.get('curve_order', 3),
+                )
+
+        if geo is None:
+            raise ValueError("History does not contain an 'import_gmsh' operation.")
+        return geo
 
 
 class TESLACavity(GMSHImporter):
