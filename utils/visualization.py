@@ -288,35 +288,89 @@ class DataExtractor:
             return source.get('frequencies')
 
     @staticmethod
-    def extract_eigenvalues(
-        source: Any,
-        domain: str = None,
-        filter_static: bool = True,
-        min_eigenvalue: float = 1.0,
-        n_modes: int = None
+    def extract_resonant_frequencies(
+            source: Any,
+            n_modes: int = None,
+            domain: str = None,
+            filter_static: bool = True,
+            min_eigenvalue: float = 1.0,
+            boundary_type: str = 'PEC'
     ) -> Optional[np.ndarray]:
         """
-        Extract eigenvalues from source.
+        Extract resonant frequencies from source.
 
         Parameters
         ----------
-        source : solver or analytical
-            Data source with get_eigenvalues() method
+        source : solver, analytical, or object with get_resonant_frequencies
+        n_modes : int, optional
+            Number of modes to return
         domain : str, optional
             Specific domain or 'global'
         filter_static : bool
-            If True (default), remove static modes
+            If True (default), remove static modes from numerical sources
         min_eigenvalue : float
             Threshold for static mode filtering
-        n_modes : int, optional
-            Maximum number of eigenvalues to return
+        boundary_type : str
+            'PEC' or 'PMC' boundary conditions (for analytical sources)
 
         Returns
         -------
-        eigenvalues : ndarray or None
-            Eigenvalues (ω² values), sorted and filtered
+        frequencies : ndarray or None
+            Resonant frequencies in Hz
         """
         try:
+            source_type = DataExtractor.get_source_type(source)
+
+            # For analytical sources, prefer all_eigenfrequencies with boundary_type
+            if source_type == 'analytical':
+                if hasattr(source, 'all_eigenfrequencies'):
+                    import inspect
+                    sig = inspect.signature(source.all_eigenfrequencies)
+                    params = sig.parameters
+
+                    kwargs = {
+                        'n_modes': n_modes or 100,
+                        'return_format': 'array'
+                    }
+                    if 'boundary_type' in params:
+                        kwargs['boundary_type'] = boundary_type
+
+                    freqs = source.all_eigenfrequencies(**kwargs)
+                    if freqs is not None and n_modes is not None:
+                        freqs = freqs[:n_modes]
+                    return freqs
+
+                # Fallback to resonant_frequencies (legacy)
+                elif hasattr(source, 'resonant_frequencies'):
+                    freqs = source.resonant_frequencies(n_modes or 100)
+                    if n_modes is not None and freqs is not None:
+                        freqs = freqs[:n_modes]
+                    return freqs
+
+            # For solver sources, try get_resonant_frequencies
+            if hasattr(source, 'get_resonant_frequencies'):
+                import inspect
+                sig = inspect.signature(source.get_resonant_frequencies)
+                params = list(sig.parameters.keys())
+
+                kwargs = {}
+                if 'n_modes' in params:
+                    kwargs['n_modes'] = n_modes
+                if 'domain' in params:
+                    kwargs['domain'] = domain
+                if 'filter_static' in params:
+                    kwargs['filter_static'] = filter_static
+                if 'min_eigenvalue' in params:
+                    kwargs['min_eigenvalue'] = min_eigenvalue
+
+                freqs = source.get_resonant_frequencies(**kwargs)
+
+                if freqs is not None and n_modes is not None:
+                    freqs = freqs[:n_modes]
+
+                return freqs
+
+            # Fall back to eigenvalues
             if hasattr(source, 'get_eigenvalues'):
                 import inspect
                 sig = inspect.signature(source.get_eigenvalues)
@@ -334,19 +388,25 @@ class DataExtractor:
 
                 eigs = source.get_eigenvalues(**kwargs)
 
-                # Handle dict return
                 if isinstance(eigs, dict):
                     if 'global' in eigs:
                         eigs = eigs['global']
                     else:
                         eigs = np.concatenate(list(eigs.values()))
 
-                return eigs
+                if eigs is not None and len(eigs) > 0:
+                    eigs_pos = eigs[eigs > 0]
+                    freqs = np.sqrt(eigs_pos) / (2 * np.pi)
+                    freqs = np.sort(freqs)
+                    if n_modes is not None:
+                        freqs = freqs[:n_modes]
+                    return freqs
 
             return None
 
         except Exception as e:
-            print(f"Warning: Could not extract eigenvalues: {e}")
+            print(f"Warning: Could not extract resonant frequencies from "
+                  f"{type(source).__name__}: {e}")
             return None
 
     @staticmethod
@@ -378,6 +438,21 @@ class DataExtractor:
             Resonant frequencies in Hz
         """
         try:
+            if hasattr(source, 'all_eigenfrequencies'):
+                import inspect
+                sig = inspect.signature(source.all_eigenfrequencies)
+                params = sig.parameters
+
+                kwargs = {
+                    'n_modes': n_modes or 100,
+                    'return_format': 'array'
+                }
+
+                freqs = source.all_eigenfrequencies(**kwargs)
+                if freqs is not None and n_modes is not None:
+                    freqs = freqs[:n_modes]
+                return freqs
+
             # Try get_resonant_frequencies first
             if hasattr(source, 'get_resonant_frequencies'):
                 import inspect
@@ -779,7 +854,7 @@ class EigenfrequencyPlotter:
                     marker=marker, edgecolor=color, label=label, s=70, facecolor='none', zorder=3
                 )
 
-        ax.set_xlabel('Mode Index')
+        ax.set_xlabel('Frequency (GHz)')
         ax.set_ylabel('Frequency (GHz)')
         ax.set_title(f'{title} (first {n_modes} modes)')
         ax.legend()

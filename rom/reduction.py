@@ -4,12 +4,13 @@ from typing import Tuple, Optional, Dict, List, Union
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
+from solvers.eigen_mixin import ROMEigenMixin
 
 from solvers.base import BaseEMSolver, ParameterConverter
 from rom.structures import ReducedStructure
 
 
-class ModelOrderReduction(BaseEMSolver):
+class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
     """
     POD-based Model Order Reduction for electromagnetic structures.
 
@@ -342,12 +343,12 @@ class ModelOrderReduction(BaseEMSolver):
         return np.linalg.eigvalsh(self._A_r_global)
 
     def get_resonant_frequencies(
-        self,
-        domain: str = None,
-        n_modes: int = None,
-        source: str = 'auto',
-        filter_static: bool = True,
-        min_eigenvalue: float = None
+            self,
+            domain: str = None,
+            n_modes: int = None,
+            source: str = 'auto',
+            fmin: float = None,
+            filter_static: bool = True
     ) -> np.ndarray:
         """
         Get resonant frequencies from eigenvalues.
@@ -359,17 +360,31 @@ class ModelOrderReduction(BaseEMSolver):
         n_modes : int, optional
             Number of modes to return (sorted by frequency)
         source : str
-            Same as get_eigenvalues()
+            Same as get_eigenvalues():
+            - 'auto': Returns global if available, else single domain
+            - 'global': Returns only global eigenvalues
+            - 'per_domain': Returns dict of per-domain eigenvalues
+            - 'all': Returns dict with both global and per-domain
+        fmin : float, optional
+            Minimum frequency in GHz. Modes below this are filtered out.
+            Default: ~0.16 MHz (corresponds to min_eigenvalue=1.0)
         filter_static : bool
-            If True (default), remove static modes
-        min_eigenvalue : float, optional
-            Threshold for static mode filtering
+            If True (default), remove static modes (f ≈ 0).
+            When fmin is specified, this is automatically True.
 
         Returns
         -------
         frequencies : ndarray
             Resonant frequencies in Hz, sorted ascending
         """
+        # Convert fmin (GHz) to min_eigenvalue (ω²)
+        if fmin is not None:
+            fmin_hz = fmin * 1e9
+            min_eigenvalue = (2 * np.pi * fmin_hz) ** 2
+            filter_static = True
+        else:
+            min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
+
         eigs = self.get_eigenvalues(
             domain=domain,
             source=source,
