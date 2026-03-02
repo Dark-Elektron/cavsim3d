@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union, Literal
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
+from solvers.eigen_mixin import FDSEigenMixin
 
 from ngsolve import (
     HCurl, BilinearForm, LinearForm, GridFunction, BND,
@@ -17,7 +18,7 @@ from solvers.base import BaseEMSolver, ParameterConverter
 from solvers.ports import PortEigenmodeSolver
 
 
-class FrequencyDomainSolver(BaseEMSolver):
+class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     """
     Frequency-domain solver for electromagnetic problems.
 
@@ -2206,12 +2207,11 @@ class FrequencyDomainSolver(BaseEMSolver):
         return results
 
     def get_resonant_frequencies(
-        self,
-        domain: str = None,
-        n_modes: int = None,
-        filter_static: bool = True,
-        min_eigenvalue: float = None,
-        sigma: float = None
+            self,
+            domain: str = None,
+            n_modes: int = None,
+            fmin: float = None,
+            filter_static: bool = True
     ) -> np.ndarray:
         """
         Get resonant frequencies from eigenvalues.
@@ -2222,12 +2222,12 @@ class FrequencyDomainSolver(BaseEMSolver):
             Specific domain or 'global'. Default: 'global' if available.
         n_modes : int, optional
             Number of modes to return
+        fmin : float, optional
+            Minimum frequency in GHz. Modes below this are filtered out.
+            Default: ~0.16 MHz (corresponds to min_eigenvalue=1.0)
         filter_static : bool
-            If True (default), remove static modes
-        min_eigenvalue : float, optional
-            Threshold for static mode filtering
-        sigma : float, optional
-            Shift for eigenvalue computation
+            If True (default), remove static modes (f ≈ 0).
+            When fmin is specified, this is automatically True.
 
         Returns
         -------
@@ -2241,11 +2241,27 @@ class FrequencyDomainSolver(BaseEMSolver):
             elif self.n_domains == 1:
                 domain = self.domains[0]
 
+        # Convert fmin (GHz) to min_eigenvalue (ω²)
+        # ω² = (2π * f)² where f is in Hz
+        if fmin is not None:
+            fmin_hz = fmin * 1e9
+            min_eigenvalue = (2 * np.pi * fmin_hz) ** 2
+            filter_static = True  # Implied when fmin is set
+        else:
+            min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
+
+        # Convert fmin to sigma for shift-invert (target slightly below fmin)
+        if fmin is not None:
+            # Use fmin as the shift point for eigenvalue search
+            sigma = (2 * np.pi * fmin * 1e9) ** 2
+        else:
+            sigma = None
+
         eigs = self.get_eigenvalues(
             domain=domain,
             filter_static=filter_static,
             min_eigenvalue=min_eigenvalue,
-            n_modes=None,  # Get all, filter after freq conversion
+            n_modes=None,  # Don't limit here, do it after freq conversion
             sigma=sigma
         )
 

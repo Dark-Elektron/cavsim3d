@@ -665,21 +665,14 @@ class RWGAnalytical:
         return results
 
     def all_eigenfrequencies(
-        self,
-        n_modes: int = 20,
-        max_index: int = 10,
-        return_format: str = 'dict'
+            self,
+            n_modes: int = 20,
+            max_index: int = 10,
+            return_format: str = 'dict',
+            boundary_type: str = 'PEC'
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
         """
         Compute all physical eigenfrequencies of the rectangular cavity.
-
-        This method computes eigenfrequencies for all valid modes (TE and TM)
-        by iterating over all (m, n, p) combinations and filtering out
-        non-physical modes where m=0 AND n=0.
-
-        Mode classification:
-        - TE modes: m or n can be 0 (but not both), p >= 0 (p=0 allowed for some)
-        - TM modes: m >= 1, n >= 1, p >= 1
 
         Parameters
         ----------
@@ -691,13 +684,13 @@ class RWGAnalytical:
             'dict': Return {mode_label: frequency} dict
             'list': Return [(frequency, k, mode_string, indices)] list
             'array': Return sorted frequency array
+        boundary_type : str
+            'PEC': Perfect Electric Conductor walls (standard)
+            'PMC': Perfect Magnetic Conductor walls
 
         Returns
         -------
-        Depending on return_format:
-            dict: {mode_label: frequency_Hz}
-            list: [(freq_Hz, k, mode_string, [(m,n,p), ...])]
-            array: ndarray of frequencies
+        Depending on return_format
         """
         # Pre-calculate squared constants
         pi_over_a_sq = (np.pi / self.a) ** 2
@@ -705,38 +698,49 @@ class RWGAnalytical:
         pi_over_L_sq = (np.pi / self.L) ** 2
 
         # Store unique eigenvalues with their mode indices
-        # Key: eigenvalue (k^2), Value: list of (m, n, p, mode_type) tuples
         eigenvalue_modes = {}
 
-        for m, n, p in itertools.product(range(max_index), repeat=3):
+        for m, n, p in itertools.product(range(max_index + 1), repeat=3):
             # Filter: Physical modes must have valid transverse indices
-            # TE modes: (m,n) != (0,0), at least one of m,n > 0
-            # TM modes: m >= 1, n >= 1
-
             if m == 0 and n == 0:
-                # No valid waveguide mode exists for (0,0) transverse indices
                 continue
 
             # Calculate eigenvalue k^2
             k_squared = (m ** 2 * pi_over_a_sq +
-                        n ** 2 * pi_over_b_sq +
-                        p ** 2 * pi_over_L_sq)
+                         n ** 2 * pi_over_b_sq +
+                         p ** 2 * pi_over_L_sq)
 
-            # Determine mode types for this (m, n, p)
+            # Skip zero frequency (k=0)
+            if k_squared == 0:
+                continue
+
             mode_types = []
 
-            # TE modes: require m or n > 0 (already satisfied by filter above)
-            # For TE_mnp, we need kc^2 = (m*pi/a)^2 + (n*pi/b)^2 > 0
-            # p can be 0 for TE modes (gives cutoff mode)
-            if m > 0 or n > 0:
-                mode_types.append('TE')
+            if boundary_type.upper() == 'PMC':
+                # PMC boundary conditions (dual of PEC)
+                # TE modes: m or n > 0, p >= 0 (p=0 IS allowed)
+                if m > 0 or n > 0:
+                    mode_types.append('TE')
 
-            # TM modes: require m >= 1 AND n >= 1 AND p >= 1
-            # TM modes have Ez != 0, which requires sin(m*pi*x/a)*sin(n*pi*y/b)*sin(p*pi*z/L)
-            if m >= 1 and n >= 1 and p >= 1:
-                mode_types.append('TM')
+                # TM modes: m >= 1, n >= 1, p >= 0 (p=0 allowed for PMC)
+                # But TM with p=0 gives trivial solution, so still need p >= 1
+                # Actually for PMC: TM modes need p >= 1 still
+                if m >= 1 and n >= 1 and p >= 1:
+                    mode_types.append('TM')
 
-            # Round to handle floating point precision
+            else:  # PEC (standard)
+                # TE modes: m or n > 0, p >= 1 for proper cavity mode
+                # (p=0 gives a cutoff mode, not a resonance)
+                if (m > 0 or n > 0) and p >= 0:
+                    mode_types.append('TE')
+
+                # TM modes: m >= 1, n >= 1, p >= 1
+                if m >= 1 and n >= 1 and p >= 1:
+                    mode_types.append('TM')
+
+            if not mode_types:
+                continue
+
             k_squared_rounded = round(k_squared, 10)
 
             if k_squared_rounded not in eigenvalue_modes:
@@ -766,7 +770,6 @@ class RWGAnalytical:
                 f = c0 * k / (2 * np.pi)
                 modes = eigenvalue_modes[k_sq]
 
-                # Format mode string
                 mode_strs = []
                 for m, n, p, mode_type in sorted(modes):
                     mode_strs.append(f"{mode_type}{m}{n}{p}")
@@ -786,7 +789,6 @@ class RWGAnalytical:
                 f = c0 * k / (2 * np.pi)
                 modes = eigenvalue_modes[k_sq]
 
-                # Create labels for each mode
                 for m, n, p, mode_type in modes:
                     label = f"{mode_type}{m}{n}{p}"
                     if label not in result_dict:

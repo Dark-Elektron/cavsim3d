@@ -14,10 +14,10 @@ Key fixes / improvements
 4) Robust linear algebra with pseudo-inverse
 """
 
-from typing import List, Tuple, Dict, Optional, Callable, Union
+from typing import List, Tuple, Dict, Optional, Callable, Union, Any
 import numpy as np
 import scipy.linalg as sl
-
+from solvers.eigen_mixin import ConcatEigenMixin
 from core.constants import Z0
 from solvers.base import BaseEMSolver
 from rom.structures import ReducedStructure
@@ -28,7 +28,7 @@ Conn = Tuple[Tuple[int, str], Tuple[int, str]]  # ((struct_idx, port_name), (str
 ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1) or (+1,+1)
 
 
-class ConcatenatedSystem(BaseEMSolver):
+class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
     """
     Coupled system of multiple reduced structures with multiple modes per port.
 
@@ -55,12 +55,15 @@ class ConcatenatedSystem(BaseEMSolver):
         self,
         structures: List[ReducedStructure],
         port_impedance_func: Optional[Callable[[str, int, float], complex]] = None,
+        solver_ref: Any = None,
     ):
         super().__init__()
 
         self.structures = structures
         self.n_structures = len(structures)
         self._port_impedance_func = port_impedance_func or self._default_impedance
+        # Store solver reference for field reconstruction
+        self._solver_ref = solver_ref
 
         # Validate consistent mode counts
         self._validate_mode_counts()
@@ -510,13 +513,41 @@ class ConcatenatedSystem(BaseEMSolver):
         raise KeyError(f"Domain '{domain}' not found. Available: {self.domains}")
 
     def get_resonant_frequencies(
-        self,
-        domain: str = None,
-        n_modes: int = None,
-        filter_static: bool = True,
-        min_eigenvalue: float = None
+            self,
+            domain: str = None,
+            n_modes: int = None,
+            fmin: float = None,
+            filter_static: bool = True
     ) -> np.ndarray:
-        """Get resonant frequencies from eigenvalues."""
+        """
+        Get resonant frequencies from eigenvalues.
+
+        Parameters
+        ----------
+        domain : str, optional
+            Specific domain or 'global'. Default is global (coupled system).
+        n_modes : int, optional
+            Number of modes to return (sorted by frequency)
+        fmin : float, optional
+            Minimum frequency in GHz. Modes below this are filtered out.
+            Default: ~0.16 MHz (corresponds to min_eigenvalue=1.0)
+        filter_static : bool
+            If True (default), remove static modes (f ≈ 0).
+            When fmin is specified, this is automatically True.
+
+        Returns
+        -------
+        frequencies : ndarray
+            Resonant frequencies in Hz, sorted ascending
+        """
+        # Convert fmin (GHz) to min_eigenvalue (ω²)
+        if fmin is not None:
+            fmin_hz = fmin * 1e9
+            min_eigenvalue = (2 * np.pi * fmin_hz) ** 2
+            filter_static = True
+        else:
+            min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
+
         eigs = self.get_eigenvalues(
             domain=domain,
             filter_static=filter_static,
