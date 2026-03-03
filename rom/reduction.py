@@ -743,6 +743,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
         else:
             raise ValueError("Must specify frequency range or call solve() first")
 
+        n_modes = self._n_modes_per_port or 1
         results = {}
 
         for domain in self.domains:
@@ -752,11 +753,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
             domain_ports = self.domain_port_map[domain]
             n_ports_domain = len(domain_ports)
 
-            n_freq = len(frequencies)
-            Z_d = np.zeros((n_freq, n_ports_domain, n_ports_domain), dtype=complex)
-            S_d = np.zeros((n_freq, n_ports_domain, n_ports_domain), dtype=complex)
+            # B_r columns = n_ports_domain * n_modes  (all port-mode combos)
+            n_pm = B_r.shape[1]
 
-            I_exc = np.eye(n_ports_domain)
+            n_freq = len(frequencies)
+            Z_d = np.zeros((n_freq, n_pm, n_pm), dtype=complex)
+            S_d = np.zeros((n_freq, n_pm, n_pm), dtype=complex)
+
+            I_exc = np.eye(n_pm)
 
             for k, freq in enumerate(frequencies):
                 omega = 2 * np.pi * freq
@@ -768,17 +772,26 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
 
                 Z_d[k] = 1j * B_r.T @ x_r
 
-                Z0_mat = np.diag([
-                    np.real(self._get_port_impedance(p, 0, freq))
-                    for p in domain_ports
-                ])
+                # Build impedance matrix for all port-mode combinations
+                Z0_diag = []
+                for p_idx, p in enumerate(domain_ports):
+                    for m in range(n_modes):
+                        Z0_diag.append(
+                            np.real(self._get_port_impedance(p, m, freq))
+                        )
+                Z0_mat = np.diag(Z0_diag)
                 S_d[k] = ParameterConverter.z_to_s(Z_d[k], Z0_mat)
 
+            # Build dicts with proper port(mode) keys
             Z_dict = {}
             S_dict = {}
-            for i in range(n_ports_domain):
-                for j in range(n_ports_domain):
-                    key = f'{i + 1}(1){j + 1}(1)'
+            for i in range(n_pm):
+                pi = i // n_modes + 1
+                mi = i % n_modes + 1
+                for j in range(n_pm):
+                    pj = j // n_modes + 1
+                    mj = j % n_modes + 1
+                    key = f'{pi}({mi}){pj}({mj})'
                     Z_dict[key] = Z_d[:, i, j]
                     S_dict[key] = S_d[:, i, j]
 
@@ -906,7 +919,6 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
             ax.legend()
             ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
         return fig, axes
 
     def plot_eigenfrequencies(
@@ -945,7 +957,6 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
         return fig, ax
 
     def print_info(self) -> None:
