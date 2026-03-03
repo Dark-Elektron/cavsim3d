@@ -114,31 +114,57 @@ class ParameterConverter:
     @staticmethod
     def cascade_s_matrices(S1: np.ndarray, S2: np.ndarray) -> np.ndarray:
         """
-        Cascade two 2-port S-matrices.
+        Cascade two 2-port S-matrices (generalized for any number of modes).
 
         Parameters
         ----------
         S1 : ndarray
-            First 2-port S-matrix (2 x 2)
+            First 2-port S-matrix (size 2n x 2n)
         S2 : ndarray
-            Second 2-port S-matrix (2 x 2)
+            Second 2-port S-matrix (size 2m x 2m, usually n=m)
 
         Returns
         -------
         S : ndarray
-            Cascaded S-matrix (2 x 2)
+            Cascaded S-matrix (size 2n x 2n)
         """
-        S11_1, S12_1, S21_1, S22_1 = S1[0, 0], S1[0, 1], S1[1, 0], S1[1, 1]
-        S11_2, S12_2, S21_2, S22_2 = S2[0, 0], S2[0, 1], S2[1, 0], S2[1, 1]
+        # Dimensions: 2n x 2n. Split into n x n blocks.
+        n1 = S1.shape[0] // 2
+        n2 = S2.shape[0] // 2
 
-        denom = 1 - S22_1 * S11_2
+        S11_1 = S1[:n1, :n1]
+        S12_1 = S1[:n1, n1:]
+        S21_1 = S1[n1:, :n1]
+        S22_1 = S1[n1:, n1:]
 
-        S11 = S11_1 + S12_1 * S11_2 * S21_1 / denom
-        S12 = S12_1 * S12_2 / denom
-        S21 = S21_1 * S21_2 / denom
-        S22 = S22_2 + S21_2 * S22_1 * S12_2 / denom
+        S11_2 = S2[:n2, :n2]
+        S12_2 = S2[:n2, n2:]
+        S21_2 = S2[n2:, :n2]
+        S22_2 = S2[n2:, n2:]
 
-        return np.array([[S11, S12], [S21, S22]])
+        I1 = np.eye(n1, dtype=complex)
+        I2 = np.eye(n2, dtype=complex)
+
+        # Generalized cascade formulas
+        # S11 = S11_1 + S12_1 @ inv(I - S11_2 @ S22_1) @ S11_2 @ S21_1
+        # S12 = S12_1 @ inv(I - S11_2 @ S22_1) @ S12_2
+        # S21 = S21_2 @ inv(I - S22_1 @ S11_2) @ S21_1
+        # S22 = S22_2 + S21_2 @ inv(I - S22_1 @ S11_2) @ S22_1 @ S12_2
+
+        # Standard matrix cascade (T-matrix approach or direct block)
+        # We use the direct block inversion form:
+        inv1 = np.linalg.inv(I2 - S11_2 @ S22_1)
+        inv2 = np.linalg.inv(I1 - S22_1 @ S11_2)
+
+        S11_c = S11_1 + S12_1 @ inv1 @ S11_2 @ S21_1
+        S12_c = S12_1 @ inv1 @ S12_2
+        S21_c = S21_2 @ inv2 @ S21_1
+        S22_c = S22_2 + S21_2 @ inv2 @ S22_1 @ S12_2
+
+        # Combine into 2x2 block matrix
+        S_top = np.hstack([S11_c, S12_c])
+        S_bot = np.hstack([S21_c, S22_c])
+        return np.vstack([S_top, S_bot])
 
 
 class BaseEMSolver(ABC):

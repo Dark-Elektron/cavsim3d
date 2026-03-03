@@ -1,0 +1,472 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "4c9d4129fbe20446",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T09:01:58.193555Z",
+     "start_time": "2026-02-20T09:01:58.187678Z"
+    },
+    "collapsed": true,
+    "jupyter": {
+     "outputs_hidden": true
+    }
+   },
+   "source": [
+    "# Rectangular Waveguide Analysis\n",
+    "\n",
+    "This notebook demonstrates a complete rectangular waveguide analysis workflow:\n",
+    "\n",
+    "1. Geometry creation\n",
+    "2. Frequency-domain analysis\n",
+    "3. Model order reduction\n",
+    "4. Comparison with analytical solution"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "235fd022ed9a46ce",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T12:36:46.961460Z",
+     "start_time": "2026-02-20T12:36:46.042711Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "from utils.visualization import *\n",
+    "from geometry.primitives import RectangularWaveguide\n",
+    "from solvers.frequency_domain import FrequencyDomainSolver\n",
+    "from rom.reduction import ModelOrderReduction\n",
+    "from analytical.rectangular_waveguide import RWGAnalytical\n",
+    "\n",
+    "%matplotlib inline\n",
+    "plt.rcParams['figure.dpi'] = 100"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3946fc78eff70e0",
+   "metadata": {},
+   "source": [
+    "## 1. Define Geometry\n",
+    "\n",
+    "Create a rectangular waveguide with specified dimensions and mesh parameters."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "ac644f5124b0a9e7",
+   "metadata": {
+    "ExecuteTime": {
+     "end_time": "2026-02-20T12:36:47.001092Z",
+     "start_time": "2026-02-20T12:36:46.971838Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Dimensions: a=100mm, b=50mm, L=200mm\n",
+      "Cutoff frequency (TE10): 1.499 GHz\n",
+      "Mesh DOFs: ~48 vertices\n"
+     ]
+    },
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "aa6d4fb4d31643c29caad128fe113981",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(layout=Layout(height='50vh', width='100%'), value={'ngsolve_version': 'Netgen x.x', 'mesh_dim': 3…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# Waveguide parameters\n",
+    "a = 100e-3  # Width: 100 mm\n",
+    "L = 200e-3  # Length: 200 mm\n",
+    "maxh = 0.04  # Mesh size\n",
+    "\n",
+    "# Create waveguide geometry\n",
+    "rwg = RectangularWaveguide(a=a, L=L, maxh=maxh)\n",
+    "\n",
+    "print(f\"Dimensions: a={a * 1e3:.0f}mm, b={rwg.b * 1e3:.0f}mm, L={L * 1e3:.0f}mm\")\n",
+    "print(f\"Cutoff frequency (TE10): {rwg.cutoff_frequency_TE10 / 1e9:.3f} GHz\")\n",
+    "print(f\"Mesh DOFs: ~{rwg.mesh.nv} vertices\")\n",
+    "\n",
+    "rwg.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ee12b50a62ecb489",
+   "metadata": {},
+   "source": [
+    "## 2. Analytical Solution\n",
+    "\n",
+    "Compute the analytical Z-parameters for comparison with numerical results."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e58f24d673921315",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "analytical = RWGAnalytical(a=a, L=L)\n",
+    "frequencies = np.linspace(1.0, 3.0, 100) * 1e9\n",
+    "\n",
+    "Z_analytical = analytical.z_parameters(frequencies)\n",
+    "S_analytical = analytical.s_parameters(frequencies, Z0_ref='ZTE')  # Matched\n",
+    "\n",
+    "print(f\"Computed analytical Z and S parameters at {len(frequencies)} points\")\n",
+    "print(f\"Cutoff frequency: {analytical.fc/1e9:.4f} GHz\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c36e0506e37f6b1b",
+   "metadata": {},
+   "source": [
+    "## 3. Full-Order Numerical Solution\n",
+    "\n",
+    "Run a full-order finite element frequency sweep."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "8ad4ece818f39686",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Create solver with wave impedance enabled\n",
+    "solver = FrequencyDomainSolver(rwg, order=3, use_wave_impedance=True)\n",
+    "solver.assemble_matrices()\n",
+    "\n",
+    "print(f\"System size: {solver.M.shape[0]} DOFs\")\n",
+    "print(f\"Number of ports: {len(solver.port_modes)}\")\n",
+    "\n",
+    "# Print port info\n",
+    "solver.print_port_info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "4801bd8eb36a337e",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Solve with S-parameter computation\n",
+    "results = solver.solve(fmin=1.0, fmax=3.0, nsamples=30,\n",
+    "                       store_snapshots=True, compute_s_params=True)\n",
+    "\n",
+    "Z_full = results['Z']\n",
+    "S_full = results['S']\n",
+    "\n",
+    "print(f\"Solved at {len(Z_full['frequencies'])} frequency points\")\n",
+    "print(f\"Z-parameter keys: {[k for k in Z_full.keys() if k != 'frequencies']}\")\n",
+    "print(f\"S-parameter keys: {[k for k in S_full.keys() if k != 'frequencies']}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "10d922173ee3e167",
+   "metadata": {},
+   "source": [
+    "## 4. Model Order Reduction\n",
+    "\n",
+    "Build a reduced-order model using Proper Orthogonal Decomposition (POD)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "749e9adf71dfd806",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Build reduced-order model\n",
+    "rom = ModelOrderReduction(solver.M, solver.K, solver.B)\n",
+    "A_r, B_r, W = rom.reduce(solver.snapshots, tol=1e-6)\n",
+    "\n",
+    "print(f\"Original dimension: {solver.M.shape[0]}\")\n",
+    "print(f\"Reduced dimension: {rom.r}\")\n",
+    "print(f\"Compression ratio: {solver.M.shape[0] / rom.r:.1f}x\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "1d9f71c820b28e40",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Create wave impedance function from port solver\n",
+    "def wave_impedance_func(freq):\n",
+    "    return solver.port_solver.get_wave_impedance_matrix(freq)\n",
+    "\n",
+    "# Solve ROM\n",
+    "Z_reduced = rom.solve_reduced(frequencies, wave_impedance_func=wave_impedance_func)\n",
+    "\n",
+    "print(f\"ROM solved at {len(frequencies)} points\")\n",
+    "print(f\"Z shape: {Z_reduced['Z'].shape}\")\n",
+    "print(f\"S shape: {Z_reduced['S'].shape}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "747e48f8472d7177",
+   "metadata": {},
+   "source": [
+    "## 5. Comparison and Plotting\n",
+    "\n",
+    "Compare Z-parameters from analytical, full FEM, and ROM solutions."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "57531bf63f1a3201",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "plotter = ZParameterPlotter(figsize=(12, 10))\n",
+    "plotter.setup_figure()\n",
+    "plotter.plot_comparison(Z_analytical, Z_full, Z_reduced)\n",
+    "plt.suptitle('Z-Parameter Comparison', fontsize=14)\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b8db9836088e80c7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "plotter = SParameterPlotter(figsize=(12, 10))\n",
+    "plotter.setup_figure()\n",
+    "plotter.plot_comparison(S_analytical, S_full, Z_reduced)\n",
+    "plt.suptitle('S-Parameter Comparison', fontsize=14)\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "38176e98f1060ce9",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "79876f3f0d754101",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Plot wave impedance vs frequency\n",
+    "fig, ax = plt.subplots(figsize=(10, 5))\n",
+    "\n",
+    "# Numerical (from port solver)\n",
+    "ports = list(solver.port_modes.keys())\n",
+    "Zw_numerical = np.array([solver.port_solver.get_wave_impedance(ports[0], 0, f) for f in frequencies])\n",
+    "\n",
+    "# Analytical\n",
+    "Zw_analytical = analytical.wave_impedance(frequencies)\n",
+    "\n",
+    "ax.plot(frequencies/1e9, np.real(Zw_analytical), 'b-', label='Analytical Re(Zw)', lw=2)\n",
+    "ax.plot(frequencies/1e9, np.imag(Zw_analytical), 'b--', label='Analytical Im(Zw)', lw=2)\n",
+    "ax.plot(frequencies/1e9, np.real(Zw_numerical), 'ro', label='Numerical Re(Zw)', ms=4)\n",
+    "ax.plot(frequencies/1e9, np.imag(Zw_numerical), 'rs', label='Numerical Im(Zw)', ms=4)\n",
+    "\n",
+    "ax.axhline(377, color='gray', linestyle=':', label='η₀ = 377 Ω')\n",
+    "ax.axvline(analytical.fc/1e9, color='green', linestyle='--', label=f'fc = {analytical.fc/1e9:.3f} GHz')\n",
+    "\n",
+    "ax.set_xlabel('Frequency (GHz)')\n",
+    "ax.set_ylabel('Wave Impedance (Ω)')\n",
+    "ax.set_title('TE₁₀ Wave Impedance')\n",
+    "ax.legend()\n",
+    "ax.grid(True, alpha=0.3)\n",
+    "ax.set_ylim([-500, 1500])\n",
+    "\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d230e25146072c26",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Singular value decay plot\n",
+    "fig2, ax2 = plt.subplots(figsize=(8, 5))\n",
+    "\n",
+    "ConvergencePlotter.plot_singular_values(\n",
+    "    rom._singular_values,\n",
+    "    truncation_rank=rom.r,\n",
+    "    ax=ax2\n",
+    ")\n",
+    "\n",
+    "plt.title('POD Singular Value Decay')\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e69f70d00b02a073",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "id": "57386d93c9d11262",
+   "metadata": {},
+   "source": [
+    "## 6. Error Analysis\n",
+    "\n",
+    "Quantify the error between numerical solutions and the analytical reference."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "44715aaf36fb7390",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# ROM error\n",
+    "Z_ana_rom = analytical.z_parameters(Z_reduced['frequencies'])\n",
+    "Z11_rom = Z_reduced['Z'][:, 0, 0]\n",
+    "Z11_ana_rom = Z_ana_rom['Z11']\n",
+    "\n",
+    "rel_error_rom = np.abs(Z11_rom - Z11_ana_rom) / np.abs(Z11_ana_rom)\n",
+    "\n",
+    "print(\"ROM vs Analytical:\")\n",
+    "print(f\"   Mean relative error: {np.mean(rel_error_rom) * 100:.2f}%\")\n",
+    "print(f\"   Max relative error:  {np.max(rel_error_rom) * 100:.2f}%\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "40ba785f9a74689d",
+   "metadata": {},
+   "source": [
+    "## 7. Eigenfrequency Comparison\n",
+    "\n",
+    "Compare eigenfrequencies from the ROM with analytical values."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "da9747de4fa62133",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Get ROM eigenfrequencies\n",
+    "eigs_rom = rom.get_eigenvalues()\n",
+    "freqs_rom = np.sqrt(np.abs(eigs_rom)) / (2 * np.pi)\n",
+    "freqs_rom_ghz = freqs_rom / 1e9\n",
+    "\n",
+    "print(\"ROM eigenfrequencies (GHz):\")\n",
+    "for i, f in enumerate(sorted(freqs_rom_ghz)[:10]):\n",
+    "    print(f\"   Mode {i + 1}: {f:.4f} GHz\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b7d47252bf040461",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Get analytical eigenfrequencies\n",
+    "freqs_analytical = np.array(list(analytical.eigenfrequencies(n_modes=20).values())) / 1e9\n",
+    "\n",
+    "print(\"Analytical eigenfrequencies (GHz, first 10):\")\n",
+    "for i, f in enumerate(freqs_analytical[:10]):\n",
+    "    print(f\"   Mode {i + 1}: {f:.4f} GHz\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c8d6914bb46cbb21",
+   "metadata": {},
+   "source": [
+    "## Summary\n",
+    "\n",
+    "This analysis demonstrated:\n",
+    "- **Geometry creation** for a rectangular waveguide\n",
+    "- **Full-order FEM** frequency domain analysis\n",
+    "- **Model order reduction** using POD with significant compression\n",
+    "- **Validation** against analytical solutions\n",
+    "\n",
+    "The ROM provides accurate results with substantially reduced computational cost."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "23f3336fed3c5944",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Optional: Save figures to files\n",
+    "# Uncomment to save\n",
+    "\n",
+    "# fig.savefig('rwg_z_parameters.png', dpi=150, bbox_inches='tight')\n",
+    "# fig2.savefig('rwg_singular_values.png', dpi=150, bbox_inches='tight')\n",
+    "# print(\"Figures saved!\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ac0b05d5b298be6d",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.14"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
