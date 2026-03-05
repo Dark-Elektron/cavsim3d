@@ -64,6 +64,7 @@ class RectangularWaveguide(BaseGeometry):
 
         # Set boundary conditions (PEC on walls)
         self.bc = 'left|right|top|bottom'
+        self._bc_explicitly_set = True
 
     @property
     def cutoff_frequency_TE10(self) -> float:
@@ -115,6 +116,7 @@ class Box(BaseGeometry):
 
         self.geo.mat('vacuum')
         self.bc = 'left|right|top|bottom'
+        self._bc_explicitly_set = True
 
 
 class CircularWaveguide(BaseGeometry):
@@ -167,6 +169,7 @@ class CircularWaveguide(BaseGeometry):
 
         self.geo.mat('vacuum')
         self.bc = 'wall'
+        self._bc_explicitly_set = True
 
     @property
     def cutoff_frequency_TE11(self) -> float:

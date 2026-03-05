@@ -1,0 +1,238 @@
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+hcurl smoothingblocks, SmoothingType = 2
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+used dof inconsistency
+(silence this warning by setting BilinearForm(...check_unused=False) )
+=== Debugging Single-Solid Solver ===
+TE10 Cutoff: 1.4990 GHz
+
+============================================================
+Structure Topology
+============================================================
+Type: Single structure
+Domains (1): ['vacuum']
+Total Ports (2): ['port1', 'port2']
+
+Domain-Port Mapping:
+  vacuum: ['port1 (external, input)', 'port2 (external, output)']
+============================================================
+
+============================================================
+Assembling Matrices...
+============================================================
+
+Solving port eigenmodes...
+
+	============================================================
+	Calculating Port Eigenmodes...
+	============================================================
+	  Mode source: analytic
+	  Polarization angle: 0.0┬░
+	  Requested modes per port: 1
+	------------------------------------------------------------
+	  port1: rectangular (fit error: 0.0000)
+	    a=0.100000, b=0.050000
+	  port2: rectangular (fit error: 0.0000)
+	    a=0.100000, b=0.050000
+	  Precomputing boundary mass matrices (once per port)...
+	    Done for 2 port(s)
+	port1 mode 0: TE_10, kc=31.4159, ╧â=+1
+	port2 mode 0: TE_10, kc=31.4159, ╧â=-1
+	------------------------------------------------------------
+	Total modes: 2
+	============================================================
+
+--- Assembling Per-Domain Matrices ---
+
+Domain: vacuum
+  FES ndof: 1227
+  K shape: (1227, 1227), nnz: 62109
+  M shape: (1227, 1227), nnz: 62109
+  B shape: (1227, 2)
+
+--- Assembling Global Matrices (Coupled System) ---
+  Global FES ndof: 1227
+  K_global shape: (1227, 1227), nnz: 62109
+  M_global shape: (1227, 1227), nnz: 62109
+  B_global shape: (1227, 2)
+Solving FOM...
+
+============================================================
+Frequency Domain Solve Configuration
+============================================================
+Frequency range: 1.6489 - 2.2484 GHz
+Number of samples: 10
+Structure type: Single
+Per-domain solve: False
+Global method: coupled
+============================================================
+
+----------------------------------------
+Global Coupled Solve
+----------------------------------------
+  Iterative mode: precond='multigrid', tol=1e-06, maxsteps=5000
+  FES ndof: 1227
+  Frequency 1/10: 1.6489 GHz
+  Frequency 2/10: 1.7155 GHz
+  Frequency 3/10: 1.7821 GHz
+  Frequency 4/10: 1.8487 GHz
+  Frequency 5/10: 1.9153 GHz
+  Frequency 6/10: 1.9820 GHz
+  Frequency 7/10: 2.0486 GHz
+  Frequency 8/10: 2.1152 GHz
+  Frequency 9/10: 2.1818 GHz
+  Frequency 10/10: 2.2484 GHz
+
+Coupled solve complete: 2 external ports (total CG steps: 589)
+Solving ROM...
+
+============================================================
+Model Order Reduction
+============================================================
+
+Domain: vacuum
+  Using global snapshots (single-domain structure)
+  Full DOFs: 1227
+  Snapshots: 20
+  Reduced DOFs: 11
+  Compression: 99.1%
+  Singular value decay: 7.50e+04 ΓåÆ 1.88e-02
+
+------------------------------------------------------------
+Total: 1227 ΓåÆ 11 DOFs
+Overall compression: 99.1%
+============================================================
+
+Z-Parameter Comparison (at middle freq):
+Frequency: 1.9820 GHz
+  Z11 Analytical: -0.0000e+00 +5.0785e+02j
+  Z11 FOM:        +0.0000e+00 +4.7589e+02j
+  Z11 ROM:        +0.0000e+00 +4.7589e+02j
+  Z12 Analytical: -0.0000e+00 +7.6779e+02j
+  Z12 FOM:        +0.0000e+00 +7.4327e+02j
+  Z12 ROM:        +0.0000e+00 +7.4327e+02j
+  Z22 FOM:        +0.0000e+00 +4.7588e+02j
+
+Reciprocity Check (|Z12 - Z21|):
+  FOM Max Diff: 3.88e-06
+
+Relative Error vs Analytical (Z11):
+  FOM: 15.17%
+
+--- Assembling Global Matrices (Coupled System) ---
+  Global FES ndof: 1227
+  K_global shape: (1227, 1227), nnz: 62109
+  M_global shape: (1227, 1227), nnz: 62109
+  B_global shape: (1227, 2)
+
+Extraction Method Check (Last Freq, Port 1):
+  Integrate (Manual): -6.1524e+02 +0.0000e+00j
+  Matrix (B.T @ E):   -6.1524e+02 +0.0000e+00j
+  Z11_fom (solvent):  -0.0000e+00 -6.1524e+02j
+
+=== Checking Field Reconstruction ===
+
+============================================================
+Structure Topology
+============================================================
+Type: Single structure
+Domains (1): ['vacuum']
+Total Ports (2): ['port1', 'port2']
+
+Domain-Port Mapping:
+  vacuum: ['port1 (external, input)', 'port2 (external, output)']
+============================================================
+
+============================================================
+Assembling Matrices...
+============================================================
+
+Solving port eigenmodes...
+
+	============================================================
+	Calculating Port Eigenmodes...
+	============================================================
+	  Mode source: analytic
+	  Polarization angle: 0.0┬░
+	  Requested modes per port: 1
+	------------------------------------------------------------
+	  port1: rectangular (fit error: 0.0000)
+	    a=0.100000, b=0.050000
+	  port2: rectangular (fit error: 0.0000)
+	    a=0.100000, b=0.050000
+	  Precomputing boundary mass matrices (once per port)...
+	    Done for 2 port(s)
+	port1 mode 0: TE_10, kc=31.4159, ╧â=+1
+	port2 mode 0: TE_10, kc=31.4159, ╧â=-1
+	------------------------------------------------------------
+	Total modes: 2
+	============================================================
+
+--- Assembling Per-Domain Matrices ---
+
+Domain: vacuum
+  FES ndof: 615
+  K shape: (615, 615), nnz: 29601
+  M shape: (615, 615), nnz: 29601
+  B shape: (615, 2)
+
+--- Assembling Global Matrices (Coupled System) ---
+  Global FES ndof: 615
+  K_global shape: (615, 615), nnz: 29601
+  M_global shape: (615, 615), nnz: 29601
+  B_global shape: (615, 2)
+  Auto solver: 615 DOFs ΓåÆ 'direct' (threshold: 50000)
+  Frequency 1/1: 1.7988 GHz
+
+Coupled solve complete: 2 external ports
+
+============================================================
+Model Order Reduction
+============================================================
+
+Domain: vacuum
+  Using global snapshots (single-domain structure)
+  Full DOFs: 615
+  Snapshots: 2
+  Reduced DOFs: 2
+  Compression: 99.7%
+  Singular value decay: 6.83e+03 ΓåÆ 3.37e+03
+
+------------------------------------------------------------
+Total: 615 ΓåÆ 2 DOFs
+Overall compression: 99.7%
+============================================================
+Field reconstruction error: 2.84e-15

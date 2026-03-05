@@ -3,14 +3,16 @@ Unit tests for result wrapper objects.
 
 These tests use mock data — no NGSolve dependency required.
 They verify:
-  - FOMResult / ROMResult / ConcatResult expose correct Z_dict, S_dict, frequencies
+  - FOMResult / FOMCollection / ROMCollection expose correct Z_dict, S_dict, frequencies
   - PlotMixin.plot_s / plot_z return (fig, ax) and accept an existing ax
   - FOMCollection / ROMCollection indexing, len, iter
   - DataExtractor recognises new result types
+  - FOMResult.reduce() and .concatenate() guards
 """
 
 import numpy as np
 import pytest
+import warnings
 import matplotlib
 matplotlib.use('Agg')   # non-interactive backend for CI
 import matplotlib.pyplot as plt
@@ -19,7 +21,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from solvers.results import FOMResult, ROMResult, ConcatResult, FOMCollection, ROMCollection
+from solvers.results import FOMResult, FOMCollection, ROMCollection
 from utils.visualization import DataExtractor
 
 
@@ -64,23 +66,6 @@ def _make_fom(domain='default', n=50):
     )
 
 
-def _make_rom(domain='default', n=50):
-    freqs = _make_frequencies(n)
-    z = _make_z_dict(n)
-    s = {k: v * 0.5 for k, v in z.items() if k != 'frequencies'}
-    s['frequencies'] = freqs
-    return ROMResult(
-        domain=domain,
-        frequencies=freqs,
-        Z_matrix=None,
-        S_matrix=None,
-        Z_dict=z,
-        S_dict=s,
-        n_ports=2,
-        ports=['port1', 'port2'],
-    )
-
-
 # ---------------------------------------------------------------------------
 # FOMResult tests
 # ---------------------------------------------------------------------------
@@ -107,34 +92,22 @@ class TestFOMResult:
         assert 'FOMResult' in r
         assert 'default' in r
 
-    def test_rom_without_factory_raises(self):
+    def test_reduce_without_solver_raises(self):
+        """reduce() without a solver reference should raise RuntimeError."""
         fom = _make_fom()
-        with pytest.raises(RuntimeError, match="ROM factory"):
-            _ = fom.rom
+        with pytest.raises(RuntimeError, match="no solver reference"):
+            fom.reduce()
+
+    def test_concatenate_single_warns(self):
+        """concatenate() on single-solid FOM should warn."""
+        fom = _make_fom()
+        with pytest.warns(UserWarning, match="not available on a single FOMResult"):
+            result = fom.concatenate()
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
-# ROMResult tests
-# ---------------------------------------------------------------------------
-
-class TestROMResult:
-    def test_init(self):
-        rom = _make_rom()
-        assert rom.domain == 'default'
-        assert rom.n_ports == 2
-
-    def test_eigenvalues_without_ref_raises(self):
-        rom = _make_rom()
-        with pytest.raises(RuntimeError, match="Eigenvalues"):
-            rom.get_eigenvalues()
-
-    def test_repr(self):
-        rom = _make_rom()
-        assert 'ROMResult' in repr(rom)
-
-
-# ---------------------------------------------------------------------------
-# PlotMixin tests  (via FOMResult / ROMResult)
+# PlotMixin tests (via FOMResult)
 # ---------------------------------------------------------------------------
 
 class TestPlotMixin:
@@ -166,12 +139,12 @@ class TestPlotMixin:
         assert len(lines) >= 1
         plt.close(fig)
 
-    def test_plot_s_overlay_fom_rom(self):
-        """Verify overlaying FOM and ROM on the same axes."""
-        fom = _make_fom()
-        rom = _make_rom()
-        fig, ax = fom.plot_s(params=['1(1)1(1)'], label='FOM')
-        fig, ax = rom.plot_s(params=['1(1)1(1)'], ax=ax, label='ROM')
+    def test_plot_s_overlay_two_foms(self):
+        """Verify overlaying two FOMResults on the same axes."""
+        fom1 = _make_fom('domain_a')
+        fom2 = _make_fom('domain_b')
+        fig, ax = fom1.plot_s(params=['1(1)1(1)'], label='A')
+        fig, ax = fom2.plot_s(params=['1(1)1(1)'], ax=ax, label='B')
         lines = ax.get_lines()
         assert len(lines) == 2
         plt.close(fig)
@@ -216,23 +189,17 @@ class TestFOMCollection:
         assert 'x' in repr(coll)
         assert 'y' in repr(coll)
 
+    def test_reduce_without_fds_raises(self):
+        """reduce() without FDS reference should raise."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        with pytest.raises(RuntimeError, match="no reference"):
+            coll.reduce()
 
-# ---------------------------------------------------------------------------
-# ROMCollection tests
-# ---------------------------------------------------------------------------
-
-class TestROMCollection:
-    def test_indexing(self):
-        r0 = _make_rom('d0')
-        r1 = _make_rom('d1')
-        coll = ROMCollection([r0, r1])
-        assert coll[0].domain == 'd0'
-
-    def test_plot_z_overlays(self):
-        coll = ROMCollection([_make_rom('a'), _make_rom('b')])
-        fig, ax = coll.plot_z(params=['1(1)1(1)'])
-        assert len(ax.get_lines()) == 2
-        plt.close(fig)
+    def test_concatenate_without_fds_raises(self):
+        """concatenate() without FDS reference should raise."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        with pytest.raises(RuntimeError, match="no reference"):
+            coll.concatenate()
 
 
 # ---------------------------------------------------------------------------
@@ -244,17 +211,9 @@ class TestDataExtractorNewTypes:
         fom = _make_fom()
         assert DataExtractor.get_source_type(fom) == 'solver'
 
-    def test_rom_result_is_solver(self):
-        rom = _make_rom()
-        assert DataExtractor.get_source_type(rom) == 'solver'
-
     def test_fom_result_label(self):
         fom = _make_fom()
         assert DataExtractor.get_label(fom) == 'FOM'
-
-    def test_rom_result_label(self):
-        rom = _make_rom()
-        assert DataExtractor.get_label(rom) == 'ROM'
 
     def test_fom_result_style(self):
         fom = _make_fom()
@@ -266,50 +225,10 @@ class TestDataExtractorNewTypes:
         freqs, z = DataExtractor.extract_z_parameters(fom)
         assert len(z) == 50
 
-    def test_extract_s_from_rom_result(self):
-        rom = _make_rom()
-        freqs, s = DataExtractor.extract_s_parameters(rom)
+    def test_extract_s_from_fom_result(self):
+        fom = _make_fom()
+        freqs, s = DataExtractor.extract_s_parameters(fom)
         assert len(s) == 50
-
-
-# ---------------------------------------------------------------------------
-# ConcatResult tests
-# ---------------------------------------------------------------------------
-
-class TestConcatResult:
-    def test_basic(self):
-        freqs = _make_frequencies()
-        z = _make_z_dict()
-        s = {k: v * 0.5 for k, v in z.items() if k != 'frequencies'}
-        s['frequencies'] = freqs
-        cr = ConcatResult(
-            concat_system=None,
-            frequencies=freqs,
-            Z_matrix=None,
-            S_matrix=None,
-            Z_dict=z,
-            S_dict=s,
-            n_ports=2,
-            ports=['port1', 'port2'],
-        )
-        assert cr.n_ports == 2
-        fig, ax = cr.plot_s(params=['1(1)1(1)'])
-        assert fig is not None
-        plt.close(fig)
-
-    def test_repr(self):
-        freqs = _make_frequencies()
-        cr = ConcatResult(
-            concat_system=None,
-            frequencies=freqs,
-            Z_matrix=None,
-            S_matrix=None,
-            Z_dict=_make_z_dict(),
-            S_dict=_make_z_dict(),
-            n_ports=2,
-            ports=['port1', 'port2'],
-        )
-        assert 'ConcatResult' in repr(cr)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 """Frequency-domain electromagnetic solver for single and compound structures."""
 
 from typing import Dict, List, Optional, Tuple, Union, Literal
+import warnings
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
@@ -95,7 +96,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         self.geometry = geometry
         self.mesh = geometry.mesh
-        self.bc = bc if bc is not None else getattr(geometry, 'bc', 'default')
+        self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
         self.order = order
         self.use_wave_impedance = use_wave_impedance
 
@@ -155,6 +156,54 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Result-object caches (built lazily via .fom / .foms)
         self._fom_cache = None
         self._foms_cache = None
+
+        # Validate boundary conditions
+        self._validate_boundary_conditions()
+
+    def _validate_boundary_conditions(self) -> None:
+        """
+        Validate that boundary conditions are properly set.
+
+        Issues warnings (not errors) for common misconfigurations so that
+        the user can fix them before calling :meth:`solve`.
+        """
+        boundaries = list(self.mesh.GetBoundaries())
+        ports = [b for b in boundaries if 'port' in b.lower()]
+        unnamed = [b for b in boundaries if b in ('', None)]
+        unique_boundaries = sorted(set(b for b in boundaries if b))
+
+        if not ports:
+            warnings.warn(
+                f"\n  No port boundaries detected in mesh.\n"
+                f"  Boundaries found: {unique_boundaries or '(none)'}\n"
+                f"  The solver requires at least one port to compute "
+                f"Z/S parameters.\n"
+                f"  Fix: call geo.define_ports(zmin=True, zmax=True) "
+                f"before generate_mesh().",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if unnamed:
+            warnings.warn(
+                f"\n  {len(unnamed)} boundary face(s) have no name and will "
+                f"NOT have PEC conditions applied.\n"
+                f"  All boundaries: {boundaries}\n"
+                f"  Fix: call geo.define_ports() or rebuild the geometry.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if self.bc in (None, ''):
+            warnings.warn(
+                f"\n  No boundary conditions set (bc={self.bc!r}). All "
+                f"boundaries will be unconstrained (no PEC walls).\n"
+                f"  All boundaries: {unique_boundaries or '(none)'}\n"
+                f"  Fix: call geo.define_ports() to set up the geometry "
+                f"correctly, which also sets bc='wall'.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     # === BaseEMSolver abstract implementations ===
 
@@ -655,7 +704,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             store_snapshots: bool = True,
             compute_s_params: bool = True,
             per_domain: bool = True,
-            global_method: Literal['coupled', 'cascade', 'concatenate', None] = 'cascade',
+            global_method: Literal['coupled', None] = 'coupled',
             solver_type: str = 'iterative',
             iterative_opts: Optional[Dict] = None,
     ) -> Dict:
@@ -679,20 +728,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             Compute S-parameters from Z-parameters
         per_domain : bool
             If True, solve each domain independently and store per-domain Z/S.
-            Required for 'cascade' and 'concatenate' global methods.
-        global_method : {'coupled', 'cascade', 'concatenate', None}
+        global_method : {'coupled', None}
             Method for computing global (full-structure) S/Z parameters:
 
             - 'coupled': Solve entire structure as one system (default).
                          Most accurate, captures all inter-domain interactions.
-
-            - 'cascade': Use S-parameter cascading from per-domain results.
-                         Fastest but assumes no inter-domain reflections.
-                         Requires per_domain=True.
-
-            - 'concatenate': Couple per-domain Z-matrices via Kirchhoff constraints.
-                             Same accuracy as 'coupled' for linear systems.
-                             Requires per_domain=True. Useful for ROM validation.
 
             - None: Skip global computation, only compute per-domain if requested.
 
@@ -729,9 +769,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             per_domain = False
             global_method = 'coupled'
 
-        # Cascade and concatenate require per-domain results
-        if global_method in ('cascade', 'concatenate'):
-            per_domain = True
+        # Cascade and concatenate removed — only 'coupled' or None
+        if global_method is not None and global_method != 'coupled':
+            raise ValueError(
+                f"Unknown global_method '{global_method}'. "
+                f"Use 'coupled' or None."
+            )
 
         # Validate options
         if global_method is None and not per_domain:
@@ -756,9 +799,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self._solve_per_domain(store_snapshots,
                                    solver_type=solver_type,
                                    iter_opts=iter_opts)
-
-        # Compute global results based on method
-        if global_method == 'coupled':
+        else:
+        # Compute global results
+        # if global_method == 'coupled':
             print("\n" + "-" * 40)
             print("Global Coupled Solve")
             print("-" * 40)
@@ -767,27 +810,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                                        iter_opts=iter_opts)
             self._current_global_method = 'coupled'
 
-        elif global_method == 'cascade':
-            print("\n" + "-" * 40)
-            print("Global via S-Parameter Cascade")
-            print("-" * 40)
-            self._build_cascaded_matrices()
-            self._current_global_method = 'cascade'
-
-        elif global_method == 'concatenate':
-            print("\n" + "-" * 40)
-            print("Global via Z-Parameter Concatenation (Kirchhoff Coupling)")
-            print("-" * 40)
-            self._build_concatenated_z_matrices()
-            self._current_global_method = 'concatenate'
-
         # Compute S-parameters from Z
         if compute_s_params:
             if global_method is not None:
                 self._compute_s_from_z()
-                # Store S for concatenate method
-                if global_method == 'concatenate':
-                    self._S_global_concatenate = self._S_matrix.copy()
             if per_domain:
                 self._compute_per_domain_s_from_z()
 
@@ -802,7 +828,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     ) -> None:
         """Ensure required matrices are assembled."""
         needs_global = (global_method == 'coupled')
-        needs_per_domain = per_domain or (global_method == 'cascade')
+        needs_per_domain = per_domain
 
         # Check if port modes exist
         if self.port_modes is None:
@@ -827,10 +853,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._S_per_domain = {}
         self._Z_global_coupled = None
         self._S_global_coupled = None
-        self._Z_global_cascade = None
-        self._S_global_cascade = None
-        self._Z_global_concatenate = None  # NEW
-        self._S_global_concatenate = None  # NEW
         self._current_global_method = None
         self.snapshots = {}
         self._residuals = {}
@@ -1157,68 +1179,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             'solver_type': st,
         }
 
-    def _build_cascaded_matrices(self) -> None:
-        """Cascade per-domain S-matrices to produce global Z/S.
-
-        For a sequential compound structure with N domains and N+1 ports,
-        each domain is treated as a 2-port. S-matrices are cascaded
-        domain-by-domain, and the result is the 2-port S/Z of the
-        full structure (external ports only: first and last).
-        """
-        if not self._Z_per_domain:
-            raise ValueError(
-                "Per-domain results not available. "
-                "Call solve() with per_domain=True first."
-            )
-
-        n_freqs = len(self.frequencies)
-        n_modes = self._n_modes_per_port or 1
-
-        # Compute per-domain S-matrices from per-domain Z
-        self._compute_per_domain_s_from_z()
-        domain_S = self._get_per_domain_s_matrices()
-
-        # Start with the first domain's S-matrix
-        S0 = domain_S[self.domains[0]]
-        n_ext = S0.shape[1] # e.g. 2 * n_modes
-        self._Z_matrix = np.zeros((n_freqs, n_ext, n_ext), dtype=complex)
-        self._S_matrix = np.zeros((n_freqs, n_ext, n_ext), dtype=complex)
-
-        for k in range(n_freqs):
-            freq = self.frequencies[k]
-
-            # Start with the first domain's S-matrix
-            S_total = domain_S[self.domains[0]][k]
-
-            # Cascade through remaining domains
-            for di in range(1, self.n_domains):
-                domain = self.domains[di]
-                S_next = domain_S[domain][k]
-                S_total = ParameterConverter.cascade_s_matrices(S_total, S_next)
-
-            # Convert cascaded S back to Z for the external ports
-            # ports are usually first and last external ports from the split map
-            n_modes_first = S_total.shape[0] // 2 # ports are 2-port networks internally
-            
-            Z0_diag = []
-            # Port 1 (first split)
-            for m in range(n_modes_first):
-                Z0_diag.append(self._get_port_impedance(self._external_ports[0], m, freq))
-            # Port 2 (last split)
-            for m in range(n_modes_first):
-                Z0_diag.append(self._get_port_impedance(self._external_ports[-1], m, freq))
-            
-            Z0_ext = np.diag(Z0_diag)
-
-            self._S_matrix[k] = S_total
-            self._Z_matrix[k] = ParameterConverter.s_to_z(S_total, Z0_ext)
-
-        # Store cascade result separately
-        self._Z_global_cascade = self._Z_matrix.copy()
-
-        print(f"\nCascaded {self.n_domains} domains → {len(self._external_ports)}-port system")
-        print(f"  External ports: {self._external_ports}")
-
     def _compute_per_domain_s_from_z(self) -> None:
         """Compute per-domain S-matrices from per-domain Z data."""
         n_freqs = len(self.frequencies)
@@ -1378,7 +1338,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             )
 
         if methods is None:
-            methods = ['coupled', 'cascade', 'concatenate']
+            methods = ['coupled']
 
         print("\n" + "=" * 60)
         print(f"Comparing Methods: {methods}")
@@ -1400,20 +1360,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             results['frequencies'] = self.frequencies.copy()
 
         # Compute other methods from per-domain results
-        if 'cascade' in methods:
-            print("\n[2] Computing CASCADE from per-domain results...")
-            self._build_cascaded_matrices()
-            self._compute_s_from_z()
-            results['Z_cascade'] = self._Z_matrix.copy()
-            results['S_cascade'] = self._S_matrix.copy()
-
-        if 'concatenate' in methods:
-            print("\n[3] Computing CONCATENATE from per-domain results...")
-            self._build_concatenated_z_matrices()
-            self._compute_s_from_z()
-            results['Z_concatenate'] = self._Z_matrix.copy()
-            results['S_concatenate'] = self._S_matrix.copy()
-
         # Restore coupled as primary if available
         if 'coupled' in methods:
             self._Z_matrix = results['Z_coupled']
@@ -2563,167 +2509,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     (i + 1, ports_next[0], m)  # First port of next domain
                 ))
         return connections
-
-    def _build_concatenated_z_matrices(self) -> None:
-        """
-        Concatenate per-domain Z-matrices to produce global Z for external ports.
-
-        Uses Kirchhoff coupling via incidence matrix, similar to ROM concatenation
-        but operating on Z-parameter matrices directly.
-
-        For connected internal ports:
-        - Voltage continuity: V_a + V_b = 0 (opposite orientation)
-        - Current continuity: I_a + I_b = 0
-
-        The coupled Z-matrix is computed via Schur complement:
-            Z_coupled = Z_EE - Z_EI @ F @ (F^T @ Z_II @ F)^{-1} @ F^T @ Z_IE
-
-        where:
-        - Z_EE, Z_EI, Z_IE, Z_II are partitions of the block-diagonal Z
-        - F is the incidence matrix encoding connections
-        """
-        if not self._Z_per_domain:
-            raise ValueError(
-                "Per-domain results not available. "
-                "Call solve() with per_domain=True first."
-            )
-
-        n_freqs = len(self.frequencies)
-        n_modes = self._n_modes_per_port or 1
-
-        # Build global port mapping: (domain_idx, port_name, mode) -> global_index
-        port_map: Dict[Tuple[int, str, int], int] = {}
-        global_to_local: Dict[int, Tuple[int, str, int]] = {}
-        offset = 0
-
-        for d_idx, domain in enumerate(self.domains):
-            domain_ports = self.domain_port_map[domain]
-            for p_idx, port in enumerate(domain_ports):
-                for m in range(n_modes):
-                    global_idx = offset + p_idx * n_modes + m
-                    port_map[(d_idx, port, m)] = global_idx
-                    global_to_local[global_idx] = (d_idx, port, m)
-            offset += len(domain_ports) * n_modes
-
-        n_total = offset
-
-        # Build connections and identify internal/external ports
-        connections = self._build_sequential_connections_with_modes(n_modes)
-        n_connections = len(connections)
-
-        internal_ports_set = set()
-        for (d_a, p_a, m_a), (d_b, p_b, m_b) in connections:
-            internal_ports_set.add(port_map[(d_a, p_a, m_a)])
-            internal_ports_set.add(port_map[(d_b, p_b, m_b)])
-
-        internal_ports = sorted(internal_ports_set)
-        external_ports = sorted(set(range(n_total)) - internal_ports_set)
-        n_internal = len(internal_ports)
-        n_external = len(external_ports)
-
-        if n_external == 0:
-            raise ValueError("No external ports after concatenation. Check domain/port configuration.")
-
-        # Build permutation: reorder to [internal | external]
-        perm = internal_ports + external_ports
-        P = np.eye(n_total, dtype=float)[perm, :]
-
-        # Build incidence matrix F: (n_internal x n_connections)
-        # F[pos(g_a), j] = +1, F[pos(g_b), j] = -1 for connection j
-        int_pos = {g: i for i, g in enumerate(internal_ports)}
-        F = np.zeros((n_internal, n_connections), dtype=float)
-
-        for j, ((d_a, p_a, m_a), (d_b, p_b, m_b)) in enumerate(connections):
-            g_a = port_map[(d_a, p_a, m_a)]
-            g_b = port_map[(d_b, p_b, m_b)]
-            F[int_pos[g_a], j] = +1.0
-            F[int_pos[g_b], j] = -1.0
-
-        # Validate incidence matrix
-        for j in range(n_connections):
-            nz = np.count_nonzero(F[:, j])
-            if nz != 2:
-                raise RuntimeError(
-                    f"Invalid incidence matrix column {j}: expected 2 nonzeros, got {nz}"
-                )
-
-        # Compute coupled Z at each frequency
-        self._Z_matrix = np.zeros((n_freqs, n_external, n_external), dtype=complex)
-
-        print(f"\nConcatenating Z-matrices...")
-        print(f"  Total ports: {n_total}")
-        print(f"  Internal ports: {n_internal}")
-        print(f"  External ports: {n_external}")
-        print(f"  Connections: {n_connections}")
-
-        for k in range(n_freqs):
-            if k % max(1, n_freqs // 10) == 0:
-                print(f"  Frequency {k + 1}/{n_freqs}: {self.frequencies[k] / 1e9:.4f} GHz")
-
-            # Build block-diagonal Z_all from per-domain Z matrices
-            Z_all = np.zeros((n_total, n_total), dtype=complex)
-
-            row_offset = 0
-            for d_idx, domain in enumerate(self.domains):
-                Z_d = self.get_domain_z_matrix(domain, freq_idx=k)
-                n_d = Z_d.shape[0]
-                Z_all[row_offset:row_offset + n_d, row_offset:row_offset + n_d] = Z_d
-                row_offset += n_d
-
-            # Apply permutation to partition into [internal | external]
-            Z_perm = P @ Z_all @ P.T
-
-            Z_II = Z_perm[:n_internal, :n_internal]
-            Z_IE = Z_perm[:n_internal, n_internal:]
-            Z_EI = Z_perm[n_internal:, :n_internal]
-            Z_EE = Z_perm[n_internal:, n_internal:]
-
-            # Schur complement for Kirchhoff coupling
-            # Z_coupled = Z_EE - Z_EI @ F @ (F^T @ Z_II @ F)^{-1} @ F^T @ Z_IE
-            FtZF = F.T @ Z_II @ F  # (n_connections x n_connections)
-
-            # Robust inversion
-            try:
-                # Try direct inverse first
-                cond = np.linalg.cond(FtZF)
-                if cond < 1e12:
-                    FtZF_inv = np.linalg.inv(FtZF)
-                else:
-                    FtZF_inv = np.linalg.pinv(FtZF, rcond=1e-12)
-            except np.linalg.LinAlgError:
-                FtZF_inv = np.linalg.pinv(FtZF, rcond=1e-12)
-
-            # Coupled Z-matrix for external ports
-            correction = Z_EI @ F @ FtZF_inv @ F.T @ Z_IE
-            self._Z_matrix[k] = Z_EE - correction
-
-        # Store concatenated result
-        self._Z_global_concatenate = self._Z_matrix.copy()
-
-        # Store external port mapping for reference
-        self._concatenate_external_port_map = {}
-        for i, global_idx in enumerate(external_ports):
-            d_idx, port_name, mode = global_to_local[global_idx]
-            self._concatenate_external_port_map[f"port{i + 1}"] = (
-                self.domains[d_idx], port_name, mode
-            )
-
-        print(f"\nConcatenation complete:")
-        print(f"  Global Z shape: {self._Z_matrix.shape}")
-        print(f"  External ports: {self._external_ports}")
-
-    def get_concatenated_results(self) -> Optional[Dict]:
-        """Get cached concatenation results if available."""
-        if not hasattr(self, '_Z_global_concatenate') or self._Z_global_concatenate is None:
-            return None
-
-        return {
-            'Z': self._Z_global_concatenate,
-            'S': self._S_global_concatenate if hasattr(self, '_S_global_concatenate') else None,
-            'frequencies': self.frequencies,
-            'method': 'concatenate',
-            'external_port_map': getattr(self, '_concatenate_external_port_map', None)
-        }
 
     # === ROM interface ===
 
