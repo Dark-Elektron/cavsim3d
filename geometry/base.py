@@ -2,11 +2,12 @@
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Literal
+import warnings
 import numpy as np
 from pathlib import Path
 from typing import Literal
 from ngsolve import Mesh, BND, Integrate, specialcf
-from netgen.occ import OCCGeometry
+from netgen.occ import OCCGeometry, X, Y, Z
 from netgen.webgui import Draw
 from netgen.occ import Glue
 
@@ -14,10 +15,15 @@ from netgen.occ import Glue
 class BaseGeometry(ABC):
     """Abstract base class for all geometries."""
 
+    # Axis helpers for define_ports()
+    _AXIS_MAP = {'X': X, 'Y': Y, 'Z': Z}
+    _AXIS_ORDER = ['X', 'Y', 'Z']  # Port numbering order
+
     def __init__(self):
         self.geo = None
         self.mesh = None
-        self.bc = 'default'
+        self.bc = None
+        self._bc_explicitly_set = False
         self._ports = None
         self._boundaries = None
 
@@ -102,6 +108,127 @@ class BaseGeometry(ABC):
         if self._boundaries is None:
             self._boundaries = list(self.mesh.GetBoundaries())
         return self._boundaries
+
+    def define_ports(self, **kwargs) -> 'BaseGeometry':
+        """
+        Define port faces by axis position.
+
+        Renames matching faces from ``'wall'`` to ``'portN'`` (sequentially
+        numbered).  Must be called after :meth:`build`, before
+        :meth:`generate_mesh`.
+
+        Parameters
+        ----------
+        xmin, xmax : bool
+            Designate the Min(X) / Max(X) face as a port.
+        ymin, ymax : bool
+            Designate the Min(Y) / Max(Y) face as a port.
+        zmin, zmax : bool
+            Designate the Min(Z) / Max(Z) face as a port.
+
+        Returns
+        -------
+        self : BaseGeometry
+            For method chaining.
+
+        Examples
+        --------
+        >>> geo.build()
+        >>> geo.define_ports(zmin=True, zmax=True)  # port1=Min(Z), port2=Max(Z)
+        >>> geo.generate_mesh(maxh=0.04)
+        """
+        if self.geo is None:
+            raise RuntimeError(
+                "Geometry not built. Call build() before define_ports()."
+            )
+
+        # Collect requested faces in deterministic axis order
+        # (X before Y before Z, min before max)
+        requested = []
+        for axis in self._AXIS_ORDER:
+            for side in ('min', 'max'):
+                key = f'{axis.lower()}{side}'
+                if kwargs.get(key, False):
+                    requested.append((axis, side))
+
+        if not requested:
+            raise ValueError(
+                "No port faces specified.  "
+                "Pass at least one axis+side argument, e.g. "
+                "define_ports(zmin=True, zmax=True)"
+            )
+
+        # Determine the target shape (could be single solid or compound)
+        try:
+            solids = list(self.geo.solids)
+            target = solids[0] if len(solids) == 1 else self.geo
+        except AttributeError:
+            target = self.geo
+
+        port_num = 1
+        ax_map = self._AXIS_MAP
+        for axis, side in requested:
+            ax = ax_map[axis]
+            face = target.faces.Min(ax) if side == 'min' else target.faces.Max(ax)
+            face.name = f'port{port_num}'
+            port_num += 1
+
+        # Reset cached port list so it picks up new names on next access
+        self._ports = None
+        self._boundaries = None
+
+        print(f"Defined {len(requested)} port(s): "
+              f"{', '.join(f'port{i+1}' for i in range(len(requested)))}")
+
+        return self
+
+    def validate_boundaries(self) -> List[str]:
+        """
+        Check for unnamed or ambiguous mesh boundaries.
+
+        Returns
+        -------
+        warnings_list : list of str
+            Human-readable warnings. Empty list means all boundaries are
+            properly named.
+        """
+        if self.mesh is None:
+            return ['Mesh not generated yet — cannot validate boundaries.']
+
+        boundaries = list(self.mesh.GetBoundaries())
+        ports = [b for b in boundaries if 'port' in b.lower()]
+        unnamed = [i for i, b in enumerate(boundaries) if b in ('', None)]
+        defaults = [i for i, b in enumerate(boundaries) if b == 'default']
+
+        warns = []
+
+        if not ports:
+            warns.append(
+                f"No port boundaries detected.\n"
+                f"  Boundaries: {boundaries}\n"
+                f"  Fix: call geo.define_ports(zmin=True, zmax=True) "
+                f"before generate_mesh()."
+            )
+
+        if unnamed:
+            warns.append(
+                f"{len(unnamed)} boundary face(s) have no name and will NOT "
+                f"have PEC conditions applied.\n"
+                f"  Unnamed indices: {unnamed}\n"
+                f"  All boundaries: {boundaries}\n"
+                f"  Fix: call geo.define_ports() or rebuild geometry."
+            )
+
+        if self.bc in (None, ''):
+            warns.append(
+                f"No boundary conditions set (bc={self.bc!r}).  "
+                f"All boundaries will be unconstrained (no PEC walls).\n"
+                f"  All boundaries: {boundaries}\n"
+                f"  Fix: call geo.define_ports() to set up ports, "
+                f"which also sets bc='wall'."
+            )
+
+        return warns
 
     @property
     def n_ports(self) -> int:

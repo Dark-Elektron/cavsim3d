@@ -17,9 +17,12 @@ Key fixes / improvements
 from typing import List, Tuple, Dict, Optional, Callable, Union, Any
 import numpy as np
 import scipy.linalg as sl
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from solvers.eigen_mixin import ConcatEigenMixin
 from core.constants import Z0
 from solvers.base import BaseEMSolver
+from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
 
 
@@ -28,7 +31,7 @@ Conn = Tuple[Tuple[int, str], Tuple[int, str]]  # ((struct_idx, port_name), (str
 ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1) or (+1,+1)
 
 
-class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
+class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     """
     Coupled system of multiple reduced structures with multiple modes per port.
 
@@ -50,6 +53,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
     """
 
     DEFAULT_MIN_EIGENVALUE = 1.0
+
+    # Threshold: below this matrix dimension, use direct solve (LU is fast);
+    # above, use iterative (GMRES handles large/sparse systems better).
+    ITERATIVE_SIZE_THRESHOLD = 500
 
     def __init__(
         self,
@@ -90,6 +97,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
         self._n_external: int = 0
 
         self.domains = [s.domain for s in structures]
+
+        # Snapshot storage (populated by solve())
+        self._snapshots: Optional[np.ndarray] = None
 
     def _validate_mode_counts(self) -> None:
         """Validate that mode counts are consistent across structures."""
@@ -401,9 +411,25 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
         nsamples: int = 100,
         compute_s_params: bool = True,
         rcond_solve: float = 1e-12,
+        solver_type: str = 'auto',
     ) -> Dict:
         """
         Solve coupled reduced system over frequency range.
+
+        Parameters
+        ----------
+        fmin, fmax : float
+            Frequency range [GHz]
+        nsamples : int
+            Number of frequency samples
+        compute_s_params : bool
+            Compute S-parameters from Z.
+        rcond_solve : float
+            Regularization for lstsq fallback (direct solver only).
+        solver_type : str
+            ``'auto'`` (default) picks direct for small systems, GMRES for
+            large.  ``'iterative'`` forces GMRES.  ``'direct'`` forces
+            ``np.linalg.solve``.
         """
         if self.A_coupled is None or self.B_coupled is None:
             raise ValueError("Must call couple() first")
@@ -412,27 +438,81 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
         n_ext = self._n_external
         r = self.A_coupled.shape[0]
 
+        # Resolve 'auto' solver type
+        if solver_type == 'auto':
+            solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
+            print(f"  Solver: {solver_type} (system size {r})")
+
         self._Z_matrix = np.zeros((nsamples, n_ext, n_ext), dtype=complex)
-        x_all = []
 
-        I_ext = np.eye(n_ext, dtype=complex)
+        import time
+        t0 = time.time()
 
-        for k, freq in enumerate(self.frequencies):
-            omega = 2 * np.pi * freq
+        omegas = 2 * np.pi * self.frequencies  # (n_freq,)
 
-            lhs = self.A_coupled - (omega**2) * np.eye(r, dtype=complex)
-            rhs = omega * (self.B_coupled @ I_ext)
+        if solver_type in ('auto', 'direct'):
+            # ============================================================
+            # Eigendecomposition approach (fast for reduced systems)
+            # A_coupled is Hermitian → A = V Λ V^H
+            # (A - ω²I)^{-1} = V diag(1/(λ - ω²)) V^H
+            # Z = jω B^H V diag(1/(λ - ω²)) V^H B
+            # ============================================================
+            eigenvalues, V = np.linalg.eigh(self.A_coupled)
+            C = V.T.conj() @ self.B_coupled   # V^H B, shape (r, n_ext)
+            D = self.B_coupled.T.conj() @ V   # B^H V, shape (n_ext, r)
 
-            try:
-                x = np.linalg.solve(lhs, rhs)
-            except np.linalg.LinAlgError:
-                x = np.linalg.lstsq(lhs, rhs, rcond=rcond_solve)[0]
+            # d[k, i] = 1 / (λ_i - ω_k²), shape (n_freq, r)
+            d = 1.0 / (eigenvalues[None, :] - omegas[:, None]**2)
 
-            x_all.append(x)
-            self._Z_matrix[k] = 1j * (self.B_coupled.T.conj() @ x)
+            # Z[k] = jω_k D diag(d[k]) C  — small matmul, no LAPACK call
+            for k in range(nsamples):
+                self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ C
+
+            # Snapshots: x[k] = ω_k V diag(d[k]) C
+            x_all = []
+            for k in range(nsamples):
+                x_all.append(omegas[k] * V @ (d[k, :, None] * C))
+
+        else:
+            # ============================================================
+            # Iterative solver (GMRES) — for large sparse systems
+            # ============================================================
+            I_ext = np.eye(n_ext, dtype=complex)
+            x_all = []
+            gmres_failures = 0
+
+            for k, freq in enumerate(self.frequencies):
+                omega = omegas[k]
+                lhs = self.A_coupled - (omega**2) * np.eye(r, dtype=complex)
+                rhs = omega * (self.B_coupled @ I_ext)
+
+                lhs_sp = sp.csr_matrix(lhs)
+                x = np.zeros_like(rhs)
+                for col in range(rhs.shape[1]):
+                    x[:, col], info = spla.gmres(lhs_sp, rhs[:, col])
+                    if info != 0:
+                        gmres_failures += 1
+
+                x_all.append(x)
+                self._Z_matrix[k] = 1j * (self.B_coupled.T.conj() @ x)
+
+            if gmres_failures > 0:
+                total_solves = nsamples * n_ext
+                print(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
+
+        t1 = time.time()
+        print(f"  Solve loop: {t1 - t0:.3f}s ({nsamples} freq points)")
+
+        # Store snapshots for later reduce()
+        self._snapshots = np.array(x_all)
+
+        t2 = time.time()
 
         if compute_s_params:
             self._compute_s_from_z()
+
+        t3 = time.time()
+        print(f"  Z→S conversion: {t3 - t2:.3f}s")
 
         self._invalidate_cache()
 
@@ -442,7 +522,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
             "S": self._S_matrix if compute_s_params else None,
             "Z_dict": self.Z_dict,
             "S_dict": self.S_dict if compute_s_params else None,
-            "x": np.array(x_all),
+            "x": self._snapshots,
         }
 
     # -------------------------------------------------------------------------
@@ -622,6 +702,31 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin):
 
         print("=" * 60)
 
+    def reduce(
+        self,
+        tol: float = 1e-6,
+        max_rank: Optional[int] = None,
+    ) -> 'ReducedConcatenatedSystem':
+        """
+        Reduce this concatenated system via second-level POD.
+
+        Requires that ``solve()`` has been called first so that snapshots
+        are available.
+
+        Parameters
+        ----------
+        tol : float
+            SVD truncation tolerance (relative to largest singular value).
+        max_rank : int, optional
+            Maximum rank for the reduced model.
+
+        Returns
+        -------
+        ReducedConcatenatedSystem
+            A further-reduced system with ``solve()`` and ``reduce()`` methods.
+        """
+        return reduce_concatenated_system(self, tol=tol, max_rank=max_rank)
+
 
 class ReducedConcatenatedSystem(ConcatenatedSystem):
     """Further-reduced concatenated system via POD."""
@@ -679,42 +784,42 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
 
 def reduce_concatenated_system(
     concat: ConcatenatedSystem,
-    fmin: Optional[float] = None,
-    fmax: Optional[float] = None,
-    n_snapshots: Optional[int] = None,
     tol: float = 1e-6,
     max_rank: Optional[int] = None,
 ) -> ReducedConcatenatedSystem:
-    """Reduce a concatenated system via POD."""
+    """
+    Reduce a concatenated system via second-level POD.
+
+    Uses snapshots stored by ``solve()`` if available. If ``solve()``
+    has not been called, raises an error.
+
+    Parameters
+    ----------
+    concat : ConcatenatedSystem
+        The system to reduce.
+    tol : float
+        SVD truncation tolerance (relative to largest singular value).
+    max_rank : int, optional
+        Maximum rank for the reduced model.
+
+    Returns
+    -------
+    ReducedConcatenatedSystem
+    """
     if concat.A_coupled is None or concat.B_coupled is None:
         raise ValueError("ConcatenatedSystem must be coupled first")
 
+    if concat._snapshots is None:
+        raise ValueError(
+            "No snapshots available. Call solve() first to generate snapshots "
+            "for POD-based reduction."
+        )
+
     r_current = concat.A_coupled.shape[0]
-    n_ext = concat.n_ports
 
-    if fmin is None or fmax is None:
-        if concat.frequencies is not None:
-            fmin = float(concat.frequencies[0] / 1e9)
-            fmax = float(concat.frequencies[-1] / 1e9)
-        else:
-            raise ValueError("Must specify fmin/fmax or solve the system first")
-
-    if n_snapshots is None:
-        n_snapshots = min(2 * r_current, 200)
-
-    freqs = np.linspace(fmin, fmax, n_snapshots) * 1e9
-    snapshots = []
-
-    I_ext = np.eye(n_ext, dtype=complex)
-
-    for freq in freqs:
-        omega = 2 * np.pi * freq
-        lhs = concat.A_coupled - (omega**2) * np.eye(r_current, dtype=complex)
-        rhs = omega * (concat.B_coupled @ I_ext)
-        x = np.linalg.lstsq(lhs, rhs, rcond=1e-12)[0]
-        snapshots.append(x)
-
-    W_snap = np.hstack(snapshots)
+    # Use stored snapshots: shape is (n_freq, r, n_ext),
+    # reshape to (r, n_freq * n_ext) for SVD
+    W_snap = np.hstack([concat._snapshots[k] for k in range(concat._snapshots.shape[0])])
 
     U, S, _ = np.linalg.svd(W_snap, full_matrices=False)
 
@@ -741,17 +846,3 @@ def reduce_concatenated_system(
         singular_values=S,
     )
 
-
-def _concatenated_reduce(
-    self: ConcatenatedSystem,
-    fmin: Optional[float] = None,
-    fmax: Optional[float] = None,
-    n_snapshots: Optional[int] = None,
-    tol: float = 1e-6,
-    max_rank: Optional[int] = None,
-) -> ReducedConcatenatedSystem:
-    """Attachable method: concat.reduce(...)"""
-    return reduce_concatenated_system(self, fmin, fmax, n_snapshots, tol, max_rank)
-
-
-ConcatenatedSystem.reduce = _concatenated_reduce

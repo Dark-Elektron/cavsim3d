@@ -60,8 +60,7 @@ class DataExtractor:
 
         if class_name in ['FrequencyDomainSolver', 'ModelOrderReduction',
                           'ConcatenatedSystem', 'ReducedConcatenatedSystem',
-                          # New result wrapper types
-                          'FOMResult', 'ROMResult', 'ConcatResult']:
+                          'FOMResult', 'FOMCollection', 'ROMCollection']:
             return 'solver'
         elif class_name in ['RWGAnalytical', 'CWGAnalytical']:
             return 'analytical'
@@ -83,10 +82,8 @@ class DataExtractor:
             'ConcatenatedSystem': 'Concatenated',
             'ReducedConcatenatedSystem': 'Reduced Concat',
             'RWGAnalytical': 'Analytical',
-            # New result wrapper types
+            # Result wrapper types
             'FOMResult': 'FOM',
-            'ROMResult': 'ROM',
-            'ConcatResult': 'Concat',
             'FOMCollection': 'FOM (per-domain)',
             'ROMCollection': 'ROM (per-domain)',
         }
@@ -107,10 +104,10 @@ class DataExtractor:
             'ModelOrderReduction': {'linestyle': ':', 'marker': '', 'linewidth': 1.5},
             'ConcatenatedSystem': {'linestyle': '-.', 'marker': '', 'linewidth': 1.5},
             'ReducedConcatenatedSystem': {'linestyle': '', 'marker': 'o', 'markersize': 4},
-            # New result wrapper types
+            # Result wrapper types
             'FOMResult': {'linestyle': '--', 'marker': '', 'linewidth': 1.5},
-            'ROMResult': {'linestyle': ':', 'marker': '', 'linewidth': 1.5},
-            'ConcatResult': {'linestyle': '-.', 'marker': '', 'linewidth': 1.5},
+            'FOMCollection': {'linestyle': '--', 'marker': '', 'linewidth': 1.5},
+            'ROMCollection': {'linestyle': ':', 'marker': '', 'linewidth': 1.5},
         }
 
         return styles.get(class_name, {'linestyle': '-', 'marker': '', 'linewidth': 1})

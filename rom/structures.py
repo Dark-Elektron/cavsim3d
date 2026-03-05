@@ -34,6 +34,7 @@ class ReducedStructure:
     domain: str = 'default'
     r: int = None
     n_full: int = None
+    is_full_order: bool = False  # True when W=I (FOM wrapped for concatenation)
 
     def __post_init__(self):
         if self.r is None:
@@ -73,6 +74,8 @@ class ReducedStructure:
     @property
     def compression_ratio(self) -> Optional[float]:
         """Compression ratio if n_full is known."""
+        if self.is_full_order:
+            return 0.0
         if self.n_full is not None and self.n_full > 0:
             return 1 - self.r / self.n_full
         return None
@@ -102,6 +105,10 @@ class ReducedStructure:
         )
 
     def __repr__(self) -> str:
+        if self.is_full_order:
+            return (f"ReducedStructure(domain='{self.domain}', r={self.r}, "
+                    f"ports={self.ports}, modes/port={self._n_port_modes}, "
+                    f"full-order W=I)")
         compression = f", compression={100 * self.compression_ratio:.1f}%" if self.compression_ratio else ""
         return (f"ReducedStructure(domain='{self.domain}', r={self.r}, "
                 f"ports={self.ports}, modes/port={self._n_port_modes}{compression})")

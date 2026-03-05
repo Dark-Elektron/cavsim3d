@@ -9,25 +9,25 @@ Graph overview
 --------------
 
 Single-solid
-  fds.fom             -> FOMResult
-  fds.fom.rom         -> ROMResult
+  fds.fom                         -> FOMResult
+  fds.fom.reduce()                -> ModelOrderReduction
+  mor.solve(fmin, fmax, n)        -> (updates MOR in-place)
+  mor.reduce()                    -> ModelOrderReduction  (2nd level)
 
 Multi-solid
-  fds.fom             -> FOMResult          (global / coupled)
-  fds.fom.rom         -> ROMResult
-  fds.foms            -> FOMCollection      (per-domain list)
-  fds.foms[0]         -> FOMResult          (first domain)
-  fds.foms.concat     -> ConcatResult       (concatenated FOM)
-  fds.foms.concat.rom -> ROMResult
-  fds.foms.roms       -> ROMCollection      (per-domain ROMs)
-  fds.foms.roms[0]    -> ROMResult
-  fds.foms.roms.concat          -> ConcatResult
-  fds.foms.roms.concat.rom      -> ROMResult  (chain 1-2-3-4-5 from diagram)
+  fds.foms                        -> FOMCollection      (per-domain list)
+  fds.foms[0]                     -> FOMResult           (first domain)
+  fds.foms.reduce()               -> ROMCollection      (new each call)
+  fds.foms.concatenate()          -> ConcatenatedSystem  (W=I, full-order)
+  roms.concatenate()              -> ConcatenatedSystem  (reduced)
+  cs.solve(fmin, fmax, n)         -> (updates CS in-place)
+  cs.reduce()                     -> ModelOrderReduction (2nd-level POD)
 """
 
 from __future__ import annotations
 
 from typing import Dict, Iterator, List, Optional, Tuple, Union
+import warnings
 import numpy as np
 
 from utils.plot_mixin import PlotMixin
@@ -67,9 +67,8 @@ class FOMResult(PlotMixin):
         n_modes_per_port: int = 1,
         # Residual data from iterative solver
         residual_data: Optional[Dict] = None,
-        # Back-reference to the FDS and ModelOrderReduction helpers
+        # Back-reference to the FDS
         _solver_ref=None,
-        _rom_factory=None,         # callable() -> ROMResult
     ):
         self.domain = domain
         self.frequencies = frequencies
@@ -82,10 +81,6 @@ class FOMResult(PlotMixin):
         self._n_modes_per_port = n_modes_per_port
         self._residual_data = residual_data
         self._solver_ref = _solver_ref
-        self._rom_factory = _rom_factory
-
-        # Lazy cache
-        self._rom_cache: Optional[ROMResult] = None
 
     # ------------------------------------------------------------------
     # PlotMixin requirements
@@ -100,35 +95,62 @@ class FOMResult(PlotMixin):
         return self._S_dict
 
     # ------------------------------------------------------------------
-    # ROM navigation
+    # Explicit reduce / concatenate
     # ------------------------------------------------------------------
 
-    @property
-    def rom(self) -> ROMResult:
+    def reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None):
         """
-        Reduced-order model of this FOM.
+        Reduce this FOM via POD model-order reduction.
 
-        For single-domain or global results this triggers a
-        ``ModelOrderReduction`` on the underlying solver.
+        Parameters
+        ----------
+        tol : float
+            SVD truncation tolerance (relative to largest singular value).
+        max_rank : int, optional
+            Maximum rank for the reduced model.
+
+        Returns
+        -------
+        ModelOrderReduction
+            A new, independent reduced-order model. Call ``.solve(fmin, fmax, n)``
+            on it to compute Z/S over a frequency range.
         """
-        if self._rom_cache is None:
-            if self._rom_factory is None:
-                raise RuntimeError(
-                    "ROM factory not configured for this FOMResult. "
-                    "Ensure the FOMResult was created by FrequencyDomainSolver."
-                )
-            self._rom_cache = self._rom_factory()
-        return self._rom_cache
+        if self._solver_ref is None:
+            raise RuntimeError(
+                "Cannot reduce: no solver reference available. "
+                "Ensure this FOMResult was created by FrequencyDomainSolver."
+            )
+        from rom.reduction import ModelOrderReduction
 
-    def _invalidate_rom(self):
-        self._rom_cache = None
+        mor = ModelOrderReduction(self._solver_ref)
+        mor.reduce(tol=tol, max_rank=max_rank)
+        return mor
+
+    def concatenate(self):
+        """
+        Concatenate this FOM with other domains.
+
+        Not available for single-solid systems — raises a warning.
+        For multi-solid concatenation, use ``fds.foms.concatenate()`` instead.
+        """
+        warnings.warn(
+            "concatenate() is not available on a single FOMResult. "
+            "Concatenation requires multiple solids — use fds.foms.concatenate() instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return None
 
     # ------------------------------------------------------------------
-    # Dunder helpers
+    # Eigenvalue access
     # ------------------------------------------------------------------
 
     def get_eigenvalues(self, **kwargs):
-        """Delegate to solver if available."""
+        """
+        Compute eigenvalues from (K, M) generalized eigenproblem.
+
+        Delegates to the underlying FrequencyDomainSolver.
+        """
         if self._solver_ref is not None and hasattr(self._solver_ref, 'get_eigenvalues'):
             return self._solver_ref.get_eigenvalues(**kwargs)
         raise RuntimeError("Eigenvalues not available for this FOMResult.")
@@ -145,184 +167,6 @@ class FOMResult(PlotMixin):
 
 
 # =============================================================================
-# ROMResult
-# =============================================================================
-
-class ROMResult(PlotMixin):
-    """
-    Wrapper around a solved ROM (single domain or global concatenated).
-
-    Attributes
-    ----------
-    domain : str
-    frequencies : np.ndarray  (Hz)
-    Z_dict, S_dict : dict
-    n_ports : int
-    """
-
-    def __init__(
-        self,
-        *,
-        domain: str,
-        frequencies: np.ndarray,
-        Z_matrix: Optional[np.ndarray],
-        S_matrix: Optional[np.ndarray],
-        Z_dict: Optional[Dict],
-        S_dict: Optional[Dict],
-        n_ports: int,
-        ports: List[str],
-        n_modes_per_port: int = 1,
-        _rom_ref=None,           # underlying ModelOrderReduction or ConcatenatedSystem
-    ):
-        self.domain = domain
-        self.frequencies = frequencies
-        self._Z_matrix = Z_matrix
-        self._S_matrix = S_matrix
-        self._Z_dict = Z_dict
-        self._S_dict = S_dict
-        self.n_ports = n_ports
-        self.ports = ports
-        self._n_modes_per_port = n_modes_per_port
-        self._rom_ref = _rom_ref
-
-    # ------------------------------------------------------------------
-    # PlotMixin requirements
-    # ------------------------------------------------------------------
-
-    @property
-    def Z_dict(self) -> Optional[Dict]:
-        return self._Z_dict
-
-    @property
-    def S_dict(self) -> Optional[Dict]:
-        return self._S_dict
-
-    # ------------------------------------------------------------------
-    # Eigenvalue access
-    # ------------------------------------------------------------------
-
-    def get_eigenvalues(self, **kwargs):
-        if self._rom_ref is not None and hasattr(self._rom_ref, 'get_eigenvalues'):
-            return self._rom_ref.get_eigenvalues(**kwargs)
-        raise RuntimeError("Eigenvalues not available for this ROMResult.")
-
-    def get_resonant_frequencies(self, **kwargs):
-        if self._rom_ref is not None and hasattr(self._rom_ref, 'get_resonant_frequencies'):
-            return self._rom_ref.get_resonant_frequencies(**kwargs)
-        raise RuntimeError("Resonant frequencies not available for this ROMResult.")
-
-    def __repr__(self) -> str:
-        n_freq = len(self.frequencies) if self.frequencies is not None else 0
-        return (f"ROMResult(domain='{self.domain}', "
-                f"n_ports={self.n_ports}, n_freq={n_freq})")
-
-
-# =============================================================================
-# ConcatResult
-# =============================================================================
-
-class ConcatResult(PlotMixin):
-    """
-    Wrapper around a ``ConcatenatedSystem`` (FOM or ROM concatenation).
-
-    Attributes
-    ----------
-    frequencies : np.ndarray (Hz) — available after .solve() is called internally
-    Z_dict, S_dict : dict
-    n_ports : int
-
-    Properties
-    ----------
-    rom : ROMResult
-        Further reduces via ``reduce_concatenated_system()`` (lazy, cached).
-    """
-
-    def __init__(
-        self,
-        *,
-        concat_system,          # ConcatenatedSystem instance (already coupled+solved)
-        frequencies: np.ndarray,
-        Z_matrix: Optional[np.ndarray],
-        S_matrix: Optional[np.ndarray],
-        Z_dict: Optional[Dict],
-        S_dict: Optional[Dict],
-        n_ports: int,
-        ports: List[str],
-        n_modes_per_port: int = 1,
-        residual_data: Optional[Dict] = None,
-    ):
-        self._concat_system = concat_system
-        self.frequencies = frequencies
-        self._Z_matrix = Z_matrix
-        self._S_matrix = S_matrix
-        self._Z_dict = Z_dict
-        self._S_dict = S_dict
-        self.n_ports = n_ports
-        self.ports = ports
-        self._n_modes_per_port = n_modes_per_port
-        self._residual_data = residual_data
-
-        self._rom_cache: Optional[ROMResult] = None
-
-    # ------------------------------------------------------------------
-    # PlotMixin requirements
-    # ------------------------------------------------------------------
-
-    @property
-    def Z_dict(self) -> Optional[Dict]:
-        return self._Z_dict
-
-    @property
-    def S_dict(self) -> Optional[Dict]:
-        return self._S_dict
-
-    # ------------------------------------------------------------------
-    # ROM navigation
-    # ------------------------------------------------------------------
-
-    @property
-    def rom(self) -> ROMResult:
-        """Further-reduce this concatenated system via POD (lazy, cached)."""
-        if self._rom_cache is None:
-            self._rom_cache = self._build_rom()
-        return self._rom_cache
-
-    def _build_rom(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> ROMResult:
-        from solvers.concatenation import reduce_concatenated_system
-        reduced = reduce_concatenated_system(
-            self._concat_system, tol=tol, max_rank=max_rank
-        )
-        # Solve the reduced system over the same frequency range
-        fmin_ghz = self.frequencies[0] / 1e9
-        fmax_ghz = self.frequencies[-1] / 1e9
-        nsamples = len(self.frequencies)
-        result = reduced.solve(fmin_ghz, fmax_ghz, nsamples)
-
-        return ROMResult(
-            domain='concat_rom',
-            frequencies=result['frequencies'],
-            Z_matrix=result['Z'],
-            S_matrix=result['S'],
-            Z_dict=result['Z_dict'],
-            S_dict=result['S_dict'],
-            n_ports=reduced.n_ports,
-            ports=list(reduced.ports),
-            n_modes_per_port=reduced._n_modes_per_port,
-            _rom_ref=reduced,
-        )
-
-    def get_eigenvalues(self, **kwargs):
-        return self._concat_system.get_eigenvalues(**kwargs)
-
-    def get_resonant_frequencies(self, **kwargs):
-        return self._concat_system.get_resonant_frequencies(**kwargs)
-
-    def __repr__(self) -> str:
-        n_freq = len(self.frequencies) if self.frequencies is not None else 0
-        return (f"ConcatResult(n_ports={self.n_ports}, n_freq={n_freq})")
-
-
-# =============================================================================
 # FOMCollection
 # =============================================================================
 
@@ -332,12 +176,12 @@ class FOMCollection(PlotMixin):
 
     Supports indexing (``fds.foms[0]``), iteration, and length.
 
-    Properties
-    ----------
-    roms : ROMCollection
-        Per-domain ROMs (lazy, cached).
-    concat : ConcatResult
-        Concatenated FOM result (lazy, cached from FDS concatenate method).
+    Methods
+    -------
+    reduce(tol, max_rank) -> ROMCollection
+        Reduce all domains. Returns a new ROMCollection each call.
+    concatenate() -> ConcatenatedSystem
+        Concatenate all domains via Kirchhoff coupling (W=I for FOM-level).
     """
 
     def __init__(
@@ -350,10 +194,6 @@ class FOMCollection(PlotMixin):
             raise ValueError("FOMCollection requires at least one FOMResult.")
         self._foms = fom_list
         self._fds_ref = _fds_ref
-
-        # Lazy caches
-        self._roms_cache: Optional[ROMCollection] = None
-        self._concat_cache: Optional[ConcatResult] = None
 
     # ------------------------------------------------------------------
     # Sequence interface
@@ -468,28 +308,24 @@ class FOMCollection(PlotMixin):
         return fig, ax
 
     # ------------------------------------------------------------------
-    # ROM and Concat navigation
+    # Reduce and Concatenate
     # ------------------------------------------------------------------
 
-    @property
-    def roms(self) -> ROMCollection:
-        """Per-domain ROMs (lazy, cached)."""
-        if self._roms_cache is None:
-            self._roms_cache = self._build_roms()
-        return self._roms_cache
+    def reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> 'ROMCollection':
+        """
+        Reduce all domains via POD. Returns a new ROMCollection each call.
 
-    @property
-    def concat(self) -> ConcatResult:
-        """Concatenate the per-domain FOMs via Kirchhoff coupling (lazy, cached)."""
-        if self._concat_cache is None:
-            self._concat_cache = self._build_concat()
-        return self._concat_cache
+        Parameters
+        ----------
+        tol : float
+            SVD truncation tolerance.
+        max_rank : int, optional
+            Maximum rank for all domains.
 
-    def _build_roms(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> ROMCollection:
-        """Build a ROMCollection by reducing each domain's FOM.
-
-        Creates a single ModelOrderReduction that covers all domains so
-        that ``ROMCollection.concat`` can call ``mor.concatenate()``.
+        Returns
+        -------
+        ROMCollection
+            Collection of per-domain reduced models.
         """
         if self._fds_ref is None:
             raise RuntimeError("FOMCollection has no reference to the FrequencyDomainSolver.")
@@ -500,56 +336,122 @@ class FOMCollection(PlotMixin):
         mor = ModelOrderReduction(fds)
         mor.reduce(tol=tol, max_rank=max_rank)
 
-        # Solve per-domain to get per-domain Z/S
-        freqs = fds.frequencies
-        fmin_ghz = freqs[0] / 1e9
-        fmax_ghz = freqs[-1] / 1e9
-        nsamples = len(freqs)
-        per_domain_results = mor.solve_per_domain(fmin_ghz, fmax_ghz, nsamples)
+        return ROMCollection(_fds_ref=self._fds_ref, _mor_ref=mor)
 
-        rom_results = []
-        for domain in fds.domains:
-            dr = per_domain_results[domain]
-            rom_results.append(ROMResult(
-                domain=domain,
-                frequencies=dr['frequencies'],
-                Z_matrix=dr['Z'],
-                S_matrix=dr['S'],
-                Z_dict=dr['Z_dict'],
-                S_dict=dr['S_dict'],
-                n_ports=len(dr['ports']),
-                ports=list(dr['ports']),
-                n_modes_per_port=fds._n_modes_per_port or 1,
-                _rom_ref=mor,
-            ))
-
-        return ROMCollection(rom_results, _fds_ref=self._fds_ref, _mor_ref=mor)
-
-    def _build_concat(self) -> ConcatResult:
+    def concatenate(self):
         """
-        Concatenate per-domain FOM Z-matrices via the solver's built-in
-        concatenation (global_method='concatenate').
+        Concatenate per-domain FOMs via Kirchhoff coupling (W=I).
+
+        Wraps each domain's full-order (K, M, B) matrices as ReducedStructure
+        objects with ``is_full_order=True`` and ``W=I``, then builds a
+        ConcatenatedSystem.
+
+        .. warning::
+            This creates large dense matrices since W=I preserves the full
+            dimensionality. Intended primarily for testing and validation.
+
+        Returns
+        -------
+        ConcatenatedSystem
+            Coupled full-order system with ``.solve()`` and ``.reduce()`` methods.
         """
         if self._fds_ref is None:
             raise RuntimeError("FOMCollection has no reference to the FrequencyDomainSolver.")
 
+        import scipy.sparse as sp
+        from rom.structures import ReducedStructure
+        from solvers.concatenation import ConcatenatedSystem
+
         fds = self._fds_ref
-        # Trigger concatenation solve if not already done
-        if fds._Z_global_concatenate is None:
-            # Re-run using concatenate method over the same freq range
-            freqs = fds.frequencies
-            fmin_ghz = freqs[0] / 1e9
-            fmax_ghz = freqs[-1] / 1e9
-            nsamples = len(freqs)
-            fds.solve(fmin_ghz, fmax_ghz, nsamples,
-                      per_domain=True, global_method='concatenate',
-                      store_snapshots=False)
 
-        return _make_concat_result_from_fds_z(fds)
+        # Warn about matrix size
+        total_ndof = sum(fds._fes[d].ndof for d in fds.domains if d in fds._fes)
+        warnings.warn(
+            f"FOM-level concatenation creates dense matrices from full-order systems "
+            f"(total DOFs: {total_ndof}). This may consume significant memory. "
+            f"For large problems, consider fds.foms.reduce().concatenate() instead.",
+            UserWarning,
+            stacklevel=2,
+        )
 
-    def _invalidate(self):
-        self._roms_cache = None
-        self._concat_cache = None
+        structures = []
+        for domain in fds.domains:
+            K_d = fds.K[domain]
+            M_d = fds.M[domain]
+            B_d = fds.B[domain]
+
+            # Get free DOFs
+            fes_d = fds._fes[domain]
+            free_dofs = np.array([i for i in range(fes_d.ndof) if fes_d.FreeDofs()[i]])
+            n_free = len(free_dofs)
+
+            # Extract free DOF submatrices and convert to dense
+            K_free = K_d[np.ix_(free_dofs, free_dofs)].toarray()
+            M_free = M_d[np.ix_(free_dofs, free_dofs)].toarray()
+            B_free = B_d[free_dofs, :]
+
+            # A = M⁻¹ K is not formed directly; for the reduced system
+            # the convention is (A_r - ω²I)x = ωB_r u
+            # where A_r = W^T K W and B_r = W^T B, with W=I here
+            # So Ard = K_free (acting on free DOFs with M factored out via the eigenproblem)
+            # Actually for consistency with the ROM convention:
+            # A_r = V^T K V where V is the POD basis. With V=I (full order),
+            # A_r = K_free. The mass matrix is implicit in the ω² I term because
+            # the ROM formulation assumes mass-orthonormal basis.
+            # For FOM W=I concatenation, we need to be consistent with how
+            # ConcatenatedSystem.solve() works: (A - ω²I)x = ωBu
+            # This means A should encode the stiffness-to-mass ratio.
+
+            # Solve the generalized problem via: M^{-1}K x = ω² x
+            # i.e. A = M_free^{-1} @ K_free (dense, but that's the W=I path)
+            import scipy.linalg as sl
+            # Use Cholesky or direct solve for M^{-1} K
+            try:
+                L = sl.cholesky(M_free, lower=True)
+                M_inv_K = sl.cho_solve((L, True), K_free.T).T
+                Ard = 0.5 * (M_inv_K + M_inv_K.T)  # Symmetrize
+            except sl.LinAlgError:
+                # M may be singular on free DOFs — use pseudo-inverse
+                M_inv_K = sl.solve(M_free, K_free, assume_a='sym')
+                Ard = 0.5 * (M_inv_K + M_inv_K.T)
+
+            # B_r with W=I: B_rd = M_free^{-1} @ B_free (mass-weighted port basis)
+            try:
+                Brd = sl.cho_solve((L, True), B_free)
+            except (sl.LinAlgError, NameError):
+                Brd = sl.solve(M_free, B_free, assume_a='sym')
+
+            domain_ports = fds.domain_port_map[domain]
+            port_modes_d = {p: fds.port_modes[p] for p in domain_ports if p in fds.port_modes}
+
+            structures.append(ReducedStructure(
+                Ard=Ard,
+                Brd=Brd,
+                ports=domain_ports,
+                port_modes=port_modes_d,
+                domain=domain,
+                r=n_free,
+                n_full=n_free,
+                is_full_order=True,
+            ))
+
+        concat = ConcatenatedSystem(
+            structures=structures,
+            port_impedance_func=fds._get_port_impedance,
+            solver_ref=fds,
+        )
+
+        # Auto-detect sequential connections
+        connections = []
+        for i in range(len(fds.domains) - 1):
+            port_a = fds.domain_port_map[fds.domains[i]][-1]    # last port of domain i
+            port_b = fds.domain_port_map[fds.domains[i + 1]][0]  # first port of domain i+1
+            connections.append(((i, port_a), (i + 1, port_b)))
+
+        concat.define_connections(connections)
+        concat.couple()
+
+        return concat
 
     def __repr__(self) -> str:
         return (f"FOMCollection([{', '.join(f.domain for f in self._foms)}])")
@@ -561,41 +463,43 @@ class FOMCollection(PlotMixin):
 
 class ROMCollection(PlotMixin):
     """
-    Ordered collection of per-domain :class:`ROMResult` objects.
+    Collection of per-domain reduced-order models.
 
-    Properties
-    ----------
-    concat : ConcatResult
-        Concatenated ROM result (lazy, cached).
+    Created by :meth:`FOMCollection.reduce`. Each call to ``reduce()``
+    produces a new, independent ``ROMCollection``.
+
+    Methods
+    -------
+    concatenate() -> ConcatenatedSystem
+        Concatenate all per-domain ROMs via Kirchhoff coupling.
     """
 
     def __init__(
         self,
-        rom_list: List[ROMResult],
         *,
         _fds_ref=None,
-        _mor_ref=None,   # underlying ModelOrderReduction (if available)
+        _mor_ref=None,   # underlying ModelOrderReduction
     ):
-        if not rom_list:
-            raise ValueError("ROMCollection requires at least one ROMResult.")
-        self._roms = rom_list
+        if _mor_ref is None:
+            raise ValueError("ROMCollection requires a ModelOrderReduction reference.")
         self._fds_ref = _fds_ref
         self._mor_ref = _mor_ref
 
-        self._concat_cache: Optional[ConcatResult] = None
-
     # ------------------------------------------------------------------
-    # Sequence interface
+    # Sequence interface (delegates to MOR domains)
     # ------------------------------------------------------------------
 
-    def __getitem__(self, idx: int) -> ROMResult:
-        return self._roms[idx]
+    def __getitem__(self, idx: int):
+        """Access per-domain reduced data by index."""
+        domain = self._mor_ref.domains[idx]
+        return self._mor_ref.get_reduced_structure(domain)
 
     def __len__(self) -> int:
-        return len(self._roms)
+        return self._mor_ref.n_domains
 
-    def __iter__(self) -> Iterator[ROMResult]:
-        return iter(self._roms)
+    def __iter__(self):
+        for domain in self._mor_ref.domains:
+            yield self._mor_ref.get_reduced_structure(domain)
 
     # ------------------------------------------------------------------
     # PlotMixin — aggregate
@@ -603,169 +507,51 @@ class ROMCollection(PlotMixin):
 
     @property
     def frequencies(self) -> np.ndarray:
-        return self._roms[0].frequencies
+        return self._mor_ref.frequencies if hasattr(self._mor_ref, 'frequencies') and self._mor_ref.frequencies is not None else np.array([])
 
     @property
     def Z_dict(self) -> Optional[Dict]:
-        return self._roms[0].Z_dict
+        return self._mor_ref.Z_dict if hasattr(self._mor_ref, 'Z_dict') else None
 
     @property
     def S_dict(self) -> Optional[Dict]:
-        return self._roms[0].S_dict
-
-    def plot_s(self, params=None, plot_type='db', ax=None, label=None,
-               title=None, show=False, **kwargs):
-        import matplotlib.pyplot as plt
-        fig, ax = self._ensure_ax(ax)
-        for rom in self._roms:
-            lbl = f"{label or ''}{rom.domain}" if label else rom.domain
-            fig, ax = rom.plot_s(params=params, plot_type=plot_type, ax=ax,
-                                  label=lbl, title=title, **kwargs)
-        if title:
-            ax.set_title(title)
-        if show:
-            plt.show()
-        return fig, ax
-
-    def plot_z(self, params=None, plot_type='db', ax=None, label=None,
-               title=None, show=False, **kwargs):
-        import matplotlib.pyplot as plt
-        fig, ax = self._ensure_ax(ax)
-        for rom in self._roms:
-            lbl = f"{label or ''}{rom.domain}" if label else rom.domain
-            fig, ax = rom.plot_z(params=params, plot_type=plot_type, ax=ax,
-                                  label=lbl, title=title, **kwargs)
-        if title:
-            ax.set_title(title)
-        if show:
-            plt.show()
-        return fig, ax
-
-    def plot_eigenvalues(self, n_modes=30, ax=None, label=None,
-                         title=None, show=False, **kwargs):
-        import matplotlib.pyplot as plt
-        fig, ax = self._ensure_ax(ax, figsize=(10, 3))
-        for rom in self._roms:
-            lbl = f"{label or ''}{rom.domain}" if label else rom.domain
-            try:
-                fig, ax = rom.plot_eigenvalues(n_modes=n_modes, ax=ax,
-                                               label=lbl, **kwargs)
-            except RuntimeError:
-                pass
-        if title:
-            ax.set_title(title)
-        if show:
-            plt.show()
-        return fig, ax
+        return self._mor_ref.S_dict if hasattr(self._mor_ref, 'S_dict') else None
 
     # ------------------------------------------------------------------
-    # Concat navigation
+    # Concatenate
     # ------------------------------------------------------------------
 
-    @property
-    def concat(self) -> ConcatResult:
-        """Concatenate all per-domain ROMs via Kirchhoff coupling (lazy, cached)."""
-        if self._concat_cache is None:
-            self._concat_cache = self._build_concat()
-        return self._concat_cache
-
-    def _build_concat(self) -> ConcatResult:
+    def concatenate(self):
         """
-        Concatenate per-domain ROMs using ModelOrderReduction.concatenate().
+        Concatenate all per-domain ROMs via Kirchhoff coupling.
+
+        Returns
+        -------
+        ConcatenatedSystem
+            Coupled reduced system with ``.solve()`` and ``.reduce()`` methods.
         """
         if self._mor_ref is None:
             raise RuntimeError(
                 "ROMCollection has no reference to ModelOrderReduction. "
-                "Access via fds.foms.roms to get a properly wired collection."
+                "Access via fds.foms.reduce() to get a properly wired collection."
             )
-        mor = self._mor_ref
-        concat_sys = mor.concatenate()
+        return self._mor_ref.concatenate()
 
-        # Solve the concatenated system over the same frequency range
-        freqs = self._roms[0].frequencies
-        fmin_ghz = freqs[0] / 1e9
-        fmax_ghz = freqs[-1] / 1e9
-        nsamples = len(freqs)
-        result = concat_sys.solve(fmin_ghz, fmax_ghz, nsamples)
+    @property
+    def mor(self):
+        """Access the underlying ModelOrderReduction object."""
+        return self._mor_ref
 
-        return ConcatResult(
-            concat_system=concat_sys,
-            frequencies=result['frequencies'],
-            Z_matrix=result['Z'],
-            S_matrix=result['S'],
-            Z_dict=result['Z_dict'],
-            S_dict=result['S_dict'],
-            n_ports=concat_sys.n_ports,
-            ports=list(concat_sys.ports),
-            n_modes_per_port=concat_sys._n_modes_per_port,
-        )
+    def get_eigenvalues(self, domain: str = None, **kwargs):
+        """Compute eigenvalues from per-domain A_r matrices."""
+        return self._mor_ref.get_eigenvalues(domain=domain, **kwargs)
 
-    def _invalidate(self):
-        self._concat_cache = None
+    def get_resonant_frequencies(self, **kwargs):
+        return self._mor_ref.get_resonant_frequencies(**kwargs)
 
     def __repr__(self) -> str:
-        return (f"ROMCollection([{', '.join(r.domain for r in self._roms)}])")
-
-
-# =============================================================================
-# Helper: build a ConcatResult from the FDS concatenate Z matrices
-# =============================================================================
-
-def _make_concat_result_from_fds_z(fds) -> ConcatResult:
-    """
-    Build a lightweight ConcatResult from FrequencyDomainSolver concatenate results.
-
-    This does NOT require a ConcatenatedSystem object — it wraps the Z/S matrices
-    that were computed by fds._build_concatenated_z_matrices().
-    """
-    if fds._Z_global_concatenate is None:
-        raise RuntimeError(
-            "No concatenated Z-matrix found. "
-            "Call fds.solve(..., global_method='concatenate') first."
-        )
-
-    # Build Z_dict / S_dict from the matrices
-    Z_mat = fds._Z_global_concatenate
-    S_mat = fds._S_global_concatenate
-
-    n_freq, n_p, _ = Z_mat.shape
-    n_modes = fds._n_modes_per_port or 1
-    Z_dict = {'frequencies': fds.frequencies}
-    S_dict = {'frequencies': fds.frequencies} if S_mat is not None else None
-
-    for row in range(n_p):
-        port_row = row // n_modes + 1
-        mode_row = row % n_modes + 1
-        for col in range(n_p):
-            port_col = col // n_modes + 1
-            mode_col = col % n_modes + 1
-            key = f'{port_col}({mode_col}){port_row}({mode_row})'
-            Z_dict[key] = Z_mat[:, row, col]
-            if S_dict is not None and S_mat is not None:
-                S_dict[key] = S_mat[:, row, col]
-
-    # Use a mock concat system that at least supports eigenvalues via the fds
-    class _FDSConcatProxy:
-        """Minimal proxy exposing ConcatenatedSystem-like interface for FOM concat."""
-        def __init__(self, solver):
-            self._fds = solver
-        def get_eigenvalues(self, **kwargs):
-            return self._fds.get_eigenvalues(**kwargs)
-        def get_resonant_frequencies(self, **kwargs):
-            return self._fds.get_resonant_frequencies(**kwargs)
-
-    return ConcatResult(
-        concat_system=_FDSConcatProxy(fds),
-        frequencies=fds.frequencies,
-        Z_matrix=Z_mat,
-        S_matrix=S_mat,
-        Z_dict=Z_dict,
-        S_dict=S_dict,
-        n_ports=n_p // n_modes,
-        ports=fds.external_ports,
-        n_modes_per_port=n_modes,
-        residual_data=getattr(fds, '_residuals', {}).get('global'),
-    )
+        domains = ', '.join(self._mor_ref.domains)
+        return f"ROMCollection([{domains}])"
 
 
 # =============================================================================
@@ -821,9 +607,6 @@ def build_fom_result(fds, domain: str = 'global') -> FOMResult:
         ports = domain_ports
         n_ports = len(domain_ports)
 
-    def _rom_factory():
-        return _build_rom_result_from_fds(fds, domain=domain)
-
     return FOMResult(
         domain=domain,
         frequencies=fds.frequencies,
@@ -836,38 +619,6 @@ def build_fom_result(fds, domain: str = 'global') -> FOMResult:
         n_modes_per_port=fds._n_modes_per_port or 1,
         residual_data=getattr(fds, '_residuals', {}).get(domain),
         _solver_ref=fds,
-        _rom_factory=_rom_factory,
-    )
-
-
-def _build_rom_result_from_fds(fds, domain: str = 'global') -> ROMResult:
-    """
-    Build a ROMResult by running ModelOrderReduction on fds.
-
-    For ``domain='global'`` reduces the full coupled mesh.
-    For a specific domain, reduces that domain's per-domain matrices.
-    """
-    from rom.reduction import ModelOrderReduction
-
-    mor = ModelOrderReduction(fds)
-    mor.reduce()
-    mor.solve(
-        fds.frequencies[0] / 1e9,
-        fds.frequencies[-1] / 1e9,
-        len(fds.frequencies),
-    )
-
-    return ROMResult(
-        domain=domain,
-        frequencies=mor.frequencies,
-        Z_matrix=mor._Z_matrix,
-        S_matrix=mor._S_matrix,
-        Z_dict=mor.Z_dict,
-        S_dict=mor.S_dict,
-        n_ports=mor.n_ports,
-        ports=list(mor.ports),
-        n_modes_per_port=mor._n_modes_per_port or 1,
-        _rom_ref=mor,
     )
 
 

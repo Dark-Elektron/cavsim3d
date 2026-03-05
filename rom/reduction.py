@@ -4,13 +4,15 @@ from typing import Tuple, Optional, Dict, List, Union
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from solvers.eigen_mixin import ROMEigenMixin
 
 from solvers.base import BaseEMSolver, ParameterConverter
+from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
 
 
-class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
+class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     """
     POD-based Model Order Reduction for electromagnetic structures.
 
@@ -540,11 +542,16 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
 
         return self
 
+    # Threshold: below this matrix dimension, use direct solve (LU is fast);
+    # above, use iterative (GMRES handles large/sparse systems better).
+    ITERATIVE_SIZE_THRESHOLD = 500
+
     def solve(
         self,
         fmin: float,
         fmax: float,
         nsamples: int = 100,
+        solver_type: str = 'auto',
         **kwargs
     ) -> Dict:
         """
@@ -559,6 +566,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
             Frequency range [GHz]
         nsamples : int
             Number of frequency samples
+        solver_type : str
+            ``'auto'`` (default) picks direct for small systems, GMRES for
+            large.  ``'iterative'`` forces GMRES.  ``'direct'`` forces
+            ``np.linalg.solve``.
 
         Returns
         -------
@@ -571,35 +582,90 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
         self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
 
         if self.n_domains == 1:
-            return self._solve_single_domain()
+            return self._solve_single_domain(solver_type=solver_type)
         else:
-            return self._solve_multi_domain()
+            return self._solve_multi_domain(solver_type=solver_type)
 
-    def _solve_single_domain(self) -> Dict:
+    def _solve_single_domain(self, solver_type: str = 'auto') -> Dict:
         """Solve single-domain reduced system."""
         domain = self.domains[0]
         A_r = self._A_r[domain]
         B_r = self._B_r[domain]
         r = self._r[domain]
 
+        # Resolve 'auto' solver type
+        if solver_type == 'auto':
+            solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
+            print(f"  Solver: {solver_type} (system size {r})")
+
         n_freq = len(self.frequencies)
         n_ports = B_r.shape[1]
 
         self._Z_matrix = np.zeros((n_freq, n_ports, n_ports), dtype=complex)
-        x_r_all = []
 
-        I_exc = np.eye(n_ports)
+        import time
+        t0 = time.time()
 
-        for k, freq in enumerate(self.frequencies):
-            omega = 2 * np.pi * freq
+        omegas = 2 * np.pi * self.frequencies  # (n_freq,)
 
-            lhs = A_r - omega**2 * np.eye(r)
-            rhs = omega * B_r @ I_exc
+        if solver_type in ('auto', 'direct'):
+            # ============================================================
+            # Eigendecomposition approach (fast for reduced systems)
+            # A = V Λ V^{-1}  →  (A - ω²I)^{-1} = V diag(1/(λ-ω²)) V^{-1}
+            # Z = jω B^T V diag(1/(λ-ω²)) V^{-1} B
+            # ============================================================
+            is_hermitian = np.allclose(A_r, A_r.T.conj(), atol=1e-10)
 
-            x_r = np.linalg.solve(lhs, rhs)
-            x_r_all.append(x_r)
+            if is_hermitian:
+                eigenvalues, V = np.linalg.eigh(A_r)
+                Vinv_B = V.T.conj() @ B_r   # V^H B = V^{-1} B
+            else:
+                eigenvalues, V = np.linalg.eig(A_r)
+                Vinv_B = np.linalg.solve(V, B_r)  # V^{-1} B
 
-            self._Z_matrix[k] = 1j * B_r.T @ x_r
+            D = B_r.T @ V  # B^T V, shape (n_ports, r)
+
+            # d[k, i] = 1 / (λ_i - ω_k²)
+            d = 1.0 / (eigenvalues[None, :] - omegas[:, None]**2)
+
+            # Z[k] = jω D diag(d[k]) (V^{-1} B)
+            for k in range(n_freq):
+                self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ Vinv_B
+
+            # Snapshots: x[k] = ω V diag(d[k]) V^{-1} B
+            x_r_all = []
+            for k in range(n_freq):
+                x_r_all.append(omegas[k] * V @ (d[k, :, None] * Vinv_B))
+
+        else:
+            # ============================================================
+            # Iterative solver (GMRES)
+            # ============================================================
+            I_exc = np.eye(n_ports)
+            x_r_all = []
+            gmres_failures = 0
+
+            for k, freq in enumerate(self.frequencies):
+                omega = omegas[k]
+                lhs = A_r - omega**2 * np.eye(r)
+                rhs = omega * B_r @ I_exc
+
+                lhs_sp = sp.csr_matrix(lhs)
+                x_r = np.zeros_like(rhs)
+                for col in range(rhs.shape[1]):
+                    x_r[:, col], info = spla.gmres(lhs_sp, rhs[:, col])
+                    if info != 0:
+                        gmres_failures += 1
+
+                x_r_all.append(x_r)
+                self._Z_matrix[k] = 1j * B_r.T @ x_r
+
+            if gmres_failures > 0:
+                total_solves = n_freq * n_ports
+                print(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
+
+        t1 = time.time()
+        print(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
 
         self._compute_s_from_z()
         self._invalidate_cache()
@@ -613,13 +679,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin):
             'x_r': {domain: np.array(x_r_all)}
         }
 
-    def _solve_multi_domain(self) -> Dict:
+    def _solve_multi_domain(self, solver_type: str = 'auto') -> Dict:
         """Solve multi-domain system by auto-concatenating."""
         concat = self.concatenate()
         results = concat.solve(
             self.frequencies[0] / 1e9,
             self.frequencies[-1] / 1e9,
-            len(self.frequencies)
+            len(self.frequencies),
+            solver_type=solver_type,
         )
 
         self.frequencies = results['frequencies']
