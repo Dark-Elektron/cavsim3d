@@ -1,66 +1,107 @@
 """
 Structure concatenation for multi-cell analysis.
 
-Key fixes / improvements
-------------------------
-1) Correct handling of multiple modes per port:
-   - Port indexing now tracks (port_name, mode_index) pairs
-   - B matrices have columns for each port-mode combination
+A ConcatenatedSystem represents a SINGLE unified structure formed by
+coupling multiple reduced-order models at internal ports. Field
+reconstruction produces fields over the entire unified mesh.
 
-2) Correct incidence matrix F for internal connections
-
-3) Optional per-connection sign control
-
-4) Robust linear algebra with pseudo-inverse
+Key concepts:
+- Multiple ROMs are coupled via Kirchhoff constraints at internal ports
+- The result is ONE structure with external ports only
+- Field visualization shows the entire structure, not individual pieces
 """
 
-from typing import List, Tuple, Dict, Optional, Callable, Union, Any
+from typing import List, Tuple, Dict, Optional, Callable, Union, Any, Literal
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+from ngsolve import (
+    Norm, curl, BoundaryFromVolumeCF, GridFunction, HCurl, Mesh
+)
+from ngsolve.webgui import Draw
+
 from solvers.eigen_mixin import ConcatEigenMixin
-from core.constants import Z0
+from core.constants import Z0, mu0
 from solvers.base import BaseEMSolver
 from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
 
 
-# Connection now specifies port names; modes are connected mode-by-mode
-Conn = Tuple[Tuple[int, str], Tuple[int, str]]  # ((struct_idx, port_name), (struct_idx, port_name))
-ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1) or (+1,+1)
+# Connection specification: ((struct_idx, port_name), (struct_idx, port_name))
+Conn = Tuple[Tuple[int, str], Tuple[int, str]]
+ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1)
 
 
 class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     """
-    Coupled system of multiple reduced structures with multiple modes per port.
+    Unified structure formed by coupling multiple reduced-order models.
 
-    Coupling idea
-    -------------
-    Each ReducedStructure has reduced system:
+    This class represents the concatenation of multiple ROMs as a SINGLE
+    structure. After coupling, the system has only external ports - internal
+    connections are eliminated via Kirchhoff constraints.
+
+    Field reconstruction produces fields over the ENTIRE unified mesh,
+    not individual sub-structures.
+
+    Coupling Formulation
+    --------------------
+    Each ReducedStructure has:
         (A - ω² I) x = ω B u
-    with Z extracted via:
         Z = j B^T x
 
-    B has columns for each (port, mode) pair.
-
-    Concatenation couples internal ports using a Kirchhoff-style constraint:
+    Concatenation couples internal ports via:
         F^T B_int^T x = 0
-    where F is an incidence matrix encoding internal connections.
 
-    Connections are specified at the port level, and all modes of connected
-    ports are coupled (mode 0 ↔ mode 0, mode 1 ↔ mode 1, etc.)
+    where F is an incidence matrix encoding the connection topology.
+
+    Parameters
+    ----------
+    structures : list of ReducedStructure
+        The reduced-order models to concatenate. Each must have:
+        - Ard, Brd: reduced system matrices
+        - W, Q_L_inv: reconstruction matrices
+        - fes: per-domain FEM space
+        - domain: domain name matching mesh material region
+    mesh : Mesh
+        The unified mesh for the entire structure (required for field plots)
+    fes : HCurl
+        The unified FEM space covering entire mesh (required for field plots)
+    port_impedance_func : callable, optional
+        Function (port, mode, freq) -> impedance
+    solver_ref : object, optional
+        Reference to original solver
+
+    Examples
+    --------
+    >>> # Create from ROMs
+    >>> rom = ModelOrderReduction(solver)
+    >>> rom.reduce(tol=1e-6)
+    >>> structures = rom.get_all_structures()
+    >>>
+    >>> # Concatenate into unified structure
+    >>> concat = ConcatenatedSystem(
+    ...     structures,
+    ...     mesh=solver.mesh,
+    ...     fes=solver._fes_global
+    ... )
+    >>> concat.define_connections([((0, 'port2'), (1, 'port1'))])
+    >>> concat.couple()
+    >>>
+    >>> # Solve and visualize unified field
+    >>> concat.solve(fmin=1, fmax=10, nsamples=100)
+    >>> concat.plot_field(freq_idx=50)  # Shows entire structure
     """
 
     DEFAULT_MIN_EIGENVALUE = 1.0
-
-    # Threshold: below this matrix dimension, use direct solve (LU is fast);
-    # above, use iterative (GMRES handles large/sparse systems better).
     ITERATIVE_SIZE_THRESHOLD = 500
 
     def __init__(
         self,
         structures: List[ReducedStructure],
+        mesh: Optional[Mesh] = None,
+        fes: Optional[HCurl] = None,
         port_impedance_func: Optional[Callable[[str, int, float], complex]] = None,
         solver_ref: Any = None,
     ):
@@ -69,16 +110,28 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self.structures = structures
         self.n_structures = len(structures)
         self._port_impedance_func = port_impedance_func or self._default_impedance
-        # Store solver reference for field reconstruction
         self._solver_ref = solver_ref
 
-        # Validate consistent mode counts
+        # Unified mesh and FEM space for the entire structure
+        self.mesh = mesh
+        self.fes = fes
+
+        # Initialize with default before validation
+        self._n_modes_per_port = 1
+
+        # Try to resolve mesh/fes from available sources
+        self._resolve_mesh_and_fes()
+
+        # Validate consistent mode counts across structures (updates _n_modes_per_port)
         self._validate_mode_counts()
 
-        # Assign global port-mode indices for each (structure, port_name, mode)
+        # Build global port-mode indexing
         self._assign_global_port_modes()
 
-        # Coupling results
+        # Compute DOF offsets for reconstruction
+        self._compute_dof_offsets()
+
+        # Coupling results (populated by couple())
         self.A_coupled: Optional[np.ndarray] = None
         self.B_coupled: Optional[np.ndarray] = None
         self.W_coupled: Optional[np.ndarray] = None
@@ -88,32 +141,92 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self.n_connections: int = 0
         self._connection_signs: Optional[List[ConnSigns]] = None
 
-        self._internal_port_modes: List[int] = []  # global indices of internal port-mode pairs
-        self._external_port_modes: List[int] = []  # global indices of external port-mode pairs
-        self._external_port_mode_names: List[Tuple[str, int]] = []  # (port_name, mode_idx)
-        self._external_port_mode_map: Dict[str, Tuple[int, str, int]] = {}  # new_name -> (struct, port, mode)
+        # Port classification
+        self._internal_port_modes: List[int] = []
+        self._external_port_modes: List[int] = []
+        self._external_port_mode_names: List[Tuple[str, int]] = []
+        self._external_port_mode_map: Dict[str, Tuple[int, str, int]] = {}
         self._permutation: Optional[np.ndarray] = None
         self._n_internal: int = 0
         self._n_external: int = 0
 
+        # Domain names for reference
         self.domains = [s.domain for s in structures]
 
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
 
+    def _resolve_mesh_and_fes(self) -> None:
+        """Resolve mesh and fes from available sources."""
+        # Try to get mesh from structures
+        if self.mesh is None:
+            for struct in self.structures:
+                if struct.mesh is not None:
+                    self.mesh = struct.mesh
+                    break
+
+        # Try to get from solver_ref
+        if self._solver_ref is not None:
+            if self.mesh is None:
+                self.mesh = getattr(self._solver_ref, 'mesh', None)
+            if self.fes is None:
+                # Prefer global fes for unified structure
+                self.fes = getattr(self._solver_ref, '_fes_global', None)
+                if self.fes is None:
+                    self.fes = getattr(self._solver_ref, 'fes', None)
+
+    def _ensure_unified_fes(self) -> None:
+        """Ensure unified FES exists, creating it if necessary."""
+        if self.fes is not None:
+            return
+
+        if self.mesh is None:
+            raise ValueError(
+                "Cannot create unified FES: no mesh available. "
+                "Provide mesh to constructor or ensure structures have mesh."
+            )
+
+        # Determine polynomial order from structures or solver_ref
+        order = 3  # default
+        if self._solver_ref is not None:
+            order = getattr(self._solver_ref, 'order', order)
+        
+        # Try to get from first structure's fes
+        for struct in self.structures:
+            if struct.fes is not None:
+                order = struct.fes.order
+                break
+
+        # Determine Dirichlet BC label
+        bc = 'default'
+        if self._solver_ref is not None:
+            bc = getattr(self._solver_ref, 'bc', bc)
+
+        from ngsolve import HCurl
+        self.fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
+        print(f"  Created unified FES: {self.fes.ndof} DOFs (order={order})")
+
     def _validate_mode_counts(self) -> None:
-        """Validate that mode counts are consistent across structures."""
+        """Validate consistent mode counts across all structures."""
         if not self.structures:
+            self._n_modes_per_port = 1  # Default for empty structures
             return
 
         # Get reference mode count from first structure
         ref_n_modes = self.structures[0].n_port_modes
+        
+        # Handle None or invalid values
+        if ref_n_modes is None or ref_n_modes < 1:
+            ref_n_modes = 1
 
         for i, struct in enumerate(self.structures):
-            if struct.n_port_modes != ref_n_modes:
+            n_modes = struct.n_port_modes
+            if n_modes is None:
+                n_modes = 1
+            if n_modes != ref_n_modes:
                 raise ValueError(
                     f"Inconsistent mode counts: structure 0 has {ref_n_modes} modes/port, "
-                    f"but structure {i} has {struct.n_port_modes} modes/port"
+                    f"but structure {i} has {n_modes} modes/port"
                 )
 
         self._n_modes_per_port = ref_n_modes
@@ -123,36 +236,48 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return Z0
 
     def _assign_global_port_modes(self) -> None:
-        """
-        Assign global indices to each (structure, port, mode) combination.
-
-        The ordering matches how B matrices are constructed:
-        for each structure, columns are ordered as:
-            port0_mode0, port0_mode1, ..., port1_mode0, port1_mode1, ...
-        """
+        """Assign global indices to each (structure, port, mode) combination."""
         offset = 0
 
-        # Maps (struct_idx, port_name, mode_idx) -> global_index
+        # (struct_idx, port_name, mode_idx) -> global_index
         self.port_mode_map: Dict[Tuple[int, str, int], int] = {}
-
-        # Maps global_index -> (struct_idx, port_name, mode_idx)
+        # global_index -> (struct_idx, port_name, mode_idx)
         self._global_to_local: Dict[int, Tuple[int, str, int]] = {}
-
-        # Maps (struct_idx, port_name) -> (start_global_idx, n_modes)
+        # (struct_idx, port_name) -> (start_global_idx, n_modes)
         self.port_to_mode_range: Dict[Tuple[int, str], Tuple[int, int]] = {}
 
         for struct_idx, struct in enumerate(self.structures):
             n_modes = struct.n_port_modes
-            for port_idx, port in enumerate(struct.ports):
+            for port in struct.ports:
                 start_idx = offset
                 for mode_idx in range(n_modes):
-                    global_idx = offset
-                    self.port_mode_map[(struct_idx, port, mode_idx)] = global_idx
-                    self._global_to_local[global_idx] = (struct_idx, port, mode_idx)
+                    self.port_mode_map[(struct_idx, port, mode_idx)] = offset
+                    self._global_to_local[offset] = (struct_idx, port, mode_idx)
                     offset += 1
                 self.port_to_mode_range[(struct_idx, port)] = (start_idx, n_modes)
 
         self.n_total_port_modes = offset
+
+    def _compute_dof_offsets(self) -> None:
+        """Compute DOF offsets for stacking structure solutions."""
+        self._structure_dof_offsets: List[int] = []
+        self._structure_full_dof_offsets: List[int] = []
+
+        reduced_offset = 0
+        full_offset = 0
+
+        for struct in self.structures:
+            self._structure_dof_offsets.append(reduced_offset)
+            self._structure_full_dof_offsets.append(full_offset)
+            reduced_offset += struct.r
+            full_offset += (struct.n_full or struct.r)
+
+        self._total_stacked_dofs = reduced_offset
+        self._total_full_dofs = full_offset
+
+    # =========================================================================
+    # Connection Definition
+    # =========================================================================
 
     def define_connections(
         self,
@@ -165,75 +290,59 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         Parameters
         ----------
-        connections:
+        connections : list
             List of ((structA, portA), (structB, portB)) tuples.
-            All modes of portA are connected to corresponding modes of portB.
-        connection_signs:
-            Optional list of (signA, signB) per connection.
-            Default is (+1, -1) for each connection.
-        validate:
-            If True, perform sanity checks.
+            All modes of connected ports are coupled mode-by-mode.
+        connection_signs : list, optional
+            Per-connection signs (signA, signB). Default: (+1, -1) for each.
+        validate : bool
+            Perform sanity checks if True.
+
+        Returns
+        -------
+        self : ConcatenatedSystem
+            For method chaining.
         """
         self.connections = list(connections)
         self.n_connections = len(self.connections)
 
         if connection_signs is None:
-            self._connection_signs = [(+1.0, -1.0) for _ in range(self.n_connections)]
+            self._connection_signs = [(+1.0, -1.0)] * self.n_connections
         else:
             if len(connection_signs) != self.n_connections:
                 raise ValueError(
                     f"connection_signs length ({len(connection_signs)}) must match "
                     f"number of connections ({self.n_connections})."
                 )
-            self._connection_signs = [(float(a), float(b)) for (a, b) in connection_signs]
+            self._connection_signs = [(float(a), float(b)) for a, b in connection_signs]
 
-        # Identify internal and external port-mode pairs
+        # Identify internal vs external port-modes
         internal_set = set()
-
         for (sA_idx, pA), (sB_idx, pB) in self.connections:
             if validate:
-                if (sA_idx, pA) not in self.port_to_mode_range:
-                    raise KeyError(f"Unknown port in connection: ({sA_idx}, '{pA}')")
-                if (sB_idx, pB) not in self.port_to_mode_range:
-                    raise KeyError(f"Unknown port in connection: ({sB_idx}, '{pB}')")
+                self._validate_connection((sA_idx, pA), (sB_idx, pB))
 
-                # Check mode counts match
-                n_modes_A = self.port_to_mode_range[(sA_idx, pA)][1]
-                n_modes_B = self.port_to_mode_range[(sB_idx, pB)][1]
-                if n_modes_A != n_modes_B:
-                    raise ValueError(
-                        f"Mode count mismatch in connection: "
-                        f"({sA_idx}, '{pA}') has {n_modes_A} modes, "
-                        f"({sB_idx}, '{pB}') has {n_modes_B} modes"
-                    )
-
-            # Mark all modes of these ports as internal
             for mode_idx in range(self._n_modes_per_port):
                 internal_set.add(self.port_mode_map[(sA_idx, pA, mode_idx)])
                 internal_set.add(self.port_mode_map[(sB_idx, pB, mode_idx)])
 
         self._internal_port_modes = sorted(internal_set)
-        self._external_port_modes = sorted(
-            set(range(self.n_total_port_modes)) - internal_set
-        )
+        self._external_port_modes = sorted(set(range(self.n_total_port_modes)) - internal_set)
         self._n_internal = len(self._internal_port_modes)
         self._n_external = len(self._external_port_modes)
 
-        # Build permutation matrix P: reorder to [internal | external]
+        # Build permutation matrix: reorder to [internal | external]
         perm = self._internal_port_modes + self._external_port_modes
-        P = np.zeros((self.n_total_port_modes, self.n_total_port_modes), dtype=float)
+        P = np.zeros((self.n_total_port_modes, self.n_total_port_modes))
         for new_pos, old_pos in enumerate(perm):
             P[new_pos, old_pos] = 1.0
         self._permutation = P
 
-        # Build external port-mode names and mapping
+        # Build external port naming
         self._external_port_mode_names = []
         self._external_port_mode_map = {}
-
         for i, global_idx in enumerate(self._external_port_modes):
             struct_idx, orig_port, mode_idx = self._global_to_local[global_idx]
-            # Create unique name: "port{port_num}({mode_num})"
-            # Find port number within external ports
             new_name = f"port{i // self._n_modes_per_port + 1}({mode_idx + 1})"
             self._external_port_mode_names.append((orig_port, mode_idx))
             self._external_port_mode_map[new_name] = (struct_idx, orig_port, mode_idx)
@@ -243,166 +352,151 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         return self
 
-    def _validate_connections(self) -> None:
-        """Sanity checks for connection definition."""
-        assert self.connections is not None
-        assert self._permutation is not None
+    def _validate_connection(self, portA: Tuple[int, str], portB: Tuple[int, str]) -> None:
+        """Validate a single connection."""
+        sA_idx, pA = portA
+        sB_idx, pB = portB
 
-        # Check that connections don't connect a port to itself
+        if (sA_idx, pA) not in self.port_to_mode_range:
+            raise KeyError(f"Unknown port: ({sA_idx}, '{pA}')")
+        if (sB_idx, pB) not in self.port_to_mode_range:
+            raise KeyError(f"Unknown port: ({sB_idx}, '{pB}')")
+
+        n_modes_A = self.port_to_mode_range[(sA_idx, pA)][1]
+        n_modes_B = self.port_to_mode_range[(sB_idx, pB)][1]
+        if n_modes_A != n_modes_B:
+            raise ValueError(
+                f"Mode count mismatch: ({sA_idx}, '{pA}') has {n_modes_A} modes, "
+                f"({sB_idx}, '{pB}') has {n_modes_B} modes"
+            )
+
+    def _validate_connections(self) -> None:
+        """Validate all connections."""
         for j, ((sA, pA), (sB, pB)) in enumerate(self.connections):
             if sA == sB and pA == pB:
-                raise ValueError(
-                    f"Connection {j} connects port '{pA}' of structure {sA} to itself"
-                )
+                raise ValueError(f"Connection {j} connects port '{pA}' to itself")
 
     def _build_incidence_matrix(self) -> np.ndarray:
-        """
-        Build incidence matrix F for Kirchhoff coupling.
-
-        Shape: (n_internal_port_modes, n_connections * n_modes_per_port)
-
-        For each port-level connection j, we create n_modes_per_port mode-level
-        connections (mode 0 ↔ mode 0, mode 1 ↔ mode 1, etc.)
-        """
-        if self.connections is None:
-            raise ValueError("Must call define_connections() first")
-
+        """Build incidence matrix F for Kirchhoff coupling."""
         n_int = self._n_internal
         n_mode_connections = self.n_connections * self._n_modes_per_port
 
-        F = np.zeros((n_int, n_mode_connections), dtype=float)
-
-        # Map global port-mode index to position in internal array
+        F = np.zeros((n_int, n_mode_connections))
         int_pos = {g: i for i, g in enumerate(self._internal_port_modes)}
 
         col = 0
-        for conn_idx, (((sA_idx, pA), (sB_idx, pB)), (sgnA, sgnB)) in enumerate(
-            zip(self.connections, self._connection_signs)
+        for ((sA_idx, pA), (sB_idx, pB)), (sgnA, sgnB) in zip(
+            self.connections, self._connection_signs
         ):
-            # For each mode, create a connection
             for mode_idx in range(self._n_modes_per_port):
                 gA = self.port_mode_map[(sA_idx, pA, mode_idx)]
                 gB = self.port_mode_map[(sB_idx, pB, mode_idx)]
-
-                F[int_pos[gA], col] = float(sgnA)
-                F[int_pos[gB], col] = float(sgnB)
+                F[int_pos[gA], col] = sgnA
+                F[int_pos[gB], col] = sgnB
                 col += 1
 
-        # Validation: each column must have exactly two nonzeros
-        for j in range(n_mode_connections):
-            nz = np.flatnonzero(np.abs(F[:, j]) > 0)
-            if len(nz) != 2:
-                conn_idx = j // self._n_modes_per_port
-                mode_idx = j % self._n_modes_per_port
-                raise RuntimeError(
-                    f"Bad incidence column {j} (connection {conn_idx}, mode {mode_idx}): "
-                    f"expected 2 nonzeros, got {len(nz)}."
-                )
-
         return F
+
+    # =========================================================================
+    # Coupling
+    # =========================================================================
 
     def couple(self, rcond_pinv: float = 1e-12, rcond_null: float = 1e-12) -> "ConcatenatedSystem":
         """
         Perform structure coupling via null-space projection.
+
+        This creates the unified system by eliminating internal ports
+        through Kirchhoff constraints.
+
+        Returns
+        -------
+        self : ConcatenatedSystem
+            For method chaining.
         """
         if self.connections is None:
             raise ValueError("Must call define_connections() first")
 
-        # Block-diagonal assembly
+        # Block-diagonal assembly of uncoupled structures
         A_blocks = [np.asarray(s.Ard) for s in self.structures]
         B_blocks = [np.asarray(s.Brd) for s in self.structures]
 
         A_blk = sl.block_diag(*A_blocks).astype(complex, copy=False)
         B_blk = sl.block_diag(*B_blocks).astype(complex, copy=False)
 
-        # Apply permutation to reorder port-mode columns: [internal | external]
-        P = self._permutation
-        B_perm = B_blk @ P.T  # (sum r_i) x n_total_port_modes
-
+        # Permute to [internal | external]
+        B_perm = B_blk @ self._permutation.T
         B_int = B_perm[:, :self._n_internal]
         B_ext = B_perm[:, self._n_internal:]
 
-        # Incidence matrix
+        # Build and apply Kirchhoff constraints
         F = self._build_incidence_matrix()
-
-        # Constraint operator: C = B_int @ F
         C = B_int @ F
 
-        # Projection K = I - C (C^H C)^+ C^H
         CtC = C.T.conj() @ C
         CtC_inv = sl.pinvh(CtC)
 
         I = np.eye(A_blk.shape[0], dtype=complex)
         K = I - C @ CtC_inv @ C.T.conj()
 
-        # Null space basis of C^T
+        # Null space basis
         M = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
         if M.size == 0:
-            raise RuntimeError("Null space is empty; constraints overconstrained or inconsistent.")
+            raise RuntimeError("Null space empty; constraints overconstrained.")
 
         KM = K @ M
 
-        # Project system
+        # Project system onto constraint-satisfying subspace
         self.A_coupled = KM.T.conj() @ A_blk @ KM
         self.B_coupled = KM.T.conj() @ B_ext
         self.W_coupled = KM
 
-        # Hermitian symmetrize A
+        # Ensure Hermitian symmetry
         self.A_coupled = 0.5 * (self.A_coupled + self.A_coupled.T.conj())
 
-        print(f"\nCoupled system: {A_blk.shape[0]} -> {self.A_coupled.shape[0]} DOFs")
-        print(f"External port-modes: {self._n_external}, Internal port-modes: {self._n_internal}")
-        print(f"Port connections: {self.n_connections} (× {self._n_modes_per_port} modes each)")
+        print(f"\nCoupled unified system: {A_blk.shape[0]} -> {self.A_coupled.shape[0]} DOFs")
+        print(f"  External port-modes: {self._n_external}")
+        print(f"  Internal port-modes (eliminated): {self._n_internal}")
+        print(f"  Connections: {self.n_connections}")
 
         return self
 
-    # -------------------------------------------------------------------------
-    # BaseEMSolver interface
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # BaseEMSolver Interface
+    # =========================================================================
 
     @property
     def n_ports(self) -> int:
-        """Number of external port-mode combinations."""
         return self._n_external
 
     @property
     def n_external_ports(self) -> int:
-        """Number of unique external ports (not counting modes)."""
         return self._n_external // self._n_modes_per_port
 
     @property
     def n_modes_per_port(self) -> int:
-        """Number of modes per port."""
         return self._n_modes_per_port
 
     @property
     def ports(self) -> List[str]:
-        """External port-mode names."""
         return list(self._external_port_mode_map.keys())
 
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
-        """Get impedance for external port-mode."""
         if port not in self._external_port_mode_map:
             raise KeyError(f"Port '{port}' not found. Available: {self.ports}")
         _, orig_port, orig_mode = self._external_port_mode_map[port]
         return self._port_impedance_func(orig_port, orig_mode, freq)
 
     def _get_impedance_matrix(self, freq: float) -> np.ndarray:
-        """
-        Get diagonal reference impedance matrix for external port-modes.
-
-        Override required because ConcatenatedSystem has special port-mode
-        indexing that doesn't follow the simple port_idx = matrix_idx // n_modes
-        pattern used by regular solvers.
-        """
         Z0_diag = []
-
         for global_idx in self._external_port_modes:
             struct_idx, port_name, mode_idx = self._global_to_local[global_idx]
             Zw = self._port_impedance_func(port_name, mode_idx, freq)
             Z0_diag.append(Zw)
-
         return np.diag(Z0_diag)
+
+    # =========================================================================
+    # Frequency Domain Solution
+    # =========================================================================
 
     def solve(
         self,
@@ -410,11 +504,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         fmax: float,
         nsamples: int = 100,
         compute_s_params: bool = True,
-        rcond_solve: float = 1e-12,
         solver_type: str = 'auto',
     ) -> Dict:
         """
-        Solve coupled reduced system over frequency range.
+        Solve the unified coupled system over a frequency range.
 
         Parameters
         ----------
@@ -423,96 +516,43 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         nsamples : int
             Number of frequency samples
         compute_s_params : bool
-            Compute S-parameters from Z.
-        rcond_solve : float
-            Regularization for lstsq fallback (direct solver only).
+            Compute S-parameters from Z-parameters
         solver_type : str
-            ``'auto'`` (default) picks direct for small systems, GMRES for
-            large.  ``'iterative'`` forces GMRES.  ``'direct'`` forces
-            ``np.linalg.solve``.
+            'auto', 'direct', or 'iterative'
+
+        Returns
+        -------
+        dict
+            Results containing frequencies, Z, S, and snapshots
         """
-        if self.A_coupled is None or self.B_coupled is None:
+        if self.A_coupled is None:
             raise ValueError("Must call couple() first")
 
         self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
         n_ext = self._n_external
         r = self.A_coupled.shape[0]
 
-        # Resolve 'auto' solver type
         if solver_type == 'auto':
             solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
             print(f"  Solver: {solver_type} (system size {r})")
 
         self._Z_matrix = np.zeros((nsamples, n_ext, n_ext), dtype=complex)
+        omegas = 2 * np.pi * self.frequencies
 
         import time
         t0 = time.time()
 
-        omegas = 2 * np.pi * self.frequencies  # (n_freq,)
-
-        if solver_type in ('auto', 'direct'):
-            # ============================================================
-            # Eigendecomposition approach (fast for reduced systems)
-            # A_coupled is Hermitian → A = V Λ V^H
-            # (A - ω²I)^{-1} = V diag(1/(λ - ω²)) V^H
-            # Z = jω B^H V diag(1/(λ - ω²)) V^H B
-            # ============================================================
-            eigenvalues, V = np.linalg.eigh(self.A_coupled)
-            C = V.T.conj() @ self.B_coupled   # V^H B, shape (r, n_ext)
-            D = self.B_coupled.T.conj() @ V   # B^H V, shape (n_ext, r)
-
-            # d[k, i] = 1 / (λ_i - ω_k²), shape (n_freq, r)
-            d = 1.0 / (eigenvalues[None, :] - omegas[:, None]**2)
-
-            # Z[k] = jω_k D diag(d[k]) C  — small matmul, no LAPACK call
-            for k in range(nsamples):
-                self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ C
-
-            # Snapshots: x[k] = ω_k V diag(d[k]) C
-            x_all = []
-            for k in range(nsamples):
-                x_all.append(omegas[k] * V @ (d[k, :, None] * C))
-
+        if solver_type == 'direct':
+            x_all = self._solve_direct(omegas, n_ext, r)
         else:
-            # ============================================================
-            # Iterative solver (GMRES) — for large sparse systems
-            # ============================================================
-            I_ext = np.eye(n_ext, dtype=complex)
-            x_all = []
-            gmres_failures = 0
+            x_all = self._solve_iterative(omegas, n_ext, r)
 
-            for k, freq in enumerate(self.frequencies):
-                omega = omegas[k]
-                lhs = self.A_coupled - (omega**2) * np.eye(r, dtype=complex)
-                rhs = omega * (self.B_coupled @ I_ext)
+        print(f"  Solve: {time.time() - t0:.3f}s ({nsamples} frequencies)")
 
-                lhs_sp = sp.csr_matrix(lhs)
-                x = np.zeros_like(rhs)
-                for col in range(rhs.shape[1]):
-                    x[:, col], info = spla.gmres(lhs_sp, rhs[:, col])
-                    if info != 0:
-                        gmres_failures += 1
-
-                x_all.append(x)
-                self._Z_matrix[k] = 1j * (self.B_coupled.T.conj() @ x)
-
-            if gmres_failures > 0:
-                total_solves = nsamples * n_ext
-                print(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
-
-        t1 = time.time()
-        print(f"  Solve loop: {t1 - t0:.3f}s ({nsamples} freq points)")
-
-        # Store snapshots for later reduce()
         self._snapshots = np.array(x_all)
-
-        t2 = time.time()
 
         if compute_s_params:
             self._compute_s_from_z()
-
-        t3 = time.time()
-        print(f"  Z→S conversion: {t3 - t2:.3f}s")
 
         self._invalidate_cache()
 
@@ -522,29 +562,256 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             "S": self._S_matrix if compute_s_params else None,
             "Z_dict": self.Z_dict,
             "S_dict": self.S_dict if compute_s_params else None,
-            "x": self._snapshots,
         }
 
-    # -------------------------------------------------------------------------
-    # Diagnostics
-    # -------------------------------------------------------------------------
+    def _solve_direct(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
+        """Direct eigendecomposition-based solve."""
+        eigenvalues, V = np.linalg.eigh(self.A_coupled)
+        C = V.T.conj() @ self.B_coupled
+        D = self.B_coupled.T.conj() @ V
 
-    def verify_kirchhoff(self, x_uncoupled: np.ndarray) -> float:
+        d = 1.0 / (eigenvalues[None, :] - omegas[:, None] ** 2)
+
+        x_all = []
+        for k in range(len(omegas)):
+            self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ C
+            x_all.append(omegas[k] * V @ (d[k, :, None] * C))
+
+        return x_all
+
+    def _solve_iterative(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
+        """GMRES-based iterative solve."""
+        I_ext = np.eye(n_ext, dtype=complex)
+        x_all = []
+        failures = 0
+
+        for k, omega in enumerate(omegas):
+            lhs = self.A_coupled - omega ** 2 * np.eye(r, dtype=complex)
+            rhs = omega * self.B_coupled @ I_ext
+
+            lhs_sp = sp.csr_matrix(lhs)
+            x = np.zeros_like(rhs)
+            for col in range(n_ext):
+                x[:, col], info = spla.gmres(lhs_sp, rhs[:, col])
+                if info != 0:
+                    failures += 1
+
+            x_all.append(x)
+            self._Z_matrix[k] = 1j * self.B_coupled.T.conj() @ x
+
+        if failures > 0:
+            print(f"  Warning: {failures} GMRES solves did not converge")
+
+        return x_all
+
+    # =========================================================================
+    # Field Reconstruction - Unified Structure
+    # =========================================================================
+
+    @property
+    def has_snapshots(self) -> bool:
+        return self._snapshots is not None
+
+    def can_reconstruct(self) -> bool:
+        """Check if unified field reconstruction is possible."""
+        if not self.has_snapshots:
+            return False
+        if self.W_coupled is None:
+            return False
+        if self.fes is None:
+            return False
+        if self.mesh is None:
+            return False
+        return all(s.can_reconstruct() for s in self.structures)
+
+    def _reconstruct_field(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0
+    ) -> GridFunction:
         """
-        Verify constraint satisfaction on an *uncoupled stacked* state vector.
+        Reconstruct the unified field over the entire structure.
         """
-        if self.connections is None:
-            raise ValueError("Must call define_connections() first")
+        if not self.has_snapshots:
+            raise ValueError("No snapshots available. Call solve() first.")
 
-        B_blocks = [np.asarray(s.Brd) for s in self.structures]
-        B_blk = sl.block_diag(*B_blocks).astype(complex, copy=False)
-        P = self._permutation
-        B_perm = B_blk @ P.T
-        B_int = B_perm[:, :self._n_internal]
-        F = self._build_incidence_matrix()
+        if self.mesh is None:
+            raise ValueError("No mesh available. Provide mesh to constructor.")
 
-        viol = F.T @ (B_int.T.conj() @ x_uncoupled)
-        return float(np.max(np.abs(viol)))
+        # Ensure we have a unified FES (create if needed)
+        self._ensure_unified_fes()
+
+        # Validate excitation port
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+        col_idx = self.ports.index(excitation_port)
+
+        # Map from coupled to uncoupled stacked coordinates
+        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_uncoupled = self.W_coupled @ x_coupled
+
+        # Create unified GridFunction on global FES
+        E_gf = GridFunction(self.fes, complex=True)
+
+        for struct_idx, struct in enumerate(self.structures):
+            # Check that structure can reconstruct
+            if not struct.can_reconstruct():
+                raise ValueError(
+                    f"Structure {struct_idx} ({struct.domain}) cannot reconstruct. "
+                    f"W: {'set' if struct.W is not None else 'MISSING'}, "
+                    f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
+                    f"fes: {'set' if struct.fes is not None else 'MISSING'}"
+                )
+
+            # Extract this structure's reduced solution
+            start_r = self._structure_dof_offsets[struct_idx]
+            x_reduced = x_uncoupled[start_r:start_r + struct.r]
+
+            # Reconstruct full-order solution for this domain
+            x_full_local = struct.reconstruct(x_reduced)
+
+            # Create per-domain GridFunction
+            E_local = GridFunction(struct.fes, complex=True)
+            E_local.vec.FV().NumPy()[:] = x_full_local
+
+            # Transfer to global GridFunction using definedon
+            domain_region = self.mesh.Materials(struct.domain)
+            E_gf.Set(E_local, definedon=domain_region)
+
+        return E_gf
+
+    def plot_field(
+        self,
+        freq_idx: int = 0,
+        excitation_port: Optional[str] = None,
+        excitation_mode: int = 0,
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+        field_type: Literal['E', 'H'] = 'E',
+        clipping: Optional[Dict] = None,
+        **kwargs
+    ) -> None:
+        """
+        Visualize field over the entire unified structure.
+
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str, optional
+            Port used for excitation. If None, uses first port.
+        excitation_mode : int
+            Mode index for excitation
+        component : {'real', 'imag', 'abs'}
+            Field component to plot
+        field_type : {'E', 'H'}
+            Electric or magnetic field
+        clipping : dict, optional
+            Clipping plane specification
+        **kwargs
+            Additional arguments passed to Draw()
+        """
+        if self.frequencies is None:
+            raise ValueError("No solution available. Call solve() first.")
+
+        if freq_idx >= len(self.frequencies):
+            raise ValueError(f"freq_idx {freq_idx} out of range [0, {len(self.frequencies) - 1}]")
+
+        if self._snapshots is None:
+            raise ValueError("No snapshots available.")
+
+        freq = self.frequencies[freq_idx]
+        omega = 2 * np.pi * freq
+
+        # Default excitation
+        if excitation_port is None:
+            if not self.ports:
+                raise ValueError("No external ports available")
+            excitation_port = self.ports[0]
+
+        if excitation_port not in self.ports:
+            raise ValueError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+
+        print(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        print(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+        print(f"  Unified structure with {self.n_structures} domains: {self.domains}")
+
+        # Reconstruct unified field
+        E_gf = self._reconstruct_field(freq_idx, excitation_port, excitation_mode)
+
+        # Select field type
+        if field_type == 'E':
+            field_cf = E_gf
+            field_label = "E"
+        elif field_type == 'H':
+            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            field_label = "H"
+        else:
+            raise ValueError(f"Invalid field_type: {field_type}")
+
+        # Select component
+        if component == 'abs':
+            cf_plot = Norm(field_cf)
+            plot_name = f"|{field_label}|"
+        elif component == 'real':
+            cf_plot = field_cf.real
+            plot_name = f"Re({field_label})"
+        elif component == 'imag':
+            cf_plot = field_cf.imag
+            plot_name = f"Im({field_label})"
+        else:
+            raise ValueError(f"Invalid component: {component}")
+
+        print(f"  Plotting: {plot_name}")
+
+        draw_kwargs = kwargs.copy()
+        if clipping:
+            draw_kwargs['clipping'] = clipping
+
+        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
+
+    def plot_field_at_frequency(self, freq: float, **kwargs) -> None:
+        """
+        Plot field at specific frequency (Hz).
+
+        Parameters
+        ----------
+        freq : float
+            Frequency in Hz
+        **kwargs
+            Additional arguments passed to plot_field()
+        """
+        if self.frequencies is None:
+            raise ValueError("No solution available.")
+        freq_idx = int(np.argmin(np.abs(self.frequencies - freq)))
+        actual_freq = self.frequencies[freq_idx]
+        if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
+            print(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
+        self.plot_field(freq_idx=freq_idx, **kwargs)
+
+    def get_reconstruction_info(self) -> Dict:
+        """Get information about field reconstruction capability."""
+        info = {
+            'can_reconstruct': self.can_reconstruct(),
+            'has_snapshots': self.has_snapshots,
+            'has_mesh': self.mesh is not None,
+            'has_fes': self.fes is not None,
+            'structures': []
+        }
+        for i, struct in enumerate(self.structures):
+            info['structures'].append({
+                'index': i,
+                'domain': struct.domain,
+                'can_reconstruct': struct.can_reconstruct(),
+                'has_W': struct.W is not None,
+                'has_Q_L_inv': struct.Q_L_inv is not None,
+                'has_fes': struct.fes is not None,
+            })
+        return info
+
+    # =========================================================================
+    # Eigenvalue Analysis
+    # =========================================================================
 
     @staticmethod
     def _filter_eigenvalues(
@@ -553,19 +820,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         min_eigenvalue: float = None,
         n_modes: int = None
     ) -> np.ndarray:
-        """Filter and sort eigenvalues."""
         if min_eigenvalue is None:
             min_eigenvalue = ConcatenatedSystem.DEFAULT_MIN_EIGENVALUE
 
-        eigs_sorted = np.sort(np.real(eigenvalues))
-
+        eigs = np.sort(np.real(eigenvalues))
         if filter_static:
-            eigs_sorted = eigs_sorted[eigs_sorted > min_eigenvalue]
-
-        if n_modes is not None and len(eigs_sorted) > n_modes:
-            eigs_sorted = eigs_sorted[:n_modes]
-
-        return eigs_sorted
+            eigs = eigs[eigs > min_eigenvalue]
+        if n_modes is not None:
+            eigs = eigs[:n_modes]
+        return eigs
 
     def get_eigenvalues(
         self,
@@ -573,163 +836,167 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         filter_static: bool = True,
         min_eigenvalue: float = None,
         n_modes: int = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
-        """Compute eigenvalues of coupled system matrix."""
+    ) -> np.ndarray:
+        """Get eigenvalues of the unified coupled system."""
         if self.A_coupled is None:
             raise ValueError("Must call couple() first")
 
-        def process_eigs(raw_eigs: np.ndarray) -> np.ndarray:
-            return self._filter_eigenvalues(raw_eigs, filter_static, min_eigenvalue, n_modes)
-
         if domain is None or domain == 'global':
-            raw_eigs = np.linalg.eigvalsh(self.A_coupled)
-            return process_eigs(raw_eigs)
+            raw = np.linalg.eigvalsh(self.A_coupled)
+        else:
+            for struct in self.structures:
+                if struct.domain == domain:
+                    raw = np.linalg.eigvalsh(struct.Ard)
+                    break
+            else:
+                raise KeyError(f"Domain '{domain}' not found")
 
-        for struct in self.structures:
-            if struct.domain == domain:
-                raw_eigs = np.linalg.eigvalsh(struct.Ard)
-                return process_eigs(raw_eigs)
-
-        raise KeyError(f"Domain '{domain}' not found. Available: {self.domains}")
+        return self._filter_eigenvalues(raw, filter_static, min_eigenvalue, n_modes)
 
     def get_resonant_frequencies(
-            self,
-            domain: str = None,
-            n_modes: int = None,
-            fmin: float = None,
-            filter_static: bool = True
+        self,
+        n_modes: int = None,
+        fmin: float = None,
+        filter_static: bool = True
     ) -> np.ndarray:
-        """
-        Get resonant frequencies from eigenvalues.
-
-        Parameters
-        ----------
-        domain : str, optional
-            Specific domain or 'global'. Default is global (coupled system).
-        n_modes : int, optional
-            Number of modes to return (sorted by frequency)
-        fmin : float, optional
-            Minimum frequency in GHz. Modes below this are filtered out.
-            Default: ~0.16 MHz (corresponds to min_eigenvalue=1.0)
-        filter_static : bool
-            If True (default), remove static modes (f ≈ 0).
-            When fmin is specified, this is automatically True.
-
-        Returns
-        -------
-        frequencies : ndarray
-            Resonant frequencies in Hz, sorted ascending
-        """
-        # Convert fmin (GHz) to min_eigenvalue (ω²)
+        """Get resonant frequencies of the unified structure."""
         if fmin is not None:
-            fmin_hz = fmin * 1e9
-            min_eigenvalue = (2 * np.pi * fmin_hz) ** 2
+            min_eigenvalue = (2 * np.pi * fmin * 1e9) ** 2
             filter_static = True
         else:
             min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
 
         eigs = self.get_eigenvalues(
-            domain=domain,
             filter_static=filter_static,
-            min_eigenvalue=min_eigenvalue,
-            n_modes=None
+            min_eigenvalue=min_eigenvalue
         )
-
         eigs_pos = eigs[eigs > 0]
         freqs = np.sqrt(eigs_pos) / (2 * np.pi)
-        freqs = np.sort(freqs)
 
         if n_modes is not None:
             freqs = freqs[:n_modes]
-
         return freqs
 
-    def get_coupled_dimensions(self) -> Dict[str, int]:
-        """Get information about coupled system dimensions."""
-        total_uncoupled = sum(s.r for s in self.structures)
-        return {
-            'n_structures': self.n_structures,
-            'total_uncoupled_dofs': total_uncoupled,
-            'coupled_dofs': self.A_coupled.shape[0] if self.A_coupled is not None else None,
-            'n_internal_port_modes': self._n_internal,
-            'n_external_port_modes': self._n_external,
-            'n_modes_per_port': self._n_modes_per_port,
-            'n_connections': self.n_connections if self.connections else 0,
-            'domains': self.domains
-        }
+    # =========================================================================
+    # Further Reduction
+    # =========================================================================
+
+    def reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> 'ReducedConcatenatedSystem':
+        """
+        Further reduce this system via POD on solution snapshots.
+
+        Parameters
+        ----------
+        tol : float
+            SVD truncation tolerance
+        max_rank : int, optional
+            Maximum rank
+
+        Returns
+        -------
+        ReducedConcatenatedSystem
+            Further-reduced unified system
+        """
+        return reduce_concatenated_system(self, tol=tol, max_rank=max_rank)
+
+    # =========================================================================
+    # Diagnostics and Info
+    # =========================================================================
 
     @property
     def coupled_dofs(self) -> int:
-        if self.A_coupled is None:
-            return 0
-        return self.A_coupled.shape[0]
+        return self.A_coupled.shape[0] if self.A_coupled is not None else 0
 
     @property
     def has_solution(self) -> bool:
         return self.frequencies is not None
 
+    def get_coupled_dimensions(self) -> Dict[str, int]:
+        return {
+            'n_structures': self.n_structures,
+            'total_uncoupled_dofs': sum(s.r for s in self.structures),
+            'coupled_dofs': self.coupled_dofs,
+            'n_internal_port_modes': self._n_internal,
+            'n_external_port_modes': self._n_external,
+            'n_modes_per_port': self._n_modes_per_port,
+            'n_connections': self.n_connections or 0,
+        }
+
+    def verify_kirchhoff(self, x_uncoupled: np.ndarray) -> float:
+        """Verify constraint satisfaction on an uncoupled stacked state vector."""
+        if self.connections is None:
+            raise ValueError("Must call define_connections() first")
+
+        B_blocks = [np.asarray(s.Brd) for s in self.structures]
+        B_blk = sl.block_diag(*B_blocks).astype(complex, copy=False)
+        B_perm = B_blk @ self._permutation.T
+        B_int = B_perm[:, :self._n_internal]
+        F = self._build_incidence_matrix()
+
+        viol = F.T @ (B_int.T.conj() @ x_uncoupled)
+        return float(np.max(np.abs(viol)))
+
     def print_info(self) -> None:
-        """Print concatenated system information."""
+        """Print unified system information."""
         print("\n" + "=" * 60)
-        print("ConcatenatedSystem Information")
+        print("Unified Concatenated System")
         print("=" * 60)
 
-        print(f"\nStructures ({self.n_structures}):")
+        print(f"\nComponent structures ({self.n_structures}):")
         for i, s in enumerate(self.structures):
-            print(f"  [{i}] {s.domain}: r={s.r}, ports={s.ports}, modes/port={s.n_port_modes}")
+            recon = "✓" if s.can_reconstruct() else "✗"
+            print(f"  [{i}] {s.domain}: r={s.r}, n_full={s.n_full}, ports={s.ports} [recon:{recon}]")
 
         if self.connections:
-            print(f"\nConnections ({len(self.connections)}):")
+            print(f"\nInternal connections ({len(self.connections)}):")
             for (sA, pA), (sB, pB) in self.connections:
-                print(f"  ({sA}, {pA}) <-> ({sB}, {pB}) [× {self._n_modes_per_port} modes]")
+                print(f"  structure[{sA}].{pA} <-> structure[{sB}].{pB}")
 
         dims = self.get_coupled_dimensions()
-        print(f"\nDimensions:")
-        print(f"  Uncoupled DOFs: {dims['total_uncoupled_dofs']}")
+        print(f"\nUnified system dimensions:")
+        print(f"  Total uncoupled DOFs: {dims['total_uncoupled_dofs']}")
         print(f"  Coupled DOFs: {dims['coupled_dofs']}")
-        print(f"  Modes per port: {dims['n_modes_per_port']}")
-        print(f"  Internal port-modes: {dims['n_internal_port_modes']}")
         print(f"  External port-modes: {dims['n_external_port_modes']}")
+        print(f"  Internal port-modes: {dims['n_internal_port_modes']}")
 
-        print(f"\nExternal port-mode mapping:")
-        for new_name, (struct_idx, orig_name, mode_idx) in self._external_port_mode_map.items():
-            print(f"  {new_name} -> structure[{struct_idx}].{orig_name}[mode {mode_idx}]")
+        print(f"\nExternal ports: {self.ports}")
+
+        recon_ready = self.can_reconstruct()
+        print(f"\nField reconstruction: {'Ready' if recon_ready else 'Not available'}")
+        if not recon_ready:
+            info = self.get_reconstruction_info()
+            if not info['has_mesh']:
+                print("  - Missing: mesh")
+            if not info['has_fes']:
+                print("  - Missing: global fes")
+            if not info['has_snapshots']:
+                print("  - Missing: snapshots (call solve())")
+            for s_info in info['structures']:
+                if not s_info['can_reconstruct']:
+                    print(f"  - Structure {s_info['index']} ({s_info['domain']}): "
+                          f"W={'✓' if s_info['has_W'] else '✗'}, "
+                          f"Q_L_inv={'✓' if s_info['has_Q_L_inv'] else '✗'}, "
+                          f"fes={'✓' if s_info['has_fes'] else '✗'}")
+        else:
+            if self.mesh is not None:
+                print(f"  Mesh: {self.mesh.ne} elements")
+            if self.fes is not None:
+                print(f"  FES: {self.fes.ndof} DOFs")
 
         if self.frequencies is not None:
-            print(f"\nSolution available:")
-            print(f"  Frequency range: {self.frequencies[0]/1e9:.4f} - {self.frequencies[-1]/1e9:.4f} GHz")
-            print(f"  Number of samples: {len(self.frequencies)}")
+            print(f"\nSolution:")
+            print(f"  Range: {self.frequencies[0] / 1e9:.4f} - {self.frequencies[-1] / 1e9:.4f} GHz")
+            print(f"  Samples: {len(self.frequencies)}")
 
         print("=" * 60)
-
-    def reduce(
-        self,
-        tol: float = 1e-6,
-        max_rank: Optional[int] = None,
-    ) -> 'ReducedConcatenatedSystem':
-        """
-        Reduce this concatenated system via second-level POD.
-
-        Requires that ``solve()`` has been called first so that snapshots
-        are available.
-
-        Parameters
-        ----------
-        tol : float
-            SVD truncation tolerance (relative to largest singular value).
-        max_rank : int, optional
-            Maximum rank for the reduced model.
-
-        Returns
-        -------
-        ReducedConcatenatedSystem
-            A further-reduced system with ``solve()`` and ``reduce()`` methods.
-        """
-        return reduce_concatenated_system(self, tol=tol, max_rank=max_rank)
 
 
 class ReducedConcatenatedSystem(ConcatenatedSystem):
-    """Further-reduced concatenated system via POD."""
+    """
+    Further-reduced unified system via POD.
+
+    Created by calling reduce() on a ConcatenatedSystem after solve().
+    """
 
     def __init__(
         self,
@@ -741,15 +1008,20 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
     ):
         BaseEMSolver.__init__(self)
 
-        # Copy parent wiring/state
+        # Copy all parent state
         self.structures = parent.structures
         self.n_structures = parent.n_structures
         self._port_impedance_func = parent._port_impedance_func
+        self._solver_ref = parent._solver_ref
+        self.mesh = parent.mesh
+        self.fes = parent.fes
+
         self.port_mode_map = parent.port_mode_map
         self.port_to_mode_range = parent.port_to_mode_range
         self._global_to_local = parent._global_to_local
         self.n_total_port_modes = parent.n_total_port_modes
         self._n_modes_per_port = parent._n_modes_per_port
+
         self.connections = parent.connections
         self.n_connections = parent.n_connections
         self._connection_signs = parent._connection_signs
@@ -761,17 +1033,96 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         self._permutation = parent._permutation
         self._n_internal = parent._n_internal
         self._n_external = parent._n_external
+
+        self._structure_dof_offsets = parent._structure_dof_offsets
+        self._structure_full_dof_offsets = parent._structure_full_dof_offsets
+        self._total_stacked_dofs = parent._total_stacked_dofs
+        self._total_full_dofs = parent._total_full_dofs
+
         self.domains = parent.domains
 
-        # Reduced operators
+        # Reduced system matrices
         self.A_coupled = np.asarray(A_reduced).astype(complex, copy=False)
         self.B_coupled = np.asarray(B_reduced).astype(complex, copy=False)
-        self.W_coupled = np.asarray(W_reduction).astype(complex, copy=False)
-        self._singular_values = np.asarray(singular_values)
 
+        # Projection matrices
+        # W_reduction: maps from parent coupled coords to this reduced level
+        self._W_this_level = np.asarray(W_reduction).astype(complex, copy=False)
+        # Combined projection: uncoupled stacked -> this reduced level
+        self.W_coupled = parent.W_coupled @ W_reduction
+        # Store parent's W_coupled for multi-level reconstruction
+        self._parent_W_coupled = parent.W_coupled
+
+        self._singular_values = np.asarray(singular_values)
         self._parent = parent
         self._reduction_level = getattr(parent, "_reduction_level", 0) + 1
         self._parent_coupled_dofs = parent.A_coupled.shape[0] if parent.A_coupled is not None else None
+
+        # Snapshot storage (populated by solve())
+        self._snapshots = None
+
+    def _reconstruct_field(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0
+    ) -> GridFunction:
+        """
+        Reconstruct unified field through multiple projection levels.
+
+        For ReducedConcatenatedSystem, we go through:
+        1. This level's reduced coords (from snapshots)
+        2. Parent's coupled coords (via W_this_level)
+        3. Uncoupled stacked coords (via parent.W_coupled)
+        4. Per-domain full-order coords (via struct.reconstruct())
+        """
+        if not self.has_snapshots:
+            raise ValueError("No snapshots available. Call solve() first.")
+
+        if self.fes is None:
+            raise ValueError("No unified FES available.")
+
+        if self.mesh is None:
+            raise ValueError("No mesh available.")
+
+        # Validate excitation port
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+        col_idx = self.ports.index(excitation_port)
+
+        # Get this level's reduced solution
+        x_this_level = self._snapshots[freq_idx, :, col_idx]
+
+        # Map through projection levels to uncoupled stacked coords
+        # x_uncoupled = parent.W_coupled @ (W_this_level @ x_this_level)
+        #             = self.W_coupled @ x_this_level
+        x_uncoupled = self.W_coupled @ x_this_level
+
+        # Create unified GridFunction
+        E_gf = GridFunction(self.fes, complex=True)
+
+        for struct_idx, struct in enumerate(self.structures):
+            if not struct.can_reconstruct():
+                raise ValueError(
+                    f"Structure {struct_idx} ({struct.domain}) cannot reconstruct."
+                )
+
+            # Extract this structure's reduced solution
+            start_r = self._structure_dof_offsets[struct_idx]
+            x_reduced = x_uncoupled[start_r:start_r + struct.r]
+
+            # Reconstruct full-order solution
+            x_full_local = struct.reconstruct(x_reduced)
+
+            # Create per-domain GridFunction
+            E_local = GridFunction(struct.fes, complex=True)
+            E_local.vec.FV().NumPy()[:] = x_full_local
+
+            # Transfer to global GridFunction
+            domain_region = self.mesh.Materials(struct.domain)
+            E_gf.Set(E_local, definedon=domain_region)
+
+        return E_gf
 
     @property
     def singular_values(self) -> np.ndarray:
@@ -781,6 +1132,35 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
     def reduction_level(self) -> int:
         return self._reduction_level
 
+    def print_info(self) -> None:
+        """Print reduced system information."""
+        print("\n" + "=" * 60)
+        print(f"Reduced Concatenated System (Level {self._reduction_level})")
+        print("=" * 60)
+
+        print(f"\nReduction:")
+        print(f"  Parent coupled DOFs: {self._parent_coupled_dofs}")
+        print(f"  This level DOFs: {self.coupled_dofs}")
+        if self._parent_coupled_dofs:
+            compression = 100 * (1 - self.coupled_dofs / self._parent_coupled_dofs)
+            print(f"  Compression: {compression:.1f}%")
+
+        print(f"\nSingular values (top 5):")
+        for i, sv in enumerate(self._singular_values[:5]):
+            print(f"  σ_{i} = {sv:.4e}")
+        if len(self._singular_values) > 5:
+            print(f"  ... ({len(self._singular_values)} total)")
+
+        print(f"\nExternal ports: {self.ports}")
+        print(f"Field reconstruction: {'Ready' if self.can_reconstruct() else 'Not available'}")
+
+        if self.frequencies is not None:
+            print(f"\nSolution:")
+            print(f"  Range: {self.frequencies[0] / 1e9:.4f} - {self.frequencies[-1] / 1e9:.4f} GHz")
+            print(f"  Samples: {len(self.frequencies)}")
+
+        print("=" * 60)
+
 
 def reduce_concatenated_system(
     concat: ConcatenatedSystem,
@@ -788,55 +1168,52 @@ def reduce_concatenated_system(
     max_rank: Optional[int] = None,
 ) -> ReducedConcatenatedSystem:
     """
-    Reduce a concatenated system via second-level POD.
-
-    Uses snapshots stored by ``solve()`` if available. If ``solve()``
-    has not been called, raises an error.
+    Reduce a concatenated system via POD.
 
     Parameters
     ----------
     concat : ConcatenatedSystem
-        The system to reduce.
+        System to reduce (must have solve() called)
     tol : float
-        SVD truncation tolerance (relative to largest singular value).
+        SVD truncation tolerance (relative to largest singular value)
     max_rank : int, optional
-        Maximum rank for the reduced model.
+        Maximum rank for reduced system
 
     Returns
     -------
     ReducedConcatenatedSystem
+        Further-reduced unified system
     """
-    if concat.A_coupled is None or concat.B_coupled is None:
-        raise ValueError("ConcatenatedSystem must be coupled first")
-
+    if concat.A_coupled is None:
+        raise ValueError("System must be coupled first")
     if concat._snapshots is None:
-        raise ValueError(
-            "No snapshots available. Call solve() first to generate snapshots "
-            "for POD-based reduction."
-        )
+        raise ValueError("No snapshots. Call solve() first.")
 
     r_current = concat.A_coupled.shape[0]
 
-    # Use stored snapshots: shape is (n_freq, r, n_ext),
-    # reshape to (r, n_freq * n_ext) for SVD
-    W_snap = np.hstack([concat._snapshots[k] for k in range(concat._snapshots.shape[0])])
+    # Collect snapshots: shape (n_freq, r_coupled, n_ext) -> (r_coupled, n_freq * n_ext)
+    W_snap = np.hstack([concat._snapshots[k] for k in range(len(concat._snapshots))])
 
+    # SVD for POD basis
     U, S, _ = np.linalg.svd(W_snap, full_matrices=False)
 
-    r_new = int(np.sum(S > tol * S[0]))
-    r_new = max(r_new, 1)
+    # Determine truncation rank
+    r_new = max(1, int(np.sum(S > tol * S[0])))
     if max_rank is not None:
-        r_new = min(r_new, int(max_rank))
+        r_new = min(r_new, max_rank)
 
     W_r = U[:, :r_new]
 
+    # Project system
     A_reduced = W_r.T.conj() @ concat.A_coupled @ W_r
     B_reduced = W_r.T.conj() @ concat.B_coupled
 
+    # Ensure Hermitian
     A_reduced = 0.5 * (A_reduced + A_reduced.T.conj())
 
-    print(f"\nReduced concatenated system: {r_current} -> {r_new} DOFs")
-    print(f"Compression: {100*(1 - r_new/r_current):.1f}%")
+    print(f"\nReduced unified system: {r_current} -> {r_new} DOFs")
+    print(f"  Compression: {100 * (1 - r_new / r_current):.1f}%")
+    print(f"  Singular value decay: {S[0]:.2e} -> {S[min(r_new, len(S) - 1)]:.2e}")
 
     return ReducedConcatenatedSystem(
         parent=concat,
@@ -845,4 +1222,3 @@ def reduce_concatenated_system(
         W_reduction=W_r,
         singular_values=S,
     )
-

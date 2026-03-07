@@ -14,7 +14,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from ngsolve import (
-    HCurl, BilinearForm, GridFunction, BND, Integrate, InnerProduct,
+    HCurl, BilinearForm, GridFunction, BND, Cross, Integrate, InnerProduct,
     TaskManager, Preconditioner, solvers, IdentityMatrix, curl, ds,
     CoefficientFunction, specialcf, x, y, z, sin, cos, sqrt, pi
 )
@@ -65,6 +65,7 @@ class PortEigenmodeSolver:
         order: int = 3,
         bc: str = 'default',
         mode_source: Literal['analytic', 'numeric'] = 'analytic',
+        mode_source_internal: Literal['analytic', 'numeric'] = 'analytical',
         geometry_tolerance: float = 0.05,
         polarization_angle: float = 0.0,
         global_up: Tuple[float, float, float] = (0.0, 1.0, 0.0),
@@ -75,6 +76,7 @@ class PortEigenmodeSolver:
         self.order = order
         self.bc = bc
         self.mode_source = mode_source
+        self.mode_source_internal = mode_source_internal
         self.geometry_tolerance = geometry_tolerance
         self.polarization_angle = polarization_angle
         self.ensure_inward_power = ensure_inward_power
@@ -546,7 +548,10 @@ class PortEigenmodeSolver:
         for port in ports:
             geometry = self.port_geometries[port]
             if self.mode_source == 'analytic':
-                self._solve_port_analytic(port, geometry, nmodes, fes_full)
+                if self.mode_source_internal == 'numeric' and (port != ports[0] and port != ports[-1]):
+                    self._solve_port_numeric(port, nmodes, fes_full)
+                else:
+                    self._solve_port_analytic(port, geometry, nmodes, fes_full)
             else:
                 self._solve_port_numeric(port, nmodes, fes_full)
 
@@ -632,6 +637,7 @@ class PortEigenmodeSolver:
                   f"kc={amode.kc:.4f}, σ={sigma:+.0f}")
 
             mode_idx += 1
+        print('\n')
 
     def _solve_port_numeric(self, port: str, nmodes: int, fes_full: HCurl) -> None:
         fes_port = HCurl(
@@ -645,8 +651,11 @@ class PortEigenmodeSolver:
         normal = geometry.normal
         sigma = self.port_orientation_factors[port]
 
-        raw_modes, raw_cutoffs = self._solve_eigenvalue_problem(fes_port, port, nmodes * 2 + 4)
-        raw_mode_types = [self._classify_mode_type(m, port, normal) for m in raw_modes]
+        # Now returns mode types directly
+        raw_modes, raw_cutoffs, raw_mode_types = self._solve_eigenvalue_problem(
+            fes_port, port, nmodes * 2 + 4)
+        
+        # Group degenerate modes (pass types through)
         mode_groups = self._group_degenerate_modes(raw_modes, raw_cutoffs, raw_mode_types)
 
         self.port_modes[port] = {}
@@ -684,14 +693,15 @@ class PortEigenmodeSolver:
                 pol_deg = np.degrees(pol_angle) % 360
                 degen_str = f", degen={degeneracy}" if degeneracy > 1 else ""
                 pol_str = f", pol={pol_deg:.0f}°" if degeneracy > 1 else ""
-
-                print(f"\t{port} mode {mode_idx}: kc={kc:.4f}, "
-                      f"type={group_type}, align={alignment:.4f}, "
-                      f"σ={sigma:+.0f}, phase={'+' if phase_sign > 0 else '-'}"
-                      f"{pol_str}{degen_str}")
+                
+                print(f"\t  {port} mode {mode_idx}: kc={kc:.4f}, "
+                    f"type={group_type}, fc={c0 * kc / (2 * np.pi) / 1e9:.4f} GHz, "
+                    f"σ={sigma:+.0f}, phase={'+' if phase_sign > 0 else '-'}"
+                    f"{pol_str}{degen_str}")
 
                 mode_idx += 1
-
+        print()
+    
     # =========================================================================
     # Optimized basis vector creation
     # =========================================================================
@@ -714,35 +724,155 @@ class PortEigenmodeSolver:
     # =========================================================================
 
     def _solve_eigenvalue_problem(self, fes_port, port, nmodes):
-        u, v = fes_port.TnT()
+        """Solve for both TE and TM modes using curl-curl formulation."""
+        port_region = self.mesh.Boundaries(port)
+        
+        # ========== TE Modes: curl-curl for E with Dirichlet BC ==========
+        te_modes, te_cutoffs = self._solve_te_modes(port, nmodes + 5)
+        
+        # ========== TM Modes: curl-curl for H with natural BC ==========
+        tm_modes, tm_cutoffs = self._solve_tm_modes(port, nmodes + 5)
+        
+        # Combine and sort by cutoff frequency
+        all_modes = []
+        for mode, kc in zip(te_modes, te_cutoffs):
+            all_modes.append((kc, mode, 'TE'))
+        for mode, kc in zip(tm_modes, tm_cutoffs):
+            all_modes.append((kc, mode, 'TM'))
+        
+        all_modes.sort(key=lambda x: x[0])
+        
+        modes = [m for _, m, _ in all_modes]
+        cutoffs = [k for k, _, _ in all_modes]
+        mode_types = [t for _, _, t in all_modes]
+        
+        return modes, cutoffs, mode_types
+
+
+    def _solve_te_modes(self, port: str, nmodes: int):
+        """
+        Solve for TE modes using curl-curl formulation for E.
+        
+        TE modes: E is purely transverse, n × E = 0 on PEC (Dirichlet BC)
+        """
+        # HCurl space WITH Dirichlet BC on conducting walls
+        fes_te = HCurl(
+            self.mesh, order=self.order,
+            dirichlet=self.bc,
+            definedon=self.mesh.Boundaries(port)
+        )
+        
+        port_region = self.mesh.Boundaries(port)
+        u, v = fes_te.TnT()
+        
         a = BilinearForm(curl(u.Trace()) * curl(v.Trace()) * ds(port))
         m = BilinearForm(u.Trace() * v.Trace() * ds(port))
         apre = BilinearForm((curl(u).Trace() * curl(v).Trace() + u.Trace() * v.Trace()) * ds(port))
-        pre = Preconditioner(apre, type="direct")
-
+        pre = Preconditioner(apre, type="multigrid")
+        
         with TaskManager():
             a.Assemble()
             m.Assemble()
             apre.Assemble()
-            G, fes_h1 = fes_port.CreateGradient()
+            
+            # Gradient projection to remove null-space
+            G, fes_h1 = fes_te.CreateGradient()
             GT = G.CreateTranspose()
             math1 = GT @ m.mat @ G
             invh1 = math1.Inverse(freedofs=fes_h1.FreeDofs())
-            proj = IdentityMatrix(fes_port.ndof) - G @ invh1 @ GT @ m.mat
+            proj = IdentityMatrix(fes_te.ndof) - G @ invh1 @ GT @ m.mat
             projpre = proj @ pre
-            evals, evecs = solvers.PINVIT(a.mat, m.mat, pre=projpre, num=nmodes, maxit=30, printrates=False)
-
-        port_region = self.mesh.Boundaries(port)
+            
+            evals, evecs = solvers.PINVIT(
+                a.mat, m.mat, pre=projpre, num=nmodes, maxit=50, printrates=False)
+        
         modes, cutoffs = [], []
         for i, ev in enumerate(evals):
-            if ev > 1:
-                mode = GridFunction(fes_port)
+            if ev > 1e-6:
+                mode = GridFunction(fes_te)
                 mode.vec.data = evecs[i]
-                norm_sq = float(np.real(Integrate(InnerProduct(mode, mode), self.mesh, BND, definedon=port_region)))
+                norm_sq = float(np.real(Integrate(
+                    InnerProduct(mode, mode), self.mesh, BND, definedon=port_region)))
                 if norm_sq > 1e-15:
                     mode.vec.data /= np.sqrt(norm_sq)
                     modes.append(mode)
                     cutoffs.append(np.sqrt(ev))
+        
+        return modes, cutoffs
+
+
+    def _solve_tm_modes(self, port: str, nmodes: int):
+        """
+        Solve for TM modes using curl-curl formulation for H.
+        
+        TM modes: H is purely transverse, n × H = 0 on PEC (natural BC, no Dirichlet)
+        
+        The eigenvalue problem is the same:
+            curl curl H = kc² H
+        
+        But with natural BC instead of essential BC.
+        After solving for H, we can compute E_t from H if needed.
+        """
+        # HCurl space WITHOUT Dirichlet BC (natural BC for H on PEC)
+        fes_tm = HCurl(
+            self.mesh, order=self.order,
+            # No dirichlet parameter - natural BC
+            definedon=self.mesh.Boundaries(port)
+        )
+        
+        port_region = self.mesh.Boundaries(port)
+        u, v = fes_tm.TnT()
+        
+        a = BilinearForm(curl(u.Trace()) * curl(v.Trace()) * ds(port))
+        m = BilinearForm(u.Trace() * v.Trace() * ds(port))
+        apre = BilinearForm((curl(u).Trace() * curl(v).Trace() + u.Trace() * v.Trace()) * ds(port))
+        pre = Preconditioner(apre, type="multigrid")
+        
+        with TaskManager():
+            a.Assemble()
+            m.Assemble()
+            apre.Assemble()
+            
+            # Gradient projection still needed to remove null-space
+            G, fes_h1 = fes_tm.CreateGradient()
+            GT = G.CreateTranspose()
+            math1 = GT @ m.mat @ G
+            invh1 = math1.Inverse(freedofs=fes_h1.FreeDofs())
+            proj = IdentityMatrix(fes_tm.ndof) - G @ invh1 @ GT @ m.mat
+            projpre = proj @ pre
+            
+            evals, evecs = solvers.PINVIT(
+                a.mat, m.mat, pre=projpre, num=nmodes, maxit=50, printrates=False)
+        
+        # For TM modes, we solved for H but we need E for port excitation
+        # E_t and H_t are related by: E_t = -Z_TM * (n × H_t)
+        # For mode patterns, we can use n × H directly (rotation by 90°)
+        
+        normal = self.port_normals[port]
+        n_cf = CoefficientFunction(tuple(normal))
+        
+        modes, cutoffs = [], []
+        for i, ev in enumerate(evals):
+            if ev > 1e-6:
+                H_mode = GridFunction(fes_tm)
+                H_mode.vec.data = evecs[i]
+                
+                # Convert H to E: E_t ∝ n × H_t
+                # Create E mode in same space
+                E_cf = Cross(n_cf, H_mode)
+                
+                E_mode = GridFunction(fes_tm)
+                E_mode.Set(E_cf, definedon=port_region)
+                
+                # Normalize
+                norm_sq = float(np.real(Integrate(
+                    InnerProduct(E_mode, E_mode), self.mesh, BND, definedon=port_region)))
+                
+                if norm_sq > 1e-15:
+                    E_mode.vec.data /= np.sqrt(norm_sq)
+                    modes.append(E_mode)
+                    cutoffs.append(np.sqrt(ev))
+        
         return modes, cutoffs
 
     def _classify_mode_type(self, mode, port, normal):
