@@ -1,6 +1,6 @@
 """Model Order Reduction using Proper Orthogonal Decomposition."""
 
-from typing import Tuple, Optional, Dict, List, Union
+from typing import Tuple, Optional, Dict, List, Union, Literal
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
@@ -10,6 +10,9 @@ from solvers.eigen_mixin import ROMEigenMixin
 from solvers.base import BaseEMSolver, ParameterConverter
 from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
+from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
+from ngsolve.webgui import Draw
+from core.constants import mu0
 
 
 class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
@@ -54,6 +57,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     # Default threshold for filtering static modes (eigenvalues below this are removed)
     DEFAULT_MIN_EIGENVALUE = 1.0  # ω² > 1 means ω > 1 rad/s
+
+    # Threshold: below this matrix dimension, use direct solve (LU is fast);
+    # above, use iterative (GMRES handles large/sparse systems better).
+    ITERATIVE_SIZE_THRESHOLD = 500
 
     def __init__(self, solver):
         """
@@ -100,6 +107,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self._W_r_global: Optional[np.ndarray] = None
         self._r_global: Optional[int] = None
         self._concatenated: Optional['ConcatenatedSystem'] = None
+
+        # Snapshot storage for field reconstruction
+        self._x_r_snapshots: Optional[Dict[str, np.ndarray]] = None
 
         # Load data from solver
         self._load_from_solver()
@@ -180,7 +190,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     f"Available: {list(self._snapshots.keys())}"
                 )
 
-    # === BaseEMSolver abstract implementations ===
+    # =========================================================================
+    # BaseEMSolver abstract implementations
+    # =========================================================================
 
     @property
     def n_ports(self) -> int:
@@ -410,6 +422,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return freqs
 
+    # =========================================================================
+    # Model Reduction
+    # =========================================================================
+
     def reduce(
         self,
         tol: float = 1e-6,
@@ -542,9 +558,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return self
 
-    # Threshold: below this matrix dimension, use direct solve (LU is fast);
-    # above, use iterative (GMRES handles large/sparse systems better).
-    ITERATIVE_SIZE_THRESHOLD = 500
+    # =========================================================================
+    # Frequency Domain Solution
+    # =========================================================================
 
     def solve(
         self,
@@ -632,7 +648,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             for k in range(n_freq):
                 self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ Vinv_B
 
-            # Snapshots: x[k] = ω V diag(d[k]) V^{-1} B
+            # Snapshots: x_r[k] = ω V diag(d[k]) V^{-1} B
             x_r_all = []
             for k in range(n_freq):
                 x_r_all.append(omegas[k] * V @ (d[k, :, None] * Vinv_B))
@@ -667,6 +683,12 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         t1 = time.time()
         print(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
 
+        # ================================================================
+        # Store reduced snapshots for field reconstruction
+        # Shape: (n_freq, r, n_port_modes)
+        # ================================================================
+        self._x_r_snapshots = {domain: np.array(x_r_all)}
+
         self._compute_s_from_z()
         self._invalidate_cache()
 
@@ -676,7 +698,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             'S': self._S_matrix,
             'Z_dict': self.Z_dict,
             'S_dict': self.S_dict,
-            'x_r': {domain: np.array(x_r_all)}
+            'x_r': self._x_r_snapshots,
         }
 
     def _solve_multi_domain(self, solver_type: str = 'auto') -> Dict:
@@ -696,7 +718,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return results
 
-    # === ROM-specific methods ===
+    # =========================================================================
+    # ROM-specific methods
+    # =========================================================================
 
     def get_reduced_structure(self, domain: str = None) -> ReducedStructure:
         """Get reduced structure data for concatenation."""
@@ -712,12 +736,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         if domain not in self._A_r:
             raise KeyError(f"Domain '{domain}' not found. Available: {self.domains}")
 
-        # Get port modes for this domain's ports
         domain_ports = self.domain_port_map[domain]
-        domain_port_modes = {}
-        for port in domain_ports:
-            if port in self.port_modes:
-                domain_port_modes[port] = self.port_modes[port]
+        domain_port_modes = {p: self.port_modes[p] for p in domain_ports if p in self.port_modes}
+
+        # Get FES and mesh for this domain
+        fes = None
+        mesh = self.mesh
+        if hasattr(self.solver, '_fes'):
+            fes = self.solver._fes.get(domain)
 
         return ReducedStructure(
             Ard=self._A_r[domain],
@@ -726,7 +752,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             port_modes=domain_port_modes,
             domain=domain,
             r=self._r[domain],
-            n_full=self._M[domain].shape[0]
+            n_full=self._M[domain].shape[0],
+            W=self._W[domain],
+            Q_L_inv=self._Q_L_inv[domain],
+            fes=fes,
+            mesh=mesh,
         )
 
     def get_all_structures(self) -> List[ReducedStructure]:
@@ -766,9 +796,12 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 "Single-domain ROM requires 'others' parameter for concatenation"
             )
 
+        # Pass mesh and solver_ref for field reconstruction
         concat = ConcatenatedSystem(
             structures=structures,
-            port_impedance_func=self._port_impedance_func
+            mesh=self.mesh,
+            port_impedance_func=self._port_impedance_func,
+            solver_ref=self.solver,
         )
         concat.define_connections(connections)
         concat.couple()
@@ -873,12 +906,138 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return results
 
+    # =========================================================================
+    # Field Reconstruction
+    # =========================================================================
+
+    def _ensure_fes(self, domain: str = None) -> HCurl:
+        """Ensure FES is available for field reconstruction."""
+        if domain is None:
+            if self.n_domains == 1:
+                domain = self.domains[0]
+            else:
+                raise ValueError("Specify domain for multi-domain structure")
+
+        # Try to get per-domain FES
+        if hasattr(self.solver, '_fes') and isinstance(self.solver._fes, dict):
+            fes = self.solver._fes.get(domain)
+            if fes is not None:
+                return fes
+
+        # Try global FES for single domain
+        if self.n_domains == 1:
+            if hasattr(self.solver, '_fes_global') and self.solver._fes_global is not None:
+                return self.solver._fes_global
+            if hasattr(self.solver, 'fes') and self.solver.fes is not None:
+                return self.solver.fes
+
+        # Create FES if we have mesh
+        if self.mesh is not None:
+            order = getattr(self.solver, 'order', 3)
+            bc = getattr(self.solver, 'bc', 'default')
+            fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
+            print(f"  Created FES for {domain}: {fes.ndof} DOFs")
+            return fes
+
+        raise ValueError(
+            f"No FES available for domain '{domain}'. "
+            "Ensure solver has _fes dict or provide mesh."
+        )
+
+    def _get_snapshot_for_excitation(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int,
+        domain: str
+    ) -> np.ndarray:
+        """
+        Get reduced solution snapshot for a given excitation.
+
+        Returns the reduced coordinates x_r for the specified frequency and excitation.
+        """
+        # For multi-domain, delegate to concatenated system
+        if self.n_domains > 1:
+            if self._concatenated is None:
+                raise ValueError(
+                    "Multi-domain ROM requires concatenation. Call solve() first."
+                )
+            # The concatenated system handles its own snapshots
+            raise NotImplementedError(
+                "Use concatenated_system.plot_field() for multi-domain structures"
+            )
+
+        # Single domain case
+        # Check if we have stored reduced snapshots from solve()
+        if self._x_r_snapshots is None:
+            raise ValueError(
+                "No reduced solution snapshots available. "
+                "Call solve() first to generate snapshots."
+            )
+
+        domain_snapshots = self._x_r_snapshots.get(domain)
+        if domain_snapshots is None:
+            raise ValueError(f"No snapshots for domain '{domain}'")
+
+        # Get port index
+        domain_ports = self.domain_port_map[domain]
+        if excitation_port not in domain_ports:
+            raise ValueError(
+                f"Port '{excitation_port}' not in domain '{domain}'. "
+                f"Available: {domain_ports}"
+            )
+        port_idx = domain_ports.index(excitation_port)
+
+        # Compute column index: port_idx * n_modes + excitation_mode
+        n_modes = self._n_modes_per_port or 1
+        col_idx = port_idx * n_modes + excitation_mode
+
+        # domain_snapshots shape: (n_freq, r, n_port_modes)
+        if freq_idx >= domain_snapshots.shape[0]:
+            raise ValueError(
+                f"freq_idx {freq_idx} out of range [0, {domain_snapshots.shape[0] - 1}]"
+            )
+        if col_idx >= domain_snapshots.shape[2]:
+            raise ValueError(
+                f"Excitation column {col_idx} out of range. "
+                f"port_idx={port_idx}, mode={excitation_mode}"
+            )
+
+        return domain_snapshots[freq_idx, :, col_idx]
+
     def reconstruct_field(
         self,
-        x_r: np.ndarray,
+        x_r: np.ndarray = None,
+        freq_idx: int = None,
+        excitation_port: str = None,
+        excitation_mode: int = 0,
         domain: str = None
     ) -> np.ndarray:
-        """Reconstruct full field from reduced solution."""
+        """
+        Reconstruct full field from reduced solution.
+
+        Can be called with either:
+        - x_r: directly provide reduced solution vector
+        - freq_idx + excitation_port: use stored snapshot
+
+        Parameters
+        ----------
+        x_r : ndarray, optional
+            Reduced solution vector. If None, uses freq_idx and excitation_port.
+        freq_idx : int, optional
+            Frequency index (required if x_r is None)
+        excitation_port : str, optional
+            Excitation port name (required if x_r is None)
+        excitation_mode : int
+            Mode index for excitation
+        domain : str, optional
+            Domain name (auto-detected for single domain)
+
+        Returns
+        -------
+        x_full : ndarray
+            Full-order solution vector
+        """
         if not self._is_reduced:
             raise ValueError("Must call reduce() first")
 
@@ -888,12 +1047,257 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             else:
                 raise ValueError("Specify domain for multi-domain structure")
 
+        # Get x_r from snapshots if not provided
+        if x_r is None:
+            if freq_idx is None or excitation_port is None:
+                raise ValueError(
+                    "Either provide x_r directly, or specify freq_idx and excitation_port"
+                )
+            x_r = self._get_snapshot_for_excitation(
+                freq_idx, excitation_port, excitation_mode, domain
+            )
+
         W = self._W[domain]
         Q_L_inv = self._Q_L_inv[domain]
 
-        return W @ Q_L_inv @ x_r
+        return W @ (Q_L_inv @ x_r)
 
-    # === Properties ===
+    def _reconstruct_field_gf(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0,
+        domain: str = None
+    ) -> GridFunction:
+        """
+        Reconstruct E-field GridFunction from reduced solution.
+
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str
+            Name of the excited port
+        excitation_mode : int
+            Mode index of excitation
+        domain : str, optional
+            Domain name (required for multi-domain, auto-detected for single)
+
+        Returns
+        -------
+        E_gf : GridFunction
+            Reconstructed electric field
+        """
+        if not self._is_reduced:
+            raise ValueError("Must call reduce() first")
+
+        # Handle multi-domain case
+        if self.n_domains > 1:
+            if self._concatenated is None:
+                raise ValueError(
+                    "Multi-domain ROM: call solve() first, then use "
+                    "concatenated_system.plot_field() for visualization."
+                )
+            # Delegate to concatenated system
+            return self._concatenated._reconstruct_field(
+                freq_idx, excitation_port, excitation_mode
+            )
+
+        # Single domain case
+        if domain is None:
+            domain = self.domains[0]
+
+        # Get FES
+        fes = self._ensure_fes(domain)
+
+        # Get reduced solution
+        x_r = self._get_snapshot_for_excitation(
+            freq_idx, excitation_port, excitation_mode, domain
+        )
+
+        # Reconstruct full solution: x_full = W @ Q_L_inv @ x_r
+        W = self._W[domain]
+        Q_L_inv = self._Q_L_inv[domain]
+        x_full = W @ (Q_L_inv @ x_r)
+
+        # Verify dimensions
+        if len(x_full) != fes.ndof:
+            raise ValueError(
+                f"Dimension mismatch: reconstructed {len(x_full)} DOFs, "
+                f"but FES has {fes.ndof} DOFs"
+            )
+
+        # Create GridFunction
+        E_gf = GridFunction(fes, complex=True)
+        E_gf.vec.FV().NumPy()[:] = x_full
+
+        return E_gf
+
+    def can_reconstruct(self, domain: str = None) -> bool:
+        """Check if field reconstruction is possible."""
+        if not self._is_reduced:
+            return False
+
+        if self.n_domains > 1:
+            if self._concatenated is not None:
+                return self._concatenated.can_reconstruct()
+            return False
+
+        # Single domain
+        if domain is None:
+            domain = self.domains[0]
+
+        if domain not in self._W or domain not in self._Q_L_inv:
+            return False
+
+        # Check if we have snapshots from solve()
+        if self._x_r_snapshots is None:
+            return False
+
+        return True
+
+    def plot_field(
+        self,
+        freq_idx: int = 0,
+        excitation_port: Optional[str] = None,
+        excitation_mode: int = 0,
+        domain: Optional[str] = None,
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+        field_type: Literal['E', 'H'] = 'E',
+        clipping: Optional[Dict] = None,
+        **kwargs
+    ) -> None:
+        """
+        Visualize reconstructed field at a specific frequency.
+
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str, optional
+            Port used for excitation. If None, uses first port.
+        excitation_mode : int
+            Mode index for excitation
+        domain : str, optional
+            Domain to visualize (for multi-domain, uses concatenated system)
+        component : {'real', 'imag', 'abs'}
+            Field component to plot
+        field_type : {'E', 'H'}
+            Electric or magnetic field
+        clipping : dict, optional
+            Clipping plane specification
+        **kwargs
+            Additional arguments passed to Draw()
+        """
+        if not self._is_reduced:
+            raise ValueError("Must call reduce() first")
+
+        if self.frequencies is None:
+            raise ValueError("No solution available. Call solve() first.")
+
+        if freq_idx >= len(self.frequencies):
+            raise ValueError(
+                f"freq_idx {freq_idx} out of range [0, {len(self.frequencies) - 1}]"
+            )
+
+        # For multi-domain, delegate to concatenated system
+        if self.n_domains > 1:
+            if self._concatenated is None:
+                raise ValueError(
+                    "Multi-domain ROM: call solve() first to create concatenated system."
+                )
+            self._concatenated.plot_field(
+                freq_idx=freq_idx,
+                excitation_port=excitation_port,
+                excitation_mode=excitation_mode,
+                component=component,
+                field_type=field_type,
+                clipping=clipping,
+                **kwargs
+            )
+            return
+
+        # Single domain case
+        if domain is None:
+            domain = self.domains[0]
+
+        freq = self.frequencies[freq_idx]
+        omega = 2 * np.pi * freq
+
+        # Default excitation port
+        domain_ports = self.domain_port_map[domain]
+        if excitation_port is None:
+            excitation_port = domain_ports[0]
+
+        if excitation_port not in domain_ports:
+            raise ValueError(
+                f"Port '{excitation_port}' not in domain '{domain}'. "
+                f"Available: {domain_ports}"
+            )
+
+        print(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        print(f"  Domain: {domain}")
+        print(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+
+        # Reconstruct field
+        E_gf = self._reconstruct_field_gf(freq_idx, excitation_port, excitation_mode, domain)
+
+        # Select field type
+        if field_type == 'E':
+            field_cf = E_gf
+            field_label = "E"
+        elif field_type == 'H':
+            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            field_label = "H"
+        else:
+            raise ValueError(f"Invalid field_type: {field_type}. Use 'E' or 'H'.")
+
+        # Select component
+        if component == 'abs':
+            cf_plot = Norm(field_cf)
+            plot_name = f"|{field_label}|"
+        elif component == 'real':
+            cf_plot = field_cf.real
+            plot_name = f"Re({field_label})"
+        elif component == 'imag':
+            cf_plot = field_cf.imag
+            plot_name = f"Im({field_label})"
+        else:
+            raise ValueError(f"Invalid component: {component}")
+
+        print(f"  Plotting: {plot_name}")
+
+        draw_kwargs = kwargs.copy()
+        if clipping:
+            draw_kwargs['clipping'] = clipping
+
+        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
+
+    def plot_field_at_frequency(self, freq: float, **kwargs) -> None:
+        """
+        Plot field at specific frequency (Hz).
+
+        Parameters
+        ----------
+        freq : float
+            Frequency in Hz
+        **kwargs
+            Additional arguments passed to plot_field()
+        """
+        if self.frequencies is None:
+            raise ValueError("No solution available. Call solve() first.")
+
+        freq_idx = int(np.argmin(np.abs(self.frequencies - freq)))
+        actual_freq = self.frequencies[freq_idx]
+
+        if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
+            print(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
+
+        self.plot_field(freq_idx=freq_idx, **kwargs)
+
+    # =========================================================================
+    # Properties
+    # =========================================================================
 
     @property
     def reduced_dimensions(self) -> Dict[str, int]:
@@ -952,7 +1356,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """Global projection basis (same as ConcatenatedSystem.W_coupled)."""
         return self._W_r_global
 
-    # === Visualization ===
+    # =========================================================================
+    # Visualization
+    # =========================================================================
 
     def plot_singular_values(
         self,
@@ -1026,6 +1432,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return fig, ax
 
+    # =========================================================================
+    # Info and Diagnostics
+    # =========================================================================
+
     def print_info(self) -> None:
         """Print ROM information."""
         print("\n" + "=" * 60)
@@ -1057,6 +1467,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 print(f"  B_global shape: {self._B_r_global.shape}")
                 if self._concatenated is not None:
                     print(f"  External ports: {self._concatenated.ports}")
+
+            print(f"\nField reconstruction: {'Available' if self.can_reconstruct() else 'Not available'}")
         else:
             print("\nNot yet reduced. Call reduce() first.")
 
@@ -1091,3 +1503,26 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             print(f"{i:<6}{ref_freqs[i]/1e9:<15.4f}{rom_freqs[i]/1e9:<15.4f}{err:<12.2f}")
 
         print("=" * 60)
+
+    def get_reconstruction_info(self) -> Dict:
+        """Get information about field reconstruction capability."""
+        info = {
+            'can_reconstruct': self.can_reconstruct(),
+            'is_reduced': self._is_reduced,
+            'has_snapshots': self._x_r_snapshots is not None,
+            'n_domains': self.n_domains,
+            'domains': {}
+        }
+
+        for domain in self.domains:
+            info['domains'][domain] = {
+                'has_W': domain in self._W,
+                'has_Q_L_inv': domain in self._Q_L_inv,
+                'r': self._r.get(domain),
+                'n_full': self._M[domain].shape[0] if domain in self._M else None,
+            }
+
+        if self.n_domains > 1 and self._concatenated is not None:
+            info['concatenated'] = self._concatenated.get_reconstruction_info()
+
+        return info

@@ -1,8 +1,11 @@
 """Data structures for reduced-order models."""
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 import numpy as np
+
+if TYPE_CHECKING:
+    from ngsolve import HCurl, Mesh
 
 
 @dataclass
@@ -26,6 +29,14 @@ class ReducedStructure:
         Reduced dimension
     n_full : int, optional
         Original full dimension
+    W : ndarray, optional
+        POD basis matrix (n_full x r) for field reconstruction
+    Q_L_inv : ndarray, optional
+        Mass transformation matrix (r x r) for field reconstruction
+    fes : HCurl, optional
+        Finite element space reference for field reconstruction
+    mesh : Mesh, optional
+        Mesh reference
     """
     Ard: np.ndarray
     Brd: np.ndarray
@@ -35,6 +46,14 @@ class ReducedStructure:
     r: int = None
     n_full: int = None
     is_full_order: bool = False  # True when W=I (FOM wrapped for concatenation)
+    
+    # Field reconstruction data
+    W: Optional[np.ndarray] = None
+    Q_L_inv: Optional[np.ndarray] = None
+    
+    # FEM references
+    fes: Optional[Any] = None
+    mesh: Optional[Any] = None
 
     def __post_init__(self):
         if self.r is None:
@@ -80,6 +99,20 @@ class ReducedStructure:
             return 1 - self.r / self.n_full
         return None
 
+    def can_reconstruct(self) -> bool:
+        """Check if field reconstruction is possible."""
+        if self.is_full_order:
+            return True
+        return self.W is not None and self.Q_L_inv is not None
+
+    def reconstruct(self, x_r: np.ndarray) -> np.ndarray:
+        """Reconstruct full-order solution from reduced coordinates."""
+        if self.is_full_order:
+            return x_r
+        if not self.can_reconstruct():
+            raise ValueError(f"Cannot reconstruct: W or Q_L_inv missing for '{self.domain}'")
+        return self.W @ (self.Q_L_inv @ x_r)
+
     def get_port_index(self, port_name: str) -> int:
         """Get index of a port by name."""
         try:
@@ -101,14 +134,20 @@ class ReducedStructure:
             port_modes={p: dict(m) for p, m in self.port_modes.items()},
             domain=self.domain,
             r=self.r,
-            n_full=self.n_full
+            n_full=self.n_full,
+            is_full_order=self.is_full_order,
+            W=self.W.copy() if self.W is not None else None,
+            Q_L_inv=self.Q_L_inv.copy() if self.Q_L_inv is not None else None,
+            fes=self.fes,
+            mesh=self.mesh,
         )
 
     def __repr__(self) -> str:
+        recon_str = ", can_reconstruct=True" if self.can_reconstruct() else ""
         if self.is_full_order:
             return (f"ReducedStructure(domain='{self.domain}', r={self.r}, "
                     f"ports={self.ports}, modes/port={self._n_port_modes}, "
-                    f"full-order W=I)")
+                    f"full-order W=I{recon_str})")
         compression = f", compression={100 * self.compression_ratio:.1f}%" if self.compression_ratio else ""
         return (f"ReducedStructure(domain='{self.domain}', r={self.r}, "
-                f"ports={self.ports}, modes/port={self._n_port_modes}{compression})")
+                f"ports={self.ports}, modes/port={self._n_port_modes}{compression}{recon_str})")
