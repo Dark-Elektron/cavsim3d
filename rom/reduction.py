@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Model Order Reduction using Proper Orthogonal Decomposition."""
 
 from typing import Tuple, Optional, Dict, List, Union, Literal
@@ -13,6 +14,11 @@ from rom.structures import ReducedStructure
 from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
 from ngsolve.webgui import Draw
 from core.constants import mu0
+from core.persistence import H5Serializer
+import h5py
+import json
+from pathlib import Path
+from datetime import datetime
 
 
 class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
@@ -601,6 +607,112 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             return self._solve_single_domain(solver_type=solver_type)
         else:
             return self._solve_multi_domain(solver_type=solver_type)
+
+    # =========================================================================
+    # Persistence
+    # =========================================================================
+
+    def save(self, path: Union[str, Path]):
+        """
+        Save ModelOrderReduction data to disk.
+        
+        Saves reduced matrices (A_r, B_r) and projection matrix (W)
+        to HDF5 files.
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save reduced and projection matrices
+        with h5py.File(path / "matrices.h5", "w") as f:
+            for domain in self.domains:
+                group = f.create_group(domain)
+                H5Serializer.save_dataset(group, "A_r", self._A_r.get(domain))
+                H5Serializer.save_dataset(group, "B_r", self._B_r.get(domain))
+                H5Serializer.save_dataset(group, "W", self._W.get(domain))
+                H5Serializer.save_dataset(group, "Q_L_inv", self._Q_L_inv.get(domain))
+
+        # 2. Save snapshots and frequencies if available
+        with h5py.File(path / "snapshots.h5", "w") as f:
+            if hasattr(self, 'frequencies') and self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if self._x_r_snapshots:
+                H5Serializer.save_dataset(f, "x_r_snapshots", self._x_r_snapshots)
+        
+        # 3. Save metadata
+        metadata = {
+            "domains": self.domains,
+            "n_domains": self.n_domains,
+            "is_reduced": self._is_reduced,
+            "r": self._r,
+            "n_ports_total": self._n_ports_total,
+            "n_ports_external": self._n_ports_external,
+            "n_modes_per_port": self._n_modes_per_port,
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, Path], solver=None) -> ModelOrderReduction:
+        """Load ModelOrderReduction from disk."""
+        path = Path(path)
+        
+        with open(path / "metadata.json", "r") as f:
+            metadata = json.load(f)
+        
+        # solver reference can be passed if we want to link it back
+        # If solver is None, we create a skeleton ROM
+        rom = cls.__new__(cls)
+        # Manually initialize minimal state
+        rom.solver = solver
+        rom.domains = metadata["domains"]
+        rom.n_domains = metadata["n_domains"]
+        rom._is_reduced = metadata["is_reduced"]
+        rom._r = metadata["r"]
+        rom._n_ports_total = metadata["n_ports_total"]
+        rom._n_ports_external = metadata["n_ports_external"]
+        rom._n_modes_per_port = metadata["n_modes_per_port"]
+        
+        # We also need port lists and mappings which are usually in solver
+        # If solver is None, some functionality might be limited
+        if solver:
+            rom.mesh = solver.mesh
+            rom._all_ports = solver.all_ports
+            rom._external_ports = solver.external_ports
+            rom.domain_port_map = solver.domain_port_map
+            rom.port_modes = solver.port_modes
+        else:
+            rom.mesh = None
+            rom._all_ports = []
+            rom._external_ports = []
+            rom.domain_port_map = {}
+            rom.port_modes = {}
+            
+        rom._M = {}
+        rom._K = {}
+        rom._B = {}
+        rom._snapshots = {}
+        rom._W = {}
+        rom._A_r = {}
+        rom._B_r = {}
+        rom._Q_L_inv = {}
+        rom._singular_values = {}
+
+        with h5py.File(path / "matrices.h5", "r") as f:
+            for domain in rom.domains:
+                group = f[domain]
+                rom._A_r[domain] = H5Serializer.load_dataset(group["A_r"])
+                rom._B_r[domain] = H5Serializer.load_dataset(group["B_r"])
+                rom._W[domain] = H5Serializer.load_dataset(group["W"])
+                rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
+
+        with h5py.File(path / "snapshots.h5", "r") as f:
+            if "frequencies" in f:
+                rom.frequencies = H5Serializer.load_dataset(f["frequencies"])
+            if "x_r_snapshots" in f:
+                rom._x_r_snapshots = H5Serializer.load_dataset(f["x_r_snapshots"])
+
+        return rom
 
     def _solve_single_domain(self, solver_type: str = 'auto') -> Dict:
         """Solve single-domain reduced system."""

@@ -65,7 +65,7 @@ class PortEigenmodeSolver:
         order: int = 3,
         bc: str = 'default',
         mode_source: Literal['analytic', 'numeric'] = 'analytic',
-        mode_source_internal: Literal['analytic', 'numeric'] = 'analytical',
+        mode_source_internal: Literal['analytic', 'numeric'] = 'analytic',
         geometry_tolerance: float = 0.05,
         polarization_angle: float = 0.0,
         global_up: Tuple[float, float, float] = (0.0, 1.0, 0.0),
@@ -161,50 +161,100 @@ class PortEigenmodeSolver:
         theta = self.polarization_angle
         return np.cos(theta) * t1 + np.sin(theta) * t2
 
-    def _detect_port_geometry(self, port: str) -> PortGeometry:
-        center, area = self._compute_port_centroid_and_area(port)
-        normal = self._compute_port_normal(port)
-        t1, t2 = self._compute_tangent_frame(normal)
-        port_region = self.mesh.Boundaries(port)
+    def _fit_circular(self, center, normal, t1, t2, area, I_uu, I_vv, I_uv):
+        """
+        Fit circular geometry with improved tolerance handling.
+        
+        For circular cross-sections (like SRF cavity irises):
+        - I_uu and I_vv should be equal (isotropy)
+        - I_uv should be zero (centered)
+        - I_uu = I_vv = πR⁴/4 for a circle of radius R
+        """
+        R = np.sqrt(area / np.pi)
+        I_expected = np.pi * R**4 / 4
 
-        u = (x - center[0]) * t1[0] + (y - center[1]) * t1[1] + (z - center[2]) * t1[2]
-        v = (x - center[0]) * t2[0] + (y - center[1]) * t2[1] + (z - center[2]) * t2[2]
-
-        I_uu = float(Integrate(v * v, self.mesh, BND, definedon=port_region))
-        I_vv = float(Integrate(u * u, self.mesh, BND, definedon=port_region))
-        I_uv = float(Integrate(u * v, self.mesh, BND, definedon=port_region))
-
-        rect_geom, rect_error = self._fit_rectangular(center, normal, t1, t2, area, I_uu, I_vv, I_uv)
-        circ_geom, circ_error = self._fit_circular(center, normal, t1, t2, area, I_uu, I_vv, I_uv)
-
-        if rect_error <= self.geometry_tolerance and rect_error <= circ_error:
-            return rect_geom
-        elif circ_error <= self.geometry_tolerance:
-            return circ_geom
-        else:
+        if I_uu + I_vv < 1e-20:
             return PortGeometry(
-                type=PortGeometryType.UNKNOWN,
-                center=center, normal=normal, t1=t1, t2=t2, area=area,
-                fit_error=min(rect_error, circ_error)
-            )
+                type=PortGeometryType.CIRCULAR, 
+                center=center,
+                normal=normal, t1=t1, t2=t2, area=area,
+                radius=R, fit_error=1.0
+            ), 1.0
+
+        # Isotropy check: I_uu ≈ I_vv for a circle
+        I_sum = I_uu + I_vv
+        isotropy_error = abs(I_uu - I_vv) / I_sum * 2
+        
+        # Magnitude check: I_avg ≈ πR⁴/4
+        I_avg = I_sum / 2
+        
+        # For a revolved geometry, the actual moment might differ slightly
+        # due to mesh discretization. Use a more robust check.
+        if I_expected > 1e-20:
+            magnitude_error = abs(I_avg - I_expected) / I_expected
+        else:
+            magnitude_error = 1.0
+        
+        # Cross-moment check: I_uv ≈ 0 for centered circle
+        if I_avg > 1e-20:
+            cross_error = abs(I_uv) / I_avg
+        else:
+            cross_error = 0.0
+
+        # Weighted error - prioritize isotropy for circles
+        # A circle MUST be isotropic, but magnitude can vary with mesh
+        total_error = (
+            isotropy_error * 1.0 +      # Most important for circle
+            magnitude_error * 0.3 +      # Less important (mesh-dependent)
+            cross_error * 0.5            # Moderate importance
+        ) / 1.8  # Normalize
+
+        return PortGeometry(
+            type=PortGeometryType.CIRCULAR,
+            center=center, normal=normal, t1=t1, t2=t2, area=area,
+            radius=R, fit_error=total_error
+        ), total_error
 
     def _fit_rectangular(self, center, normal, t1, t2, area, I_uu, I_vv, I_uv):
+        """
+        Fit rectangular geometry.
+        
+        For a rectangle with sides a (along t1) and b (along t2):
+        - I_vv = a³b/12 (moment about t1 axis)
+        - I_uu = ab³/12 (moment about t2 axis)
+        - Area = ab
+        """
         if I_uu < 1e-20 or I_vv < 1e-20:
-            return PortGeometry(type=PortGeometryType.RECTANGULAR, center=center,
-                               normal=normal, t1=t1, t2=t2, area=area, fit_error=1.0), 1.0
+            return PortGeometry(
+                type=PortGeometryType.RECTANGULAR, 
+                center=center,
+                normal=normal, t1=t1, t2=t2, area=area, 
+                fit_error=1.0
+            ), 1.0
 
+        # From I = (side_perp)² * Area / 12:
+        # b² = 12 * I_uu / Area
+        # a² = 12 * I_vv / Area
         b_sq = 12 * I_uu / area
         a_sq = 12 * I_vv / area
+        
         if b_sq < 0 or a_sq < 0:
-            return PortGeometry(type=PortGeometryType.RECTANGULAR, center=center,
-                               normal=normal, t1=t1, t2=t2, area=area, fit_error=1.0), 1.0
+            return PortGeometry(
+                type=PortGeometryType.RECTANGULAR, 
+                center=center,
+                normal=normal, t1=t1, t2=t2, area=area, 
+                fit_error=1.0
+            ), 1.0
 
         b = np.sqrt(b_sq)
         a = np.sqrt(a_sq)
+        
+        # Check consistency
         area_error = abs(a * b - area) / area
         cross_error = abs(I_uv) / np.sqrt(I_uu * I_vv) if I_uu * I_vv > 0 else 0
         total_error = max(area_error, cross_error)
 
+        # Ensure a >= b (a is the longer side)
         if b > a:
             a, b = b, a
             t1, t2 = t2, -t1
@@ -215,25 +265,92 @@ class PortEigenmodeSolver:
             a=a, b=b, fit_error=total_error
         ), total_error
 
-    def _fit_circular(self, center, normal, t1, t2, area, I_uu, I_vv, I_uv):
-        R = np.sqrt(area / np.pi)
-        I_expected = np.pi * R**4 / 4
+    def _detect_port_geometry(self, port: str) -> PortGeometry:
+        """
+        Detect port geometry type (rectangular or circular).
+        
+        Uses moments of inertia to distinguish shapes.
+        Includes fallback logic for interface ports that may have
+        slightly elevated fit errors due to mesh artifacts.
+        """
+        center, area = self._compute_port_centroid_and_area(port)
+        normal = self._compute_port_normal(port)
+        t1, t2 = self._compute_tangent_frame(normal)
+        port_region = self.mesh.Boundaries(port)
 
-        if I_uu + I_vv < 1e-20:
-            return PortGeometry(type=PortGeometryType.CIRCULAR, center=center,
-                               normal=normal, t1=t1, t2=t2, area=area, fit_error=1.0), 1.0
+        # Local coordinates on port plane
+        u = (x - center[0]) * t1[0] + (y - center[1]) * t1[1] + (z - center[2]) * t1[2]
+        v = (x - center[0]) * t2[0] + (y - center[1]) * t2[1] + (z - center[2]) * t2[2]
 
-        isotropy_error = abs(I_uu - I_vv) / (I_uu + I_vv) * 2
-        I_avg = (I_uu + I_vv) / 2
-        magnitude_error = abs(I_avg - I_expected) / I_expected if I_expected > 0 else 1.0
-        cross_error = abs(I_uv) / I_avg if I_avg > 0 else 0
-        total_error = max(isotropy_error, magnitude_error, cross_error)
+        # Compute second moments of area
+        I_uu = float(Integrate(v * v, self.mesh, BND, definedon=port_region))
+        I_vv = float(Integrate(u * u, self.mesh, BND, definedon=port_region))
+        I_uv = float(Integrate(u * v, self.mesh, BND, definedon=port_region))
 
+        # Try both fits
+        rect_geom, rect_error = self._fit_rectangular(
+            center, normal, t1, t2, area, I_uu, I_vv, I_uv
+        )
+        circ_geom, circ_error = self._fit_circular(
+            center, normal, t1, t2, area, I_uu, I_vv, I_uv
+        )
+
+        # Decision logic with tolerance
+        tol = self.geometry_tolerance
+        
+        # Strong preference for the better fit
+        if rect_error <= tol and circ_error <= tol:
+            # Both pass - choose the better one
+            if rect_error < circ_error:
+                return rect_geom
+            else:
+                return circ_geom
+        
+        if rect_error <= tol:
+            return rect_geom
+        
+        if circ_error <= tol:
+            return circ_geom
+        
+        # Neither passes strict tolerance - try relaxed tolerance
+        # This handles internal interfaces from Glue() operations
+        relaxed_tol = tol * 3  # 3x relaxed tolerance
+        
+        if circ_error <= relaxed_tol and circ_error < rect_error:
+            # Accept circular with warning (common for revolved geometries)
+            return PortGeometry(
+                type=PortGeometryType.CIRCULAR,
+                center=center, normal=normal, t1=t1, t2=t2, area=area,
+                radius=circ_geom.radius, 
+                fit_error=circ_error  # Keep actual error for info
+            )
+        
+        if rect_error <= relaxed_tol:
+            return PortGeometry(
+                type=PortGeometryType.RECTANGULAR,
+                center=center, normal=normal, t1=t1, t2=t2, area=area,
+                a=rect_geom.a, b=rect_geom.b,
+                fit_error=rect_error
+            )
+        
+        # Last resort: if one error is significantly better, use it
+        if circ_error < 0.5 and circ_error < rect_error * 0.5:
+            return PortGeometry(
+                type=PortGeometryType.CIRCULAR,
+                center=center, normal=normal, t1=t1, t2=t2, area=area,
+                radius=circ_geom.radius,
+                fit_error=circ_error
+            )
+        
+        if rect_error < 0.5 and rect_error < circ_error * 0.5:
+            return rect_geom
+
+        # Truly unknown
         return PortGeometry(
-            type=PortGeometryType.CIRCULAR,
+            type=PortGeometryType.UNKNOWN,
             center=center, normal=normal, t1=t1, t2=t2, area=area,
-            radius=R, fit_error=total_error
-        ), total_error
+            fit_error=min(rect_error, circ_error)
+        )
 
     # =========================================================================
     # Analytic Mode Generation (unchanged)
@@ -543,6 +660,7 @@ class PortEigenmodeSolver:
             self.port_mass_forms[port] = m_form   # ← keeps C++ matrix alive
 
         print(f"\t    Done for {len(ports)} port(s)")
+        
 
         # Solve for each port
         for port in ports:

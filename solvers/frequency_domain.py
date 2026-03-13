@@ -1,7 +1,9 @@
-"""Frequency-domain electromagnetic solver for single and compound structures."""
-
-from typing import Dict, List, Optional, Tuple, Union, Literal
+from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from typing import Dict, List, Optional, Tuple, Union, Literal
 import warnings
+from datetime import datetime
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -9,9 +11,9 @@ import scipy.linalg as sl
 from solvers.eigen_mixin import FDSEigenMixin
 
 from ngsolve import (
-    HCurl, BilinearForm, LinearForm, GridFunction, BND,
-    Integrate, InnerProduct, TaskManager, curl, dx, ds,
-    BoundaryFromVolumeCF, CoefficientFunction, Norm, BaseVector
+HCurl, BilinearForm, LinearForm, GridFunction, BND,
+Integrate, InnerProduct, TaskManager, curl, dx, ds,
+BoundaryFromVolumeCF, CoefficientFunction, Norm, BaseVector
 )
 from ngsolve.webgui import Draw
 
@@ -23,21 +25,22 @@ from ngsolve.krylovspace import GMRes
 from core.constants import mu0, eps0, c0, Z0
 from solvers.base import BaseEMSolver, ParameterConverter
 from solvers.ports import PortEigenmodeSolver
-
+from core.persistence import *
 
 class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     """
     Frequency-domain solver for electromagnetic problems.
 
+    text
     Handles both single-domain and compound (multi-domain) structures.
     For compound structures, two methods are available for computing
     global S/Z-parameters:
 
     1. **Coupled** (default): Solves the full system with all domains coupled.
-       Most accurate, captures all inter-domain reflections and resonances.
+    Most accurate, captures all inter-domain reflections and resonances.
 
     2. **Cascade**: Solves each domain independently, then cascades S-matrices.
-       Faster but assumes negligible reflections at internal ports.
+    Faster but assumes negligible reflections at internal ports.
 
     Conventions:
     - Time convention: exp(+jωt)
@@ -80,8 +83,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # --- Iterative solver defaults ---
     AUTO_DOF_THRESHOLD = 50_000
     DEFAULT_ITERATIVE_OPTS = {
-        'precond': 'multigrid',
-        'maxsteps': 5000,
+        'precond': 'direct',
+        'maxsteps': 100,
         'tol': 1e-6,
         'printrates': False,
     }
@@ -157,6 +160,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Result-object caches (built lazily via .fom / .foms)
         self._fom_cache = None
         self._foms_cache = None
+
+        # Project link (for automatic persistence)
+        self._project_path: Optional[Path] = None
+        self._project_name: Optional[str] = None
+        self._project_base_dir: Optional[Union[str, Path]] = None
+
+        # Solver history (CST-style operation log)
+        self._solver_history: List[dict] = []
 
         # Validate boundary conditions
         self._validate_boundary_conditions()
@@ -255,6 +266,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         return self._foms_cache
 
     @property
+    def fes(self):
+        """Convenience access to the global Finite Element Space."""
+        return self._fes_global
+
+    @property
     def n_ports(self) -> int:
         """Number of ports (external ports only for compound structures after solve)."""
         if self._current_global_method is not None and self.is_compound:
@@ -342,7 +358,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # Multiple domains - sequential mapping
             if n_ports != n_domains + 1:
                 print(f"Warning: Expected {n_domains + 1} ports for {n_domains} domains, "
-                      f"found {n_ports}. Using sequential assignment.")
+                    f"found {n_ports}. Using sequential assignment.")
 
             for i, domain in enumerate(self.domains):
                 if i + 1 < n_ports:
@@ -430,6 +446,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if assemble_global and not self._global_matrices_assembled:
             self._assemble_global_matrices()
             self._global_matrices_assembled = True
+
+        if self._project_path is not None:
+            self.save()
 
         return self._get_matrix_summary()
 
@@ -618,7 +637,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         ndof = fes.ndof if fes is not None else 0
         chosen = 'iterative' if ndof > self.AUTO_DOF_THRESHOLD else 'direct'
         print(f"  Auto solver: {ndof} DOFs → '{chosen}' "
-              f"(threshold: {self.AUTO_DOF_THRESHOLD})")
+            f"(threshold: {self.AUTO_DOF_THRESHOLD})")
         return chosen
 
     def _merge_iterative_opts(self, user_opts: Optional[Dict]) -> Dict:
@@ -631,11 +650,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     def _prepare_iterative(self, fes, opts: Dict):
         """Prepare FES for iterative solve (logging only, no mesh mutation)."""
         print(f"  Iterative mode: precond='{opts.get('precond', 'multigrid')}', "
-              f"tol={opts.get('tol', 1e-6)}, maxsteps={opts.get('maxsteps', 5000)}")
+            f"tol={opts.get('tol', 1e-6)}, maxsteps={opts.get('maxsteps', 100)}")
         print(f"  FES ndof: {fes.ndof}")
         return fes
 
-    def _solve_system(self, fes, a_form, f_vec, precond, opts: Dict):
+    def _solve_system(self, fes, a_form, f_vec, precond, opts: Dict, x0: Optional[np.ndarray] = None):
         """
         Solve a_form * x = f_vec using direct or iterative method.
 
@@ -661,37 +680,48 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # GMRes is a function: GMRes(A, b, pre=...) → solution vector
         x = GridFunction(fes)
-        sol = GMRes(
-            A=a_form.mat,
-            b=f_vec,
-            pre=precond.mat,
-            maxsteps=opts['maxsteps'],
-            tol=opts['tol'],
-            printrates=opts['printrates'],
-            callback=_count_iter,
-        )
-        x.vec.data = sol
-        iters = iter_count[0]
 
-        # Compute residual on FREE DOFs only
-        r = x.vec.CreateVector()
-        r.data = a_form.mat * x.vec - f_vec
-        
-        # Get numpy arrays
-        r_np = r.FV().NumPy()
-        f_np = f_vec.FV().NumPy()
-        
-        # Extract free DOF indices
-        free_idx = np.array([i for i in range(fes.ndof) if fes.FreeDofs()[i]])
-        
-        # Compute norms on free DOFs only
-        r_free = r_np[free_idx]
-        f_free = f_np[free_idx]
-        
-        r_norm_free = np.linalg.norm(r_free)
-        b_norm_free = np.linalg.norm(f_free)
-        
-        rel_res = r_norm_free / b_norm_free if b_norm_free > 0 else r_norm_free
+        # initialise solution with previous solution
+        sol = f_vec.CreateVector()
+        if x0 is not None:
+            # print('it is in here:: ', x0)
+            sol.data = x0 # might be confusion but solution modifies the initial guess sol internally and returns it
+
+        with TaskManager():
+            sol = GMRes(
+                A=a_form.mat,
+                b=f_vec,
+                x=sol,
+                pre=precond.mat,
+                # freedofs=fes.FreeDofs(),  # only necessary f no preconditioner
+                maxsteps=opts['maxsteps'],
+                tol=opts['tol'],
+                printrates=opts['printrates'],
+                callback=_count_iter,
+            )
+            
+            x.vec.data = sol
+            iters = iter_count[0]
+
+            # Compute residual on FREE DOFs only
+            r = x.vec.CreateVector()
+            r.data = a_form.mat * x.vec - f_vec
+            
+            # Get numpy arrays
+            r_np = r.FV().NumPy()
+            f_np = f_vec.FV().NumPy()
+            
+            # Extract free DOF indices
+            free_idx = np.array([i for i in range(fes.ndof) if fes.FreeDofs()[i]])
+            
+            # Compute norms on free DOFs only
+            r_free = r_np[free_idx]
+            f_free = f_np[free_idx]
+            
+            r_norm_free = np.linalg.norm(r_free)
+            b_norm_free = np.linalg.norm(f_free)
+            
+            rel_res = r_norm_free / b_norm_free if b_norm_free > 0 else r_norm_free
 
         return x.vec, iters, rel_res
 
@@ -708,6 +738,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             global_method: Literal['coupled', None] = 'coupled',
             solver_type: str = 'iterative',
             iterative_opts: Optional[Dict] = None,
+            rerun: bool = False,
     ) -> Dict:
         """
         Solve frequency sweep.
@@ -733,7 +764,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             Method for computing global (full-structure) S/Z parameters:
 
             - 'coupled': Solve entire structure as one system (default).
-                         Most accurate, captures all inter-domain interactions.
+                        Most accurate, captures all inter-domain interactions.
 
             - None: Skip global computation, only compute per-domain if requested.
 
@@ -741,7 +772,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             Linear system solver strategy:
 
             - 'auto': Use direct for small problems (< AUTO_DOF_THRESHOLD DOFs),
-                      iterative for larger ones.
+                    iterative for larger ones.
             - 'direct': Always use sparse direct factorisation.
             - 'iterative': Always use iterative solver (preconditioner).
 
@@ -750,7 +781,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
                 {
                     'precond': 'multigrid',      # preconditioner type
-                    'maxsteps': 5000,        # max GMRES iterations
+                    'maxsteps': 100,        # max GMRES iterations
                     'tol': 1e-6,            # convergence tolerance
                     'printrates': False,     # print GMRES residuals
                 }
@@ -760,6 +791,21 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         dict
             Results dictionary
         """
+        # --- Rerun protection ---
+        has_results = (
+            self._Z_global_coupled is not None
+            or self._Z_per_domain
+            or self._fom_cache is not None
+        )
+        if has_results and not rerun:
+            warnings.warn(
+                "Results already exist for this solver. "
+                "To overwrite, call solve(..., rerun=True).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self._build_results_dict(compute_s_params, per_domain, global_method)
+
         self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
 
         # Merge iterative options with defaults
@@ -798,8 +844,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             print("Per-Domain Solve")
             print("-" * 40)
             self._solve_per_domain(store_snapshots,
-                                   solver_type=solver_type,
-                                   iter_opts=iter_opts)
+                                solver_type=solver_type,
+                                iter_opts=iter_opts)
         else:
         # Compute global results
         # if global_method == 'coupled':
@@ -807,8 +853,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             print("Global Coupled Solve")
             print("-" * 40)
             self._solve_global_coupled(store_snapshots,
-                                       solver_type=solver_type,
-                                       iter_opts=iter_opts)
+                                    solver_type=solver_type,
+                                    iter_opts=iter_opts)
             self._current_global_method = 'coupled'
 
         # Compute S-parameters from Z
@@ -819,6 +865,21 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 self._compute_per_domain_s_from_z()
 
         self._invalidate_cache()
+
+        # Record in solver history
+        self._solver_history.append({
+            'op': 'solve',
+            'fmin': fmin,
+            'fmax': fmax,
+            'nsamples': nsamples,
+            'solver_type': solver_type,
+            'global_method': global_method,
+            'per_domain': per_domain,
+            'timestamp': datetime.now().isoformat(),
+        })
+
+        if self._project_path is not None:
+            self.save()
 
         return self._build_results_dict(compute_s_params, per_domain, global_method)
 
@@ -847,6 +908,350 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if needs_per_domain and not self._per_domain_matrices_assembled:
             self._assemble_per_domain_matrices()
             self._per_domain_matrices_assembled = True
+
+    # =========================================================================
+    # Persistence
+    # =========================================================================
+
+    def save(self, project_name: str = None, base_dir: Union[str, Path] = None):
+        """
+        Save the entire simulation project to disk.
+
+        Persists all solver state so that ``load()`` can reconstruct a
+        fully functional solver without re-assembling or re-solving.
+
+        Saved artefacts
+        ---------------
+        - ``config.json`` — solver parameters, domain/port topology, state flags
+        - ``mesh.pkl`` / ``fes.pkl`` — NGSolve mesh and global FE space
+        - ``port_modes/`` — port eigenmodes and basis vectors (pickle)
+        - ``matrices.h5`` — per-domain and global K, M, B matrices
+        - ``snapshots.h5`` — frequencies, solution snapshots per domain
+        - ``fom/`` — global FOM results (Z/S matrices, metadata)
+        - ``foms/`` — per-domain FOM results (compound structures)
+        - ``roms/`` — reduced-order models (if computed)
+        """
+        import pickle as _pkl
+        from pathlib import Path as _Path
+
+        # 0. Handle project identification
+        if project_name is None:
+            project_name = self._project_name
+        if base_dir is None:
+            base_dir = self._project_base_dir
+
+        if project_name is None:
+            raise ValueError("project_name must be provided for the first save.")
+
+        # 1. Determine project path
+        pm = ProjectManager(base_dir or "simulations")
+        if self._project_path is not None and \
+        project_name == self._project_name and \
+        (base_dir is None or base_dir == self._project_base_dir):
+            project_path = self._project_path
+        else:
+            project_path = pm.prepare_project(project_name)
+
+        # Link project
+        self._project_name = project_name
+        self._project_base_dir = base_dir or "simulations"
+        self._project_path = project_path
+
+        # ------------------------------------------------------------------
+        # 1. Config / metadata  (includes state flags)
+        # ------------------------------------------------------------------
+        config = {
+            "project_name": project_name,
+            "order": self.order,
+            "bc": self.bc,
+            "use_wave_impedance": self.use_wave_impedance,
+            "is_compound": self.is_compound,
+            "n_domains": self.n_domains,
+            "domains": self.domains,
+            "n_ports": len(self._ports),
+            "ports": self._ports,
+            "external_ports": self._external_ports,
+            "internal_ports": self._internal_ports,
+            "n_modes_per_port": self._n_modes_per_port,
+            # State flags — so load() knows what has been done
+            "global_matrices_assembled": self._global_matrices_assembled,
+            "per_domain_matrices_assembled": self._per_domain_matrices_assembled,
+            "current_global_method": self._current_global_method,
+            "has_results": bool(
+                self._Z_global_coupled is not None
+                or self._Z_per_domain
+                or self._fom_cache is not None
+            ),
+            "solver_history": self._solver_history,
+            "timestamp": datetime.now().isoformat(),
+        }
+        pm.save_config(project_path, config)
+
+        # ------------------------------------------------------------------
+        # 2. Mesh and global FES
+        # ------------------------------------------------------------------
+        pm.save_ngs_mesh(project_path, self.mesh)
+        pm.save_ngs_fes(project_path, self._fes_global)
+
+        # Per-domain FES
+        if self._fes:
+            for domain, fes in self._fes.items():
+                domain_dir = project_path / f"foms/{domain}"
+                domain_dir.mkdir(parents=True, exist_ok=True)
+                pm.save_ngs_fes(domain_dir, fes)
+
+        # ------------------------------------------------------------------
+        # 3. Port modes (own folder, pickle)
+        # ------------------------------------------------------------------
+        port_dir = project_path / "port_modes"
+        port_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.port_modes is not None:
+            with open(port_dir / "port_modes.pkl", "wb") as f:
+                _pkl.dump(self.port_modes, f)
+        if self.port_basis is not None:
+            with open(port_dir / "port_basis.pkl", "wb") as f:
+                _pkl.dump(self.port_basis, f)
+        if hasattr(self, 'port_solver') and self.port_solver is not None:
+            # Save port solver state (cutoff frequencies, orientation factors, etc.)
+            port_solver_state = {
+                'port_cutoff_frequencies': getattr(self.port_solver, 'port_cutoff_frequencies', {}),
+                'port_orientation_factors': getattr(self.port_solver, 'port_orientation_factors', {}),
+            }
+            with open(port_dir / "port_solver_state.pkl", "wb") as f:
+                _pkl.dump(port_solver_state, f)
+
+        # ------------------------------------------------------------------
+        # 4. System matrices (HDF5)
+        # ------------------------------------------------------------------
+        with h5py.File(project_path / "matrices.h5", "w") as fh:
+            # Per-domain K, M, B
+            for domain in self.domains:
+                if domain in self.K:
+                    grp = fh.create_group(f"per_domain/{domain}")
+                    H5Serializer.save_sparse_csr(grp, "K", self.K[domain])
+                    H5Serializer.save_sparse_csr(grp, "M", self.M[domain])
+                    H5Serializer.save_dataset(grp, "B", self.B[domain])
+
+            # Global K, M, B
+            if self.K_global is not None:
+                grp = fh.create_group("global")
+                H5Serializer.save_sparse_csr(grp, "K", self.K_global)
+                H5Serializer.save_sparse_csr(grp, "M", self.M_global)
+                H5Serializer.save_dataset(grp, "B", self.B_global)
+
+        # ------------------------------------------------------------------
+        # 5. Frequencies and snapshots (HDF5)
+        # ------------------------------------------------------------------
+        with h5py.File(project_path / "snapshots.h5", "w") as fh:
+            if self.frequencies is not None:
+                H5Serializer.save_dataset(fh, "frequencies", self.frequencies)
+            for key, snap in self.snapshots.items():
+                H5Serializer.save_dataset(fh, f"snapshots/{key}", snap)
+
+        # ------------------------------------------------------------------
+        # 6. FOM result caches
+        # ------------------------------------------------------------------
+        if self._fom_cache is not None or self._Z_global_coupled is not None:
+            self.fom.save(project_path / "fom")
+
+        if self.is_compound and (self._foms_cache is not None or self._Z_per_domain):
+            self.foms.save(project_path / "foms")
+
+        # ------------------------------------------------------------------
+        # 7. ROM data (if reduced-order models have been built)
+        # ------------------------------------------------------------------
+        # The ROM is reached via fom.reduce() so we check if a cached ROM exists
+        if self._fom_cache is not None and hasattr(self._fom_cache, '_rom_cache') \
+                and self._fom_cache._rom_cache is not None:
+            rom_path = project_path / "roms" / "global"
+            self._fom_cache._rom_cache.save(rom_path)
+
+        # ------------------------------------------------------------------
+        # 8. Geometry (STEP file + history for reconstruction)
+        # ------------------------------------------------------------------
+        if hasattr(self.geometry, 'save_geometry'):
+            self.geometry.save_geometry(project_path)
+
+        print(f"Project saved to {project_path}")
+        return project_path
+
+    @classmethod
+    def load(cls, project_name: str, base_dir: Union[str, Path] = "simulations") -> 'FrequencyDomainSolver':
+        """
+        Load a simulation project from disk.
+
+        Restores the full solver state saved by :meth:`save`, including
+        matrices, port modes, snapshots, and result caches.
+        """
+        import pickle as _pkl
+
+        pm = ProjectManager(base_dir)
+        project_path = pm.base_dir / project_name
+
+        if not project_path.exists():
+            raise FileNotFoundError(f"Project '{project_name}' not found in {pm.base_dir}")
+
+        config = pm.load_config(project_path)
+
+        # ------------------------------------------------------------------
+        # Reconstruct geometry from history (or fall back to stub)
+        # ------------------------------------------------------------------
+        mesh = pm.load_ngs_mesh(project_path)
+        fes_global = pm.load_ngs_fes(project_path)
+
+        history_file = project_path / 'geometry' / 'history.json'
+        if history_file.exists():
+            from geometry.base import BaseGeometry
+            try:
+                geo = BaseGeometry.load_geometry(project_path)
+                print(f"  Geometry reconstructed: {type(geo).__name__}")
+            except Exception as e:
+                print(f"  Warning: Could not reconstruct geometry ({e}), using stub.")
+                class ReloadedGeometry:
+                    def __init__(self, mesh, bc):
+                        self.mesh = mesh
+                        self.bc = bc
+                geo = ReloadedGeometry(mesh, config.get("bc"))
+        else:
+            # Fallback for projects saved before geometry persistence
+            class ReloadedGeometry:
+                def __init__(self, mesh, bc):
+                    self.mesh = mesh
+                    self.bc = bc
+            geo = ReloadedGeometry(mesh, config.get("bc"))
+
+        fds = cls(
+            geometry=geo,
+            order=config.get("order", 3),
+            bc=config.get("bc"),
+            use_wave_impedance=config.get("use_wave_impedance", True)
+        )
+        fds._fes_global = fes_global
+
+        # Link project
+        fds._project_name = project_name
+        fds._project_base_dir = base_dir
+        fds._project_path = project_path
+
+        # ------------------------------------------------------------------
+        # Restore per-domain FES
+        # ------------------------------------------------------------------
+        for domain in config.get("domains", []):
+            domain_fes = pm.load_ngs_fes(project_path / f"foms/{domain}")
+            if domain_fes:
+                fds._fes[domain] = domain_fes
+
+        # ------------------------------------------------------------------
+        # Restore port modes (from port_modes/ folder)
+        # ------------------------------------------------------------------
+        port_dir = project_path / "port_modes"
+        if port_dir.exists():
+            pm_file = port_dir / "port_modes.pkl"
+            pb_file = port_dir / "port_basis.pkl"
+            ps_file = port_dir / "port_solver_state.pkl"
+
+            if pm_file.exists():
+                with open(pm_file, "rb") as f:
+                    fds.port_modes = _pkl.load(f)
+            if pb_file.exists():
+                with open(pb_file, "rb") as f:
+                    fds.port_basis = _pkl.load(f)
+            if ps_file.exists():
+                with open(ps_file, "rb") as f:
+                    port_solver_state = _pkl.load(f)
+                    if hasattr(fds, 'port_solver') and fds.port_solver is not None:
+                        for attr, val in port_solver_state.items():
+                            setattr(fds.port_solver, attr, val)
+
+        # Restore n_modes_per_port
+        fds._n_modes_per_port = config.get("n_modes_per_port", fds._n_modes_per_port)
+
+        # ------------------------------------------------------------------
+        # Restore K/M/B matrices (HDF5)
+        # ------------------------------------------------------------------
+        matrices_path = project_path / "matrices.h5"
+        if matrices_path.exists():
+            with h5py.File(matrices_path, "r") as fh:
+                # Per-domain
+                if "per_domain" in fh:
+                    for domain in fh["per_domain"]:
+                        grp = fh[f"per_domain/{domain}"]
+                        if "K" in grp:
+                            fds.K[domain] = H5Serializer.load_sparse_csr(grp["K"])
+                        if "M" in grp:
+                            fds.M[domain] = H5Serializer.load_sparse_csr(grp["M"])
+                        if "B" in grp:
+                            fds.B[domain] = H5Serializer.load_dataset(grp["B"])
+
+                # Global
+                if "global" in fh:
+                    grp = fh["global"]
+                    if "K" in grp:
+                        fds.K_global = H5Serializer.load_sparse_csr(grp["K"])
+                    if "M" in grp:
+                        fds.M_global = H5Serializer.load_sparse_csr(grp["M"])
+                    if "B" in grp:
+                        fds.B_global = H5Serializer.load_dataset(grp["B"])
+
+        # ------------------------------------------------------------------
+        # Restore frequencies and snapshots (HDF5)
+        # ------------------------------------------------------------------
+        snap_path = project_path / "snapshots.h5"
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as fh:
+                if "frequencies" in fh:
+                    fds.frequencies = H5Serializer.load_dataset(fh["frequencies"])
+                if "snapshots" in fh:
+                    for key in fh["snapshots"]:
+                        fds.snapshots[key] = H5Serializer.load_dataset(fh[f"snapshots/{key}"])
+
+        # ------------------------------------------------------------------
+        # Restore state flags
+        # ------------------------------------------------------------------
+        fds._global_matrices_assembled = config.get("global_matrices_assembled", False)
+        fds._per_domain_matrices_assembled = config.get("per_domain_matrices_assembled", False)
+        fds._current_global_method = config.get("current_global_method", None)
+
+        # ------------------------------------------------------------------
+        # Restore FOM result caches
+        # ------------------------------------------------------------------
+        fom_path = project_path / "fom"
+        if fom_path.exists():
+            from solvers.results import FOMResult
+            fds._fom_cache = FOMResult.load(fom_path, _solver_ref=fds)
+            fds._Z_global_coupled = fds._fom_cache._Z_matrix
+            fds._S_global_coupled = fds._fom_cache._S_matrix
+
+        foms_path = project_path / "foms"
+        if foms_path.exists():
+            from solvers.results import FOMCollection
+            try:
+                fds._foms_cache = FOMCollection.load(foms_path, _fds_ref=fds)
+            except Exception as e:
+                print(f"Warning: Could not load per-domain results: {e}")
+
+        # ------------------------------------------------------------------
+        # Restore ROMs (if saved)
+        # ------------------------------------------------------------------
+        rom_global_path = project_path / "roms" / "global"
+        if rom_global_path.exists():
+            from rom.reduction import ModelOrderReduction
+            try:
+                rom = ModelOrderReduction.load(rom_global_path, solver=fds)
+                # Attach as cached .rom on fom
+                if fds._fom_cache is not None:
+                    fds._fom_cache._rom_cache = rom
+            except Exception as e:
+                print(f"Warning: Could not load ROM: {e}")
+
+        # ------------------------------------------------------------------
+        # Restore solver history
+        # ------------------------------------------------------------------
+        fds._solver_history = config.get('solver_history', [])
+
+        print(f"Project loaded from {project_path}")
+        return fds
 
     def _clear_results(self) -> None:
         """Clear previous solve results."""
@@ -908,10 +1313,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 self._fes[domain] = fes
 
             # Get pre-assembled B matrix for fast Z extraction
-            # B has shape (ndof, n_port_modes) where columns correspond to port excitations
-            B = self.B[domain]  # Assumes B is assembled during _ensure_matrices_assembled
+            B = self.B[domain]
 
-            # Build excitation ordering: list of (port_idx, port_name, mode_idx)
+            # Build excitation ordering
             excitation_keys = []
             for pm, port_m in enumerate(domain_ports):
                 if port_m not in self.port_modes:
@@ -922,69 +1326,116 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             n_excitations = len(excitation_keys)
             n_freqs = len(self.frequencies)
 
-            # Pre-allocate Z matrix for this domain: (n_freqs, n_excitations, n_excitations)
+            u, v = fes.TnT()
+
+            # ============================================================
+            # PRE-ASSEMBLE: Frequency-independent RHS vectors (NGSolve native)
+            # We store as list of BaseVectors for efficient NGSolve operations
+            # ============================================================
+            print(f"  Pre-assembling {n_excitations} RHS vectors...")
+            
+            # Create a template vector for cloning
+            template_vec = LinearForm(fes)
+            with TaskManager():
+                template_vec.Assemble()
+            template_vec = template_vec.vec
+            
+            # Store base RHS vectors (without omega scaling)
+            rhs_base_vectors = []
+            for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
+                f = LinearForm(fes)
+                f += InnerProduct(
+                    self.port_modes[port_m][mode_m], v.Trace()
+                ) * ds(port_m)
+                with TaskManager():
+                    f.Assemble()
+                
+                # Clone the vector (not just reference)
+                vec = template_vec.CreateVector()
+                vec.data = f.vec
+                rhs_base_vectors.append(vec)
+
+            # ============================================================
+            # PRE-COMPUTE: Free DOF indices (once per domain)
+            # ============================================================
+            freedofs = fes.FreeDofs()
+            free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]], dtype=np.int64)
+            n_free = len(free_idx)
+            print(f"  DOFs: {fes.ndof} total, {n_free} free")
+
+            # Pre-allocate results
             Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-            snapshots_list = []
+            snapshots_list = [] if store_snapshots else None
 
             total_iter_steps = 0
             freq_iters = []
             freq_residuals = []
 
+            # Pre-allocate reusable vectors for the solve loop
+            rhs_scaled = template_vec.CreateVector()
+            sol_vec = template_vec.CreateVector()
+
+            # ============================================================
+            # FREQUENCY LOOP
+            # ============================================================
             for kk, freq in enumerate(self.frequencies):
                 omega = 2 * np.pi * freq
 
-                u, v = fes.TnT()
+                # Build system matrix: A(ω) = K - ω²M
+                a_form = BilinearForm(fes)
+                a_form += (1 / mu0) * curl(u) * curl(v) * dx(domain)
+                a_form += -omega ** 2 * eps0 * u * v * dx(domain)
 
-                # System matrix: A(ω) = K - ω²M
-                a_form = BilinearForm(
-                    (1 / mu0) * curl(u) * curl(v) * dx(domain)
-                    - omega ** 2 * eps0 * u * v * dx(domain)
-                )
-
+                # Prepare solver
+                if st == 'direct':
+                    # Use NGSolve's direct solver with PARDISO/UMFPACK
+                    # Options: "sparsecholesky", "pardiso", "pardisospd", "umfpack", "mumps"
+                    with TaskManager():
+                        inv_a = a_form.mat.Inverse(
+                            freedofs=freedofs,
+                            inverse="pardiso"  # or "umfpack", "sparsecholesky"
+                        )
+                else:
+                    precond = NGPreconditioner(a_form, iter_opts['precond'])
+                
                 with TaskManager():
-                    if st == 'direct':
-                        a_form.Assemble()
-                        inv_a = a_form.mat.Inverse(freedofs=fes.FreeDofs())
-                    else:
-                        precond = NGPreconditioner(a_form, iter_opts['precond'])
-                        a_form.Assemble()
+                    a_form.Assemble() # only assemble a_form after attaching a preconditioner
 
-                # Solve for ALL port excitations at this frequency
-                # Store solutions as columns: x_all has shape (ndof, n_excitations)
+                # ============================================================
+                # SOLVE: All excitations at this frequency
+                # Factorization is done once, each solve reuses it
+                # ============================================================
                 x_all = np.zeros((fes.ndof, n_excitations), dtype=complex)
 
-                for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-                    # RHS: excitation at port_m
-                    f = LinearForm(fes)
-                    f += omega * InnerProduct(
-                        self.port_modes[port_m][mode_m], v.Trace()
-                    ) * ds(port_m)
-
-                    with TaskManager():
-                        f.Assemble()
-
-                    E = GridFunction(fes)
+                for col in range(n_excitations):
+                    # Scale pre-assembled RHS by omega
+                    rhs_scaled.data = omega * rhs_base_vectors[col]
 
                     if st == 'direct':
-                        E.vec.data = inv_a * f.vec
+                        # Direct solve (forward/backward substitution only - factorization reused)
+                        sol_vec.data = inv_a * rhs_scaled
                         freq_iters.append(0)
                         freq_residuals.append(0.0)
                     else:
-                        sol, iters, res = self._solve_system(
-                            fes, a_form, f.vec, precond, iter_opts
+                        # Iterative solve with initial guess from previous excitation
+                        if col > 0:
+                            # Use previous solution as initial guess
+                            sol_vec.FV().NumPy()[:] = x_all[:, col - 1].real
+                        else:
+                            sol_vec[:] = 0
+
+                        sol_vec, iters, res = self._solve_system(
+                            fes, a_form, rhs_scaled, precond, iter_opts, sol_vec
                         )
-                        E.vec.data = sol
                         total_iter_steps += iters
                         freq_iters.append(iters)
                         freq_residuals.append(res)
 
-                    # Store solution vector
-                    x_all[:, col] = E.vec.FV().NumPy()
+                    # Store solution
+                    x_all[:, col] = sol_vec.FV().NumPy()
 
                 # ============================================================
-                # Fast Z extraction: Z_ij = 1j * B^H @ x
-                # B^H has shape (n_excitations, ndof), x_all has shape (ndof, n_excitations)
-                # Result: (n_excitations, n_excitations)
+                # Fast Z extraction: Z = 1j * B^H @ X
                 # ============================================================
                 Z_matrix[kk, :, :] = 1j * (B.T.conj() @ x_all)
 
@@ -998,7 +1449,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     elapsed = time.time() - t_domain_start
                     print(f"    [{kk + 1}/{n_freqs}] {elapsed:.1f}s elapsed")
 
-            # Convert Z_matrix to dict format for compatibility
+            # ============================================================
+            # POST-PROCESS: Convert Z_matrix to dict format
+            # ============================================================
             self._Z_per_domain[domain] = {}
             for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
                 for row, (pn, port_n, mode_n) in enumerate(excitation_keys):
@@ -1014,7 +1467,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 msg += f" (total iteration steps: {total_iter_steps})"
             print(msg)
 
-            # Store convergence info
             self._store_residuals(domain, n_freqs, freq_iters, freq_residuals, st)
 
     def _solve_global_coupled(
@@ -1043,7 +1495,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # For global solve, use external ports only for compound structures
         target_ports = self._external_ports if self.is_compound else self._ports
-        n_modes = self._n_modes_per_port or 1
 
         # Build excitation ordering
         excitation_keys = []
@@ -1057,62 +1508,101 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         n_freqs = len(self.frequencies)
 
         # Get global B matrix
-        B = self.B_global  # Assumes assembled during _assemble_global_matrices
+        B = self.B_global
 
+        u, v = fes.TnT()
+
+        # ============================================================
+        # PRE-ASSEMBLE: Frequency-independent RHS vectors
+        # ============================================================
+        print(f"  Pre-assembling {n_excitations} RHS vectors...")
+        
+        template_vec = fes.CreateVector()
+        rhs_base_vectors = []
+        
+        for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
+            f = LinearForm(fes)
+            f += InnerProduct(
+                self.port_modes[port_m][mode_m], v.Trace()
+            ) * ds(port_m)
+            with TaskManager():
+                f.Assemble()
+            
+            vec = template_vec.CreateVector()
+            vec.data = f.vec
+            rhs_base_vectors.append(vec)
+
+        # ============================================================
+        # PRE-COMPUTE: Free DOF indices
+        # ============================================================
+        freedofs = fes.FreeDofs()
+        free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]], dtype=np.int64)
+        n_free = len(free_idx)
+        print(f"  DOFs: {fes.ndof} total, {n_free} free")
+
+        # Pre-allocate results
         self._Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-        snapshots_list = []
+        snapshots_list = [] if store_snapshots else None
+
         total_iter_steps = 0
         freq_iters = []
         freq_residuals = []
 
+        # Pre-allocate reusable vectors
+        rhs_scaled = template_vec.CreateVector()
+        sol_vec = template_vec.CreateVector()
+
+        # ============================================================
+        # FREQUENCY LOOP
+        # ============================================================
         for kk, freq in enumerate(self.frequencies):
             if kk % max(1, n_freqs // 10) == 0:
                 print(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
 
             omega = 2 * np.pi * freq
 
-            u, v = fes.TnT()
-            a_form = BilinearForm(
-                (1 / mu0) * curl(u) * curl(v) * dx
-                - omega ** 2 * eps0 * u * v * dx
-            )
+            # Build system matrix
+            a_form = BilinearForm(fes)
+            a_form += (1 / mu0) * curl(u) * curl(v) * dx
+            a_form += -omega ** 2 * eps0 * u * v * dx
 
             with TaskManager():
-                if st == 'direct':
-                    a_form.Assemble()
-                    inv_a = a_form.mat.Inverse(freedofs=fes.FreeDofs())
-                else:
-                    precond = NGPreconditioner(a_form, iter_opts['precond'])
-                    a_form.Assemble()
+                a_form.Assemble()
 
-            # Solve for all port excitations
+            # Prepare solver
+            if st == 'direct':
+                with TaskManager():
+                    inv_a = a_form.mat.Inverse(
+                        freedofs=freedofs,
+                        inverse="pardiso"
+                    )
+            else:
+                precond = NGPreconditioner(a_form, iter_opts['precond'])
+
+            # Solve for all excitations
             x_all = np.zeros((fes.ndof, n_excitations), dtype=complex)
 
-            for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-                f = LinearForm(fes)
-                f += omega * InnerProduct(
-                    self.port_modes[port_m][mode_m], v.Trace()
-                ) * ds(port_m)
-
-                with TaskManager():
-                    f.Assemble()
-
-                E = GridFunction(fes)
+            for col in range(n_excitations):
+                rhs_scaled.data = omega * rhs_base_vectors[col]
 
                 if st == 'direct':
-                    E.vec.data = inv_a * f.vec
+                    sol_vec.data = inv_a * rhs_scaled
                     freq_iters.append(0)
                     freq_residuals.append(0.0)
                 else:
-                    sol, iters, res = self._solve_system(
-                        fes, a_form, f.vec, precond, iter_opts
+                    if col > 0:
+                        sol_vec.FV().NumPy()[:] = x_all[:, col - 1].real
+                    else:
+                        sol_vec[:] = 0
+
+                    sol_vec, iters, res = self._solve_system(
+                        fes, a_form, rhs_scaled, precond, iter_opts, sol_vec
                     )
-                    E.vec.data = sol
                     total_iter_steps += iters
                     freq_iters.append(iters)
                     freq_residuals.append(res)
 
-                x_all[:, col] = E.vec.FV().NumPy()
+                x_all[:, col] = sol_vec.FV().NumPy()
 
             # Fast Z extraction
             self._Z_matrix[kk, :, :] = 1j * (B.T.conj() @ x_all)
@@ -1162,157 +1652,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             'residuals_per_excitation': raw_res,
             'solver_type': solver_type,
         }
-
-    # def _solve_global_coupled(
-    #     self, store_snapshots: bool,
-    #     solver_type: str = 'auto',
-    #     iter_opts: Optional[Dict] = None,
-    # ) -> None:
-    #     """Solve entire structure as one coupled system (with consistent port sign convention)."""
-    #     # Optional: Conj is available in most NGSolve builds; keep a safe fallback.
-    #     try:
-    #         from ngsolve import Conj  # type: ignore
-    #     except Exception:
-    #         Conj = None  # noqa: N816
-
-    #     if iter_opts is None:
-    #         iter_opts = self._merge_iterative_opts(None)
-
-    #     if self._fes_global is None:
-    #         self._assemble_global_matrices()
-
-    #     fes = self._fes_global
-
-    #     # Resolve solver type
-    #     st = self._resolve_solver_type(solver_type, fes)
-
-    #     # Prepare multigrid if iterative
-    #     if st == 'iterative':
-    #         fes = self._prepare_iterative(fes, iter_opts)
-    #         self._fes_global = fes   # update stored ref
-
-    #     # For global solve, use external ports only for compound structures
-    #     target_ports = self._external_ports if self.is_compound else self._ports
-    #     n_ports = len(target_ports)
-    #     n_freqs = len(self.frequencies)
-    #     n_modes = self._n_modes_per_port or 1
-
-    #     self._Z_matrix = np.zeros((n_freqs, n_ports * n_modes, n_ports * n_modes), dtype=complex)
-    #     snapshots_list = []
-    #     total_iter_steps = 0
-    #     freq_iters = []
-    #     freq_residuals = []
-
-    #     for kk, freq in enumerate(self.frequencies):
-    #         if kk % max(1, n_freqs // 10) == 0:
-    #             print(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
-
-    #         omega = 2 * np.pi * freq
-
-    #         u, v = fes.TnT()
-    #         a_form = BilinearForm(
-    #             (1 / mu0) * curl(u) * curl(v) * dx
-    #             - omega ** 2 * eps0 * u * v * dx
-    #         )
-
-    #         # Direct: assemble + invert once per frequency
-    #         with TaskManager():
-    #             if st == 'direct':
-    #                 a_form.Assemble()
-    #                 inv_a = a_form.mat.Inverse(freedofs=fes.FreeDofs())
-    #             else:
-    #                 precond = NGPreconditioner(a_form, iter_opts['precond'])
-    #                 a_form.Assemble()
-
-    #             # Solve for each external port excitation
-    #             for pm, port_m in enumerate(target_ports):
-    #                 if port_m not in self.port_modes:
-    #                     continue
-
-    #                 for mode_m in sorted(self.port_modes[port_m].keys()):
-    #                     f = LinearForm(fes)
-
-    #                     f += omega * InnerProduct(
-    #                         self.port_modes[port_m][mode_m], v.Trace()
-    #                     ) * ds(port_m)
-
-    #                     with TaskManager():
-    #                         f.Assemble()
-
-    #                     E = GridFunction(fes)
-
-    #                     if st == 'direct':
-    #                         E.vec.data = inv_a * f.vec
-    #                         # Explicitly record zero iters/residuals for direct solver
-    #                         freq_iters.append(0)
-    #                         freq_residuals.append(0.0)
-    #                     else:
-    #                         sol, iters, res = self._solve_system(
-    #                             fes, a_form, f.vec, precond, iter_opts
-    #                         )
-    #                         E.vec.data = sol
-    #                         total_iter_steps += iters
-    #                         freq_iters.append(iters)
-    #                         freq_residuals.append(res)
-
-    #                     if store_snapshots:
-    #                         snapshots_list.append(E.vec.FV().NumPy().copy())
-
-    #                     # Extract Z-parameters at external ports
-    #                     for pn, port_n in enumerate(target_ports):
-    #                         if port_n not in self.port_modes:
-    #                             continue
-
-    #                         port_region_n = self.mesh.Boundaries(port_n)
-
-    #                         for mode_n in sorted(self.port_modes[port_n].keys()):
-    #                             row = pn * n_modes + mode_n
-    #                             col = pm * n_modes + mode_m
-
-    #                             test_mode = self.port_modes[port_n][mode_n]
-    #                             if Conj is not None:
-    #                                 test_mode = Conj(test_mode)
-
-    #                             z_val = Integrate(
-    #                                 InnerProduct(E, test_mode),
-    #                                 self.mesh, BND,
-    #                                 definedon=port_region_n
-    #                             )
-
-    #                             self._Z_matrix[kk, row, col] = 1j * z_val
-
-    #     if store_snapshots and snapshots_list:
-    #         self.snapshots["global"] = np.array(snapshots_list).T
-
-    #     # Store coupled result separately
-    #     self._Z_global_coupled = self._Z_matrix.copy()
-
-    #     msg = f"\nCoupled solve complete: {n_ports} external ports"
-    #     if st == 'iterative':
-    #         msg += f" (total CG steps: {total_iter_steps})"
-    #     print(msg)
-
-    #     # Store residual info for the global solve
-    #     # freq_iters/freq_residuals have one entry per (freq, port, mode)
-    #     # Reshape to (n_freqs, n_excitations), then:
-    #     # - iterations: mean across excitations
-    #     # - residuals: min across excitations (best/final per-frequency residual)
-    #     if not hasattr(self, '_residuals'):
-    #         self._residuals = {}
-    #     if freq_iters:
-    #         raw_iters = np.array(freq_iters).reshape(n_freqs, -1)
-    #         raw_res = np.array(freq_residuals).reshape(n_freqs, -1)
-    #     else:
-    #         raw_iters = np.zeros((n_freqs, 1))
-    #         raw_res = np.zeros((n_freqs, 1))
-    #     self._residuals['global'] = {
-    #         'frequencies': self.frequencies.copy(),
-    #         'iterations': raw_iters.mean(axis=1),
-    #         'residuals': raw_res.min(axis=1),
-    #         'iterations_per_excitation': raw_iters,
-    #         'residuals_per_excitation': raw_res,
-    #         'solver_type': st,
-    #     }
 
     def _compute_per_domain_s_from_z(self) -> None:
         """Compute per-domain S-matrices from per-domain Z data."""
@@ -1444,7 +1783,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self,
             fmin: float,
             fmax: float,
-            nsamples: int = 100,
+            nsamples: int = 20,
             store_snapshots: bool = False,
             methods: List[str] = None
     ) -> Dict:
@@ -2382,7 +2721,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if domain == 'global':
                 if not has_global:
                     raise ValueError("Global matrices not assembled. "
-                                     "Call assemble_matrices(assemble_global=True)")
+                                    "Call assemble_matrices(assemble_global=True)")
                 raw_eigs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
                 return process_eigs(raw_eigs)
             elif domain in self.M:
@@ -3392,9 +3731,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             ax1 = axes[idx, 0]
             if db:
                 ax1.plot(freqs_ghz, 20 * np.log10(np.abs(s_coupled) + 1e-12),
-                         'b-', label='Coupled', **kwargs)
+                        'b-', label='Coupled', **kwargs)
                 ax1.plot(freqs_ghz, 20 * np.log10(np.abs(s_cascade) + 1e-12),
-                         'r--', label='Cascade', **kwargs)
+                        'r--', label='Cascade', **kwargs)
                 ax1.set_ylabel(f'|{param}| (dB)')
             else:
                 ax1.plot(freqs_ghz, np.abs(s_coupled), 'b-', label='Coupled', **kwargs)
@@ -3615,10 +3954,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         if self._per_domain_matrices_assembled or self._global_matrices_assembled:
             status.append(f"  Matrices: per_domain={self._per_domain_matrices_assembled}, "
-                          f"global={self._global_matrices_assembled}")
+                        f"global={self._global_matrices_assembled}")
 
         if self.frequencies is not None:
             status.append(f"  Solution: {len(self.frequencies)} frequencies, "
-                          f"method={self._current_global_method}")
+                        f"method={self._current_global_method}")
 
         return "\n".join(status)
