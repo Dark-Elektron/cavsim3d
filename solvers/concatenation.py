@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Structure concatenation for multi-cell analysis.
 
@@ -27,6 +28,11 @@ from core.constants import Z0, mu0
 from solvers.base import BaseEMSolver
 from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
+from core.persistence import H5Serializer
+import h5py
+import json
+from pathlib import Path
+from datetime import datetime
 
 
 # Connection specification: ((struct_idx, port_name), (struct_idx, port_name))
@@ -495,6 +501,73 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return np.diag(Z0_diag)
 
     # =========================================================================
+    # Persistence
+    # =========================================================================
+
+    def save(self, path: Union[str, Path]):
+        """
+        Save ConcatenatedSystem data to disk.
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save coupled matrices
+        with h5py.File(path / "matrices.h5", "w") as f:
+            H5Serializer.save_dataset(f, "A_coupled", self.A_coupled)
+            H5Serializer.save_dataset(f, "B_coupled", self.B_coupled)
+            H5Serializer.save_dataset(f, "W_coupled", self.W_coupled)
+
+        # 2. Save snapshots and frequencies
+        with h5py.File(path / "snapshots.h5", "w") as f:
+            H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if self._snapshots is not None:
+                H5Serializer.save_dataset(f, "snapshots", self._snapshots)
+        
+        # 3. Save metadata
+        metadata = {
+            "n_structures": self.n_structures,
+            "domains": self.domains,
+            "n_connections": self.n_connections,
+            "n_internal": self._n_internal,
+            "n_external": self._n_external,
+            "n_modes_per_port": self._n_modes_per_port,
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, Path], solver_ref=None) -> ConcatenatedSystem:
+        """Load ConcatenatedSystem from disk."""
+        path = Path(path)
+        with open(path / "metadata.json", "r") as f:
+            metadata = json.load(f)
+        
+        # Create skeleton
+        cs = cls.__new__(cls)
+        cs._solver_ref = solver_ref
+        cs.n_structures = metadata["n_structures"]
+        cs.domains = metadata["domains"]
+        cs.n_connections = metadata["n_connections"]
+        cs._n_internal = metadata["n_internal"]
+        cs._n_external = metadata["n_external"]
+        cs._n_modes_per_port = metadata["n_modes_per_port"]
+        
+        # Load matrices
+        with h5py.File(path / "matrices.h5", "r") as f:
+            cs.A_coupled = H5Serializer.load_dataset(f["A_coupled"])
+            cs.B_coupled = H5Serializer.load_dataset(f["B_coupled"])
+            cs.W_coupled = H5Serializer.load_dataset(f["W_coupled"])
+
+        # Load snapshots
+        with h5py.File(path / "snapshots.h5", "r") as f:
+            cs.frequencies = H5Serializer.load_dataset(f["frequencies"])
+            if "snapshots" in f:
+                cs._snapshots = H5Serializer.load_dataset(f["snapshots"])
+
+        return cs
+
+    # =========================================================================
     # Frequency Domain Solution
     # =========================================================================
 
@@ -876,6 +949,28 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if n_modes is not None:
             freqs = freqs[:n_modes]
         return freqs
+
+    # =========================================================================
+    # Backward-compatible ROM accessor
+    # =========================================================================
+
+    @property
+    def rom(self):
+        """
+        Backward-compatible accessor for further reduction.
+
+        .. deprecated::
+            Use ``concat.reduce()`` instead.
+        """
+        if not hasattr(self, '_rom_cache') or self._rom_cache is None:
+            import warnings
+            warnings.warn(
+                "ConcatenatedSystem.rom is deprecated. Use concat.reduce() instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._rom_cache = self.reduce()
+        return self._rom_cache
 
     # =========================================================================
     # Further Reduction

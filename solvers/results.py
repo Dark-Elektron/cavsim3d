@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Result wrapper objects for the cavsim3d computation graph.
 
@@ -24,13 +25,17 @@ Multi-solid
   cs.reduce()                     -> ModelOrderReduction (2nd-level POD)
 """
 
-from __future__ import annotations
 
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 import warnings
 import numpy as np
 
 from utils.plot_mixin import PlotMixin
+from core.persistence import H5Serializer
+import h5py
+from pathlib import Path
+from datetime import datetime
+import json
 
 
 # =============================================================================
@@ -82,17 +87,65 @@ class FOMResult(PlotMixin):
         self._residual_data = residual_data
         self._solver_ref = _solver_ref
 
+        # Lazy cache for backward-compatible .rom property
+        self._rom_cache = None
+
     # ------------------------------------------------------------------
     # PlotMixin requirements
     # ------------------------------------------------------------------
 
     @property
     def Z_dict(self) -> Optional[Dict]:
+        if self._Z_dict is None and self._Z_matrix is not None:
+            self._Z_dict = self._rebuild_dict(self._Z_matrix)
         return self._Z_dict
 
     @property
     def S_dict(self) -> Optional[Dict]:
+        if self._S_dict is None and self._S_matrix is not None:
+            self._S_dict = self._rebuild_dict(self._S_matrix)
         return self._S_dict
+
+    def _rebuild_dict(self, matrix: np.ndarray) -> Dict:
+        """Utility to reconstruct port/mode mapping dictionary from a matrix."""
+        res_dict = {'frequencies': self.frequencies}
+        n_p = matrix.shape[1]
+        n_modes = self._n_modes_per_port
+        
+        for row in range(n_p):
+            prow = row // n_modes + 1
+            mrow = row % n_modes + 1
+            for col in range(n_p):
+                pcol = col // n_modes + 1
+                mcol = col % n_modes + 1
+                key = f'{pcol}({mcol}){prow}({mrow})'
+                res_dict[key] = matrix[:, row, col]
+        return res_dict
+
+    # ------------------------------------------------------------------
+    # Backward-compatible ROM accessor
+    # ------------------------------------------------------------------
+
+    @property
+    def rom(self):
+        """
+        Access the cached reduced-order model.
+
+        Returns the ROM only if it has already been computed via
+        ``fom.reduce()`` or loaded from disk. Does **not** trigger
+        reduction automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If no ROM has been computed yet.
+        """
+        if self._rom_cache is None:
+            raise RuntimeError(
+                "No reduced-order model available. "
+                "Call fom.reduce() first to compute the ROM."
+            )
+        return self._rom_cache
 
     # ------------------------------------------------------------------
     # Explicit reduce / concatenate
@@ -160,6 +213,78 @@ class FOMResult(PlotMixin):
             return self._solver_ref.get_resonant_frequencies(**kwargs)
         raise RuntimeError("Resonant frequencies not available for this FOMResult.")
 
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Union[str, Path]):
+        """
+        Save FOM results to disk.
+        
+        Saves matrices (K, M, B) and snapshots/frequencies to HDF5 files
+        as defined in the simulation result structure.
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save matrices (K, M, B)
+        # These are usually stored in FrequencyDomainSolver but referenced in results
+        # if store_snapshots was True.
+        with h5py.File(path / "matrices.h5", "w") as f:
+            if self._solver_ref is not None:
+                H5Serializer.save_dataset(f, "K", self._solver_ref.K.get(self.domain))
+                H5Serializer.save_dataset(f, "M", self._solver_ref.M.get(self.domain))
+                H5Serializer.save_dataset(f, "B", self._solver_ref.B.get(self.domain))
+
+        # 2. Save snapshots and frequencies
+        with h5py.File(path / "snapshots.h5", "w") as f:
+            H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            H5Serializer.save_dataset(f, "Z_matrix", self._Z_matrix)
+            H5Serializer.save_dataset(f, "S_matrix", self._S_matrix)
+            if self._residual_data:
+                H5Serializer.save_dataset(f, "residual_data", self._residual_data)
+        
+        # 3. Save metadata
+        metadata = {
+            "domain": self.domain,
+            "n_ports": self.n_ports,
+            "ports": self.ports,
+            "n_modes_per_port": self._n_modes_per_port,
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, Path], _solver_ref=None) -> FOMResult:
+        """Load FOM results from disk."""
+        path = Path(path)
+        
+        with open(path / "metadata.json", "r") as f:
+            metadata = json.load(f)
+        
+        with h5py.File(path / "snapshots.h5", "r") as f:
+            frequencies = H5Serializer.load_dataset(f["frequencies"])
+            Z_matrix = H5Serializer.load_dataset(f["Z_matrix"]) if "Z_matrix" in f else None
+            S_matrix = H5Serializer.load_dataset(f["S_matrix"]) if "S_matrix" in f else None
+            residual_data = H5Serializer.load_dataset(f["residual_data"]) if "residual_data" in f else None
+
+        # Build Z/S dicts if matrices are loaded
+        res = cls(
+            domain=metadata["domain"],
+            frequencies=frequencies,
+            Z_matrix=Z_matrix,
+            S_matrix=S_matrix,
+            Z_dict=None, # will be build lazily or we can build now
+            S_dict=None,
+            n_ports=metadata["n_ports"],
+            ports=metadata["ports"],
+            n_modes_per_port=metadata.get("n_modes_per_port", 1),
+            residual_data=residual_data,
+            _solver_ref=_solver_ref
+        )
+        return res
+
     def __repr__(self) -> str:
         n_freq = len(self.frequencies) if self.frequencies is not None else 0
         return (f"FOMResult(domain='{self.domain}', "
@@ -194,6 +319,10 @@ class FOMCollection(PlotMixin):
             raise ValueError("FOMCollection requires at least one FOMResult.")
         self._foms = fom_list
         self._fds_ref = _fds_ref
+
+        # Lazy caches for backward-compatible properties
+        self._roms_cache: Optional[ROMCollection] = None
+        self._concat_cache = None
 
     # ------------------------------------------------------------------
     # Sequence interface
@@ -306,6 +435,52 @@ class FOMCollection(PlotMixin):
         if show:
             plt.show()
         return fig, ax
+
+    # ------------------------------------------------------------------
+    # Backward-compatible ROM/Concat accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def roms(self) -> 'ROMCollection':
+        """
+        Access the cached per-domain ROMs.
+
+        Returns the ROM collection only if it has already been computed
+        via ``foms.reduce()`` or loaded from disk.  Does **not** trigger
+        reduction automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If no ROMs have been computed yet.
+        """
+        if self._roms_cache is None:
+            raise RuntimeError(
+                "No reduced-order models available. "
+                "Call foms.reduce() first to compute the ROMs."
+            )
+        return self._roms_cache
+
+    @property
+    def concat(self):
+        """
+        Access the cached concatenated system.
+
+        Returns the concatenated system only if it has already been
+        computed via ``foms.concatenate()`` or loaded from disk.
+        Does **not** trigger concatenation automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If no concatenated system has been computed yet.
+        """
+        if self._concat_cache is None:
+            raise RuntimeError(
+                "No concatenated system available. "
+                "Call foms.concatenate() first."
+            )
+        return self._concat_cache
 
     # ------------------------------------------------------------------
     # Reduce and Concatenate
@@ -453,6 +628,82 @@ class FOMCollection(PlotMixin):
 
         return concat
 
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Union[str, Path]):
+        """Save FOMCollection to multi-solid path."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        # Save per-solid results in a consolidated way as per simulation_result_structure.md
+        # Matrices for all solids go into foms/matrices.h5 with grouping
+        
+        with h5py.File(path / "matrices.h5", "w") as fm, \
+             h5py.File(path / "snapshots.h5", "w") as fs:
+            
+            H5Serializer.save_dataset(fs, "frequencies", self.frequencies)
+
+            for fom in self._foms:
+                domain = fom.domain
+                # Save matrices to matrices.h5
+                if fom._solver_ref is not None:
+                    H5Serializer.save_dataset(fm, f"{domain}/K", fom._solver_ref.K.get(domain))
+                    H5Serializer.save_dataset(fm, f"{domain}/M", fom._solver_ref.M.get(domain))
+                    H5Serializer.save_dataset(fm, f"{domain}/B", fom._solver_ref.B.get(domain))
+                
+                # Save results to snapshots.h5 (as snapshots/Z/S)
+                H5Serializer.save_dataset(fs, f"{domain}/Z_matrix", fom._Z_matrix)
+                H5Serializer.save_dataset(fs, f"{domain}/S_matrix", fom._S_matrix)
+        
+        # Metadata
+        metadata = {
+            "n_solids": len(self._foms),
+            "solids": [
+                {
+                    "domain": f.domain,
+                    "n_ports": f.n_ports,
+                    "ports": f.ports,
+                    "n_modes_per_port": f._n_modes_per_port
+                } for f in self._foms
+            ],
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, Path], _fds_ref=None) -> FOMCollection:
+        """Load FOMCollection from disk."""
+        path = Path(path)
+        with open(path / "metadata.json", "r") as f:
+            metadata = json.load(f)
+        
+        fom_list = []
+        with h5py.File(path / "snapshots.h5", "r") as fs:
+            frequencies = H5Serializer.load_dataset(fs["frequencies"])
+            for solid_meta in metadata["solids"]:
+                domain = solid_meta["domain"]
+                Z_matrix = H5Serializer.load_dataset(fs[f"{domain}/Z_matrix"]) if f"{domain}/Z_matrix" in fs else None
+                S_matrix = H5Serializer.load_dataset(fs[f"{domain}/S_matrix"]) if f"{domain}/S_matrix" in fs else None
+                
+                fom = FOMResult(
+                    domain=domain,
+                    frequencies=frequencies,
+                    Z_matrix=Z_matrix,
+                    S_matrix=S_matrix,
+                    Z_dict=None,
+                    S_dict=None,
+                    n_ports=solid_meta["n_ports"],
+                    ports=solid_meta["ports"],
+                    n_modes_per_port=solid_meta.get("n_modes_per_port", 1),
+                    _solver_ref=_fds_ref
+                )
+                fom_list.append(fom)
+        
+        return cls(fom_list, _fds_ref=_fds_ref)
+
     def __repr__(self) -> str:
         return (f"FOMCollection([{', '.join(f.domain for f in self._foms)}])")
 
@@ -518,6 +769,31 @@ class ROMCollection(PlotMixin):
         return self._mor_ref.S_dict if hasattr(self._mor_ref, 'S_dict') else None
 
     # ------------------------------------------------------------------
+    # Backward-compatible concat accessor
+    # ------------------------------------------------------------------
+
+    @property
+    def concat(self):
+        """
+        Access the cached concatenated system.
+
+        Returns the concatenated system only if it has already been
+        computed via ``roms.concatenate()`` or loaded from disk.
+        Does **not** trigger concatenation automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If no concatenated system has been computed yet.
+        """
+        if not hasattr(self, '_concat_cache') or self._concat_cache is None:
+            raise RuntimeError(
+                "No concatenated system available. "
+                "Call roms.concatenate() first."
+            )
+        return self._concat_cache
+
+    # ------------------------------------------------------------------
     # Concatenate
     # ------------------------------------------------------------------
 
@@ -552,6 +828,21 @@ class ROMCollection(PlotMixin):
     def __repr__(self) -> str:
         domains = ', '.join(self._mor_ref.domains)
         return f"ROMCollection([{domains}])"
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Union[str, Path]):
+        """Save ROMCollection (delegates to ModelOrderReduction)."""
+        self._mor_ref.save(path)
+
+    @classmethod
+    def load(cls, path: Union[str, Path], _fds_ref=None) -> ROMCollection:
+        """Load ROMCollection from disk."""
+        from rom.reduction import ModelOrderReduction
+        mor = ModelOrderReduction.load(path, solver=_fds_ref)
+        return cls(_fds_ref=_fds_ref, _mor_ref=mor)
 
 
 # =============================================================================

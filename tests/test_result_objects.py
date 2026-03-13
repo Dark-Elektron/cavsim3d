@@ -231,5 +231,80 @@ class TestDataExtractorNewTypes:
         assert len(s) == 50
 
 
+# ---------------------------------------------------------------------------
+# Regression: .rom / .roms / .concat must NOT auto-trigger computation
+# ---------------------------------------------------------------------------
+
+class TestNoAutoCompute:
+    """
+    Regression guard: accessing .rom, .roms, or .concat when no cached
+    result exists must raise RuntimeError — never silently trigger an
+    expensive reduce() or concatenate() call.
+    """
+
+    def test_fom_rom_does_not_auto_reduce(self):
+        """FOMResult.rom must raise when no ROM has been computed."""
+        fom = _make_fom()
+        assert fom._rom_cache is None
+        with pytest.raises(RuntimeError, match="Call fom.reduce"):
+            _ = fom.rom
+
+    def test_fom_rom_returns_cached(self):
+        """FOMResult.rom returns the cached ROM when set explicitly."""
+        fom = _make_fom()
+        sentinel = object()
+        fom._rom_cache = sentinel
+        assert fom.rom is sentinel
+
+    def test_fom_collection_roms_does_not_auto_reduce(self):
+        """FOMCollection.roms must raise when no ROMs have been computed."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        assert coll._roms_cache is None
+        with pytest.raises(RuntimeError, match="Call foms.reduce"):
+            _ = coll.roms
+
+    def test_fom_collection_roms_returns_cached(self):
+        """FOMCollection.roms returns cached ROMCollection when set."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        sentinel = object()
+        coll._roms_cache = sentinel
+        assert coll.roms is sentinel
+
+    def test_fom_collection_concat_does_not_auto_concatenate(self):
+        """FOMCollection.concat must raise when not computed."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        assert coll._concat_cache is None
+        with pytest.raises(RuntimeError, match="Call foms.concatenate"):
+            _ = coll.concat
+
+    def test_fom_collection_concat_returns_cached(self):
+        """FOMCollection.concat returns cached system when set."""
+        coll = FOMCollection([_make_fom('a'), _make_fom('b')])
+        sentinel = object()
+        coll._concat_cache = sentinel
+        assert coll.concat is sentinel
+
+    def test_rom_collection_concat_does_not_auto_concatenate(self):
+        """ROMCollection.concat must raise when not computed."""
+        import unittest.mock as mock
+        mor = mock.MagicMock()
+        mor.domains = ['a']
+        mor.n_domains = 1
+        roms = ROMCollection(_mor_ref=mor)
+        with pytest.raises(RuntimeError, match="Call roms.concatenate"):
+            _ = roms.concat
+
+    def test_rom_collection_concat_returns_cached(self):
+        """ROMCollection.concat returns cached system when set."""
+        import unittest.mock as mock
+        mor = mock.MagicMock()
+        mor.domains = ['a']
+        mor.n_domains = 1
+        roms = ROMCollection(_mor_ref=mor)
+        sentinel = object()
+        roms._concat_cache = sentinel
+        assert roms.concat is sentinel
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

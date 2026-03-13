@@ -1,0 +1,60 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.14, pytest-9.0.2, pluggy-1.5.0 -- C:\Users\Soske\anaconda3\envs\cavsim3d\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Soske\Documents\git_projects\cavsim3d
+plugins: anyio-4.10.0
+collecting ... collected 1 item
+
+tests/test_persistence.py::TestResultPersistence::test_frequency_domain_solver_auto_persistence FAILED [100%]
+
+================================== FAILURES ===================================
+_____ TestResultPersistence.test_frequency_domain_solver_auto_persistence _____
+tests\test_persistence.py:248: in test_frequency_domain_solver_auto_persistence
+    fds.save() # already linked
+    ^^^^^^^^^^
+..\..\..\anaconda3\envs\cavsim3d\Lib\unittest\mock.py:1124: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\anaconda3\envs\cavsim3d\Lib\unittest\mock.py:1128: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\anaconda3\envs\cavsim3d\Lib\unittest\mock.py:1201: in _execute_mock_call
+    return self._mock_wraps(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+solvers\frequency_domain.py:918: in save
+    pm.save_config(project_path, config)
+    ^^
+E   UnboundLocalError: cannot access local variable 'pm' where it is not associated with a value
+---------------------------- Captured stdout call -----------------------------
+
+============================================================
+Structure Topology
+============================================================
+Type: Single structure
+Domains (1): ['domain1']
+Total Ports (0): []
+
+Domain-Port Mapping:
+  domain1: []
+============================================================
+Project saved to C:\Users\Soske\AppData\Local\Temp\pytest-of-Soske\pytest-20\test_frequency_domain_solver_a0\test_auto_save
+============================== warnings summary ===============================
+tests/test_persistence.py::TestResultPersistence::test_frequency_domain_solver_auto_persistence
+  C:\Users\Soske\Documents\git_projects\cavsim3d\solvers\frequency_domain.py:170: UserWarning: 
+    No port boundaries detected in mesh.
+    Boundaries found: ['P1', 'P2']
+    The solver requires at least one port to compute Z/S parameters.
+    Fix: call geo.define_ports(zmin=True, zmax=True) before generate_mesh().
+    self._validate_boundary_conditions()
+
+tests/test_persistence.py::TestResultPersistence::test_frequency_domain_solver_auto_persistence
+  C:\Users\Soske\Documents\git_projects\cavsim3d\solvers\frequency_domain.py:170: UserWarning: 
+    No boundary conditions set (bc=None). All boundaries will be unconstrained (no PEC walls).
+    All boundaries: ['P1', 'P2']
+    Fix: call geo.define_ports() to set up the geometry correctly, which also sets bc='wall'.
+    self._validate_boundary_conditions()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::TestResultPersistence::test_frequency_domain_solver_auto_persistence
+======================== 1 failed, 2 warnings in 0.29s ========================

@@ -1,5 +1,5 @@
 # assembly.py
-"""Assembly class with hierarchical support and solution caching."""
+"""Assembly class with hierarchical support, multi-solid output, and solution caching."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -48,6 +48,7 @@ class ComponentEntry:
     """Entry for a component in the assembly."""
     geometry: Union[BaseGeometry, 'Assembly']
     key: str
+    base_name: str  # Original name before suffixing
     transform: Transform3D = field(default_factory=Transform3D)
     original_bounds: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
     aligned_port: Optional[str] = None
@@ -113,10 +114,11 @@ class Connection:
 
 class Assembly(BaseGeometry):
     """
-    Assembly of geometry components with hierarchical support.
+    Assembly of geometry components with multi-solid output.
     
-    Can contain individual geometries OR other assemblies. Supports
-    automatic positioning, tagging for caching, and multiple layout modes.
+    Creates a compound geometry where each component remains a separate solid,
+    similar to split geometries. Supports automatic positioning, unified port
+    naming, and tracks identical components for solver optimization.
     
     Parameters
     ----------
@@ -125,33 +127,22 @@ class Assembly(BaseGeometry):
     
     Examples
     --------
-    **Sequential assembly:**
+    **TESLA 9-cell cavity with identical midcells:**
     
     >>> assembly = Assembly(main_axis='Z')
-    >>> assembly.add("wg1", waveguide1)
-    >>> assembly.add("wg2", waveguide2, after="wg1")
+    >>> assembly.add("endcell_l", endcell_l)
+    >>> for i in range(7):
+    ...     assembly.add("midcell", midcell, after="endcell_l" if i == 0 else "midcell")
+    >>> assembly.add("endcell_r", endcell_r, after="midcell")
     >>> assembly.build()
-    
-    **Mosaic layout:**
-    
-    >>> layout = '''
-    ...     .     top      .
-    ...   left   center  right
-    ... '''
-    >>> assembly = Assembly.from_mosaic(layout, components={...})
-    
-    **Nested assemblies:**
-    
-    >>> sub_assembly = Assembly()
-    >>> sub_assembly.add("a", geo_a)
-    >>> sub_assembly.add("b", geo_b, after="a")
-    >>> sub_assembly.build()
     >>> 
-    >>> main = Assembly()
-    >>> main.add("input", input_wg)
-    >>> main.add("middle", sub_assembly, after="input")  # Sub-assembly!
-    >>> main.add("output", output_wg, after="middle")
-    >>> main.build()
+    >>> # Check what was created
+    >>> assembly.print_info()
+    >>> # Shows: midcell_1, midcell_2, ..., midcell_7 (all identical)
+    
+    **Resulting structure:**
+    - Solids: endcell_l, midcell_1, midcell_2, ..., midcell_7, endcell_r
+    - Ports: port1 (external), port2 (interface), ..., port10 (external)
     """
     
     _AXIS_VEC = {'X': X, 'Y': Y, 'Z': Z}
@@ -165,16 +156,24 @@ class Assembly(BaseGeometry):
         self._component_order: List[str] = []
         self._connections: List[Connection] = []
         
+        # Track base names for duplicate detection
+        self._base_name_counts: Dict[str, int] = {}
+        self._base_name_groups: Dict[str, List[str]] = {}  # base_name -> [key1, key2, ...]
+        
         self._layout_computed = False
         self._is_built = False
+        
+        # Port and solid information (populated by build())
+        self._port_info: Dict[str, Dict] = {}
+        self._solid_info: Dict[str, Dict] = {}
     
     # =========================================================================
-    # Component Management
+    # Component Management (with duplicate name support)
     # =========================================================================
     
     def add(
         self,
-        key: str,
+        name: str,
         geometry: Union[BaseGeometry, 'Assembly'],
         position: Optional[Tuple[float, float, float]] = None,
         rotation: Optional[Tuple[float, float, float]] = None,
@@ -186,10 +185,14 @@ class Assembly(BaseGeometry):
         """
         Add a component (geometry or sub-assembly) to the assembly.
         
+        Duplicate names are allowed and automatically suffixed with _1, _2, etc.
+        Components with the same base name are tracked for solver optimization
+        (compute once, reuse for identical geometries).
+        
         Parameters
         ----------
-        key : str
-            Unique identifier
+        name : str
+            Component name (duplicates allowed, will be auto-suffixed)
         geometry : BaseGeometry or Assembly
             Component to add (can be another Assembly!)
         position : tuple, optional
@@ -197,9 +200,9 @@ class Assembly(BaseGeometry):
         rotation : tuple, optional
             Rotation angles in degrees (rx, ry, rz)
         after : str, optional
-            Place after this component along main axis
+            Place after this component along main axis (can use base name)
         before : str, optional
-            Place before this component along main axis
+            Place before this component along main axis (can use base name)
         align_port : str, optional
             Port to use for alignment
         **metadata
@@ -208,16 +211,43 @@ class Assembly(BaseGeometry):
         Returns
         -------
         self : Assembly
+        
+        Examples
+        --------
+        >>> assembly.add("midcell", midcell)           # -> "midcell_1"
+        >>> assembly.add("midcell", midcell)           # -> "midcell_2"  
+        >>> assembly.add("midcell", midcell)           # -> "midcell_3"
+        >>> assembly.get_identical_components()
+        {'midcell': ['midcell_1', 'midcell_2', 'midcell_3']}
         """
-        if key in self._components:
-            raise ValueError(f"Component '{key}' already exists")
+        base_name = name
+        
+        # Generate unique key if name already exists
+        if name in self._components or name in self._base_name_counts:
+            # This is a duplicate name
+            if base_name not in self._base_name_counts:
+                # First duplicate - rename the original
+                self._rename_first_instance(base_name)
+            
+            # Increment count and generate new key
+            self._base_name_counts[base_name] += 1
+            key = f"{base_name}_{self._base_name_counts[base_name]}"
+        else:
+            # First instance of this name
+            key = name
+            self._base_name_counts[base_name] = 0  # Will become 1 if duplicated
+        
+        # Track in base name groups
+        if base_name not in self._base_name_groups:
+            self._base_name_groups[base_name] = []
+        self._base_name_groups[base_name].append(key)
         
         # Handle sub-assemblies
         if isinstance(geometry, Assembly):
             if not geometry._is_built:
                 geometry.build()
         elif geometry.geo is None:
-            raise ValueError(f"Geometry '{key}' not built. Call build() first.")
+            raise ValueError(f"Geometry '{name}' not built. Call build() first.")
         
         transform = Transform3D(
             translation=position or (0.0, 0.0, 0.0),
@@ -227,6 +257,7 @@ class Assembly(BaseGeometry):
         entry = ComponentEntry(
             geometry=geometry,
             key=key,
+            base_name=base_name,
             transform=transform,
             aligned_port=align_port,
             metadata=metadata
@@ -234,29 +265,28 @@ class Assembly(BaseGeometry):
         
         self._components[key] = entry
         
-        # Handle ordering
-        if after is not None:
-            if after not in self._components:
-                raise ValueError(f"Component '{after}' not found")
-            idx = self._component_order.index(after) + 1
+        # Handle ordering - resolve base names to actual keys
+        resolved_after = self._resolve_component_ref(after) if after else None
+        resolved_before = self._resolve_component_ref(before) if before else None
+        
+        if resolved_after is not None:
+            idx = self._component_order.index(resolved_after) + 1
             self._component_order.insert(idx, key)
             
             self._connections.append(Connection(
-                from_key=after,
+                from_key=resolved_after,
                 to_key=key,
                 from_port='port2',
                 to_port=align_port or 'port1'
             ))
             
-        elif before is not None:
-            if before not in self._components:
-                raise ValueError(f"Component '{before}' not found")
-            idx = self._component_order.index(before)
+        elif resolved_before is not None:
+            idx = self._component_order.index(resolved_before)
             self._component_order.insert(idx, key)
             
             self._connections.append(Connection(
                 from_key=key,
-                to_key=before,
+                to_key=resolved_before,
                 from_port=align_port or 'port2',
                 to_port='port1'
             ))
@@ -269,9 +299,91 @@ class Assembly(BaseGeometry):
         
         return self
     
+    def _rename_first_instance(self, base_name: str) -> None:
+        """Rename the first instance of a component when duplicates are added."""
+        if base_name not in self._components:
+            return
+        
+        # The first instance needs to be renamed to base_name_1
+        old_key = base_name
+        new_key = f"{base_name}_1"
+        
+        # Update component entry
+        entry = self._components[old_key]
+        entry.key = new_key
+        
+        # Move in dict
+        self._components[new_key] = entry
+        del self._components[old_key]
+        
+        # Update order list
+        idx = self._component_order.index(old_key)
+        self._component_order[idx] = new_key
+        
+        # Update connections
+        for conn in self._connections:
+            if conn.from_key == old_key:
+                conn.from_key = new_key
+            if conn.to_key == old_key:
+                conn.to_key = new_key
+        
+        # Update base name groups
+        if base_name in self._base_name_groups:
+            self._base_name_groups[base_name] = [
+                new_key if k == old_key else k 
+                for k in self._base_name_groups[base_name]
+            ]
+        
+        # Set count to 1 (next will be _2)
+        self._base_name_counts[base_name] = 1
+    
+    def _resolve_component_ref(self, ref: str) -> Optional[str]:
+        """
+        Resolve a component reference (base name or full key) to actual key.
+        
+        If ref is a base name with multiple instances, returns the last one.
+        """
+        if ref is None:
+            return None
+        
+        # Direct match
+        if ref in self._components:
+            return ref
+        
+        # Try as base name - return last instance
+        if ref in self._base_name_groups and self._base_name_groups[ref]:
+            return self._base_name_groups[ref][-1]
+        
+        raise ValueError(f"Component '{ref}' not found")
+    
+    def get_identical_components(self) -> Dict[str, List[str]]:
+        """
+        Get groups of components that share the same base name (geometry).
+        
+        These components are candidates for solver optimization - compute
+        the solution once and reuse for all identical instances.
+        
+        Returns
+        -------
+        dict
+            {base_name: [key1, key2, ...]} for groups with more than one member
+        """
+        return {
+            name: keys for name, keys in self._base_name_groups.items()
+            if len(keys) > 1
+        }
+    
+    def get_components_by_base_name(self, base_name: str) -> List[str]:
+        """Get all component keys with a given base name."""
+        return self._base_name_groups.get(base_name, [])
+    
+    # =========================================================================
+    # Connection and Layout Methods (unchanged logic, updated for new structure)
+    # =========================================================================
+    
     def connect(
         self,
-        key: str,
+        name: str,
         geometry: Union[BaseGeometry, 'Assembly'],
         to_component: str,
         from_port: str = "port1",
@@ -280,38 +392,17 @@ class Assembly(BaseGeometry):
         gap: float = 0.0,
         **metadata
     ) -> 'Assembly':
-        """
-        Add component connected via ports to existing component.
+        """Add component connected via ports to existing component."""
+        resolved_to = self._resolve_component_ref(to_component)
         
-        Parameters
-        ----------
-        key : str
-            Identifier for new component
-        geometry : BaseGeometry or Assembly
-            Component to add
-        to_component : str
-            Existing component to connect to
-        from_port : str
-            Port on new component
-        to_port : str
-            Port on existing component
-        rotation : tuple, optional
-            Rotation angles
-        gap : float
-            Gap between components
+        self.add(name, geometry, rotation=rotation, **metadata)
         
-        Returns
-        -------
-        self : Assembly
-        """
-        if to_component not in self._components:
-            raise ValueError(f"Target '{to_component}' not found")
-        
-        self.add(key, geometry, rotation=rotation, **metadata)
+        # Get the key that was just added (might be suffixed)
+        new_key = self._component_order[-1]
         
         self._connections.append(Connection(
-            from_key=to_component,
-            to_key=key,
+            from_key=resolved_to,
+            to_key=new_key,
             from_port=to_port,
             to_port=from_port,
             connection_type=ConnectionType.PORT_TO_PORT,
@@ -320,32 +411,49 @@ class Assembly(BaseGeometry):
         
         return self
     
-    def remove(self, key: str) -> 'Assembly':
-        """Remove a component."""
-        if key not in self._components:
-            raise KeyError(f"Component '{key}' not found")
+    def remove(self, ref: str) -> 'Assembly':
+        """Remove a component by key or base name (removes all instances if base name)."""
+        keys_to_remove = []
         
-        del self._components[key]
-        self._component_order.remove(key)
-        self._connections = [c for c in self._connections 
-                           if c.from_key != key and c.to_key != key]
+        if ref in self._components:
+            keys_to_remove = [ref]
+        elif ref in self._base_name_groups:
+            keys_to_remove = list(self._base_name_groups[ref])
+        else:
+            raise KeyError(f"Component '{ref}' not found")
+        
+        for key in keys_to_remove:
+            entry = self._components[key]
+            base_name = entry.base_name
+            
+            del self._components[key]
+            self._component_order.remove(key)
+            self._connections = [
+                c for c in self._connections 
+                if c.from_key != key and c.to_key != key
+            ]
+            
+            # Update base name tracking
+            if base_name in self._base_name_groups:
+                self._base_name_groups[base_name].remove(key)
+                if not self._base_name_groups[base_name]:
+                    del self._base_name_groups[base_name]
+                    del self._base_name_counts[base_name]
         
         self._layout_computed = False
         self._is_built = False
         self.invalidate_tag()
         
         return self
-    
+
     def rotate(
         self, 
-        key: str, 
+        ref: str, 
         angles: Tuple[float, float, float],
         center: Optional[Tuple[float, float, float]] = None
     ) -> 'Assembly':
         """Apply rotation to a component."""
-        if key not in self._components:
-            raise KeyError(f"Component '{key}' not found")
-        
+        key = self._resolve_component_ref(ref)
         entry = self._components[key]
         current = entry.transform.rotation
         entry.transform = Transform3D(
@@ -353,17 +461,13 @@ class Assembly(BaseGeometry):
             rotation=tuple(c + a for c, a in zip(current, angles)),
             rotation_center=center
         )
-        
         self._layout_computed = False
         self._is_built = False
-        
         return self
     
-    def translate(self, key: str, offset: Tuple[float, float, float]) -> 'Assembly':
+    def translate(self, ref: str, offset: Tuple[float, float, float]) -> 'Assembly':
         """Apply translation to a component."""
-        if key not in self._components:
-            raise KeyError(f"Component '{key}' not found")
-        
+        key = self._resolve_component_ref(ref)
         entry = self._components[key]
         current = entry.transform.translation
         entry.transform = Transform3D(
@@ -371,25 +475,22 @@ class Assembly(BaseGeometry):
             rotation=entry.transform.rotation,
             rotation_center=entry.transform.rotation_center
         )
-        
         self._layout_computed = False
         self._is_built = False
-        
         return self
-    
+
     # =========================================================================
     # Index-based Access
     # =========================================================================
     
     def __getitem__(self, key: Union[str, int]) -> ComponentEntry:
-        """Access component by key or index."""
+        """Access component by key, base name, or index."""
         if isinstance(key, int):
             if key < 0 or key >= len(self._component_order):
                 raise IndexError(f"Index {key} out of range")
             key = self._component_order[key]
-        
-        if key not in self._components:
-            raise KeyError(f"Component '{key}' not found")
+        else:
+            key = self._resolve_component_ref(key)
         
         return self._components[key]
     
@@ -399,8 +500,12 @@ class Assembly(BaseGeometry):
     def __iter__(self):
         return iter(self._component_order)
     
-    def __contains__(self, key: str) -> bool:
-        return key in self._components
+    def __contains__(self, ref: str) -> bool:
+        try:
+            self._resolve_component_ref(ref)
+            return True
+        except (KeyError, ValueError):
+            return False
     
     @property
     def keys(self) -> List[str]:
@@ -409,185 +514,9 @@ class Assembly(BaseGeometry):
     @property
     def components(self) -> Dict[str, ComponentEntry]:
         return dict(self._components)
-    
+
     # =========================================================================
-    # Mosaic Layout Factory
-    # =========================================================================
-    
-    @classmethod
-    def from_mosaic(
-        cls,
-        mosaic: Union[str, List[List[str]]],
-        components: Dict[str, Union[BaseGeometry, 'Assembly']],
-        grid_plane: Literal['XY', 'XZ', 'YZ'] = 'XZ',
-        extend_axis: Optional[Literal['X', 'Y', 'Z']] = None,
-        alignment: Literal['center', 'min', 'max'] = 'center',
-        spacing: float = 0.0
-    ) -> 'Assembly':
-        """
-        Create assembly from mosaic-style layout.
-        
-        The mosaic defines a 2D grid. Empty cells are marked with '.' or ''.
-        Components can be geometries OR sub-assemblies.
-        
-        Parameters
-        ----------
-        mosaic : str or list
-            Layout specification as multiline string or nested list.
-        components : dict
-            Mapping of identifiers to BaseGeometry or Assembly objects
-        grid_plane : str
-            Which plane the grid represents ('XY', 'XZ', 'YZ')
-        extend_axis : str, optional
-            Axis components extend along (inferred if None)
-        alignment : str
-            How to align within cells ('center', 'min', 'max')
-        spacing : float
-            Gap between grid cells
-        
-        Returns
-        -------
-        Assembly
-        
-        Examples
-        --------
-        >>> layout = '''
-        ...     .     top      .
-        ...   left   center  right
-        ... '''
-        >>> assembly = Assembly.from_mosaic(
-        ...     layout,
-        ...     components={
-        ...         'center': t_junction,
-        ...         'top': waveguide_v,
-        ...         'left': waveguide_h,
-        ...         'right': waveguide_h  # Same object = same tag!
-        ...     },
-        ...     grid_plane='XY'
-        ... )
-        """
-        # Parse mosaic
-        grid = cls._parse_mosaic(mosaic)
-        
-        # Validate components
-        grid_keys = set()
-        for row in grid:
-            for cell in row:
-                if cell and cell != '.':
-                    grid_keys.add(cell)
-        
-        missing = grid_keys - set(components.keys())
-        if missing:
-            raise ValueError(f"Components not provided: {missing}")
-        
-        # Determine axes
-        plane_axes = {
-            'XY': ('X', 'Y', 'Z'),
-            'XZ': ('X', 'Z', 'Y'),
-            'YZ': ('Y', 'Z', 'X')
-        }
-        
-        col_axis, row_axis, default_extend = plane_axes[grid_plane]
-        extend_axis = extend_axis or default_extend
-        
-        assembly = cls(main_axis=extend_axis)
-        
-        # Compute grid dimensions
-        n_rows = len(grid)
-        n_cols = max(len(row) for row in grid)
-        
-        # Pad rows
-        for row in grid:
-            while len(row) < n_cols:
-                row.append('')
-        
-        col_idx = cls._AXIS_IDX[col_axis]
-        row_idx = cls._AXIS_IDX[row_axis]
-        
-        # Get max sizes per row/column
-        col_sizes = [0.0] * n_cols
-        row_sizes = [0.0] * n_rows
-        
-        for i, row in enumerate(grid):
-            for j, cell in enumerate(row):
-                if cell and cell != '.' and cell in components:
-                    geo = components[cell]
-                    # Build sub-assemblies if needed
-                    if isinstance(geo, Assembly) and not geo._is_built:
-                        geo.build()
-                    
-                    if geo.geo is not None:
-                        try:
-                            bb = geo.geo.bounding_box
-                            size = tuple(bb[1][k] - bb[0][k] for k in range(3))
-                            col_sizes[j] = max(col_sizes[j], size[col_idx])
-                            row_sizes[i] = max(row_sizes[i], size[row_idx])
-                        except:
-                            pass
-        
-        # Compute positions
-        col_positions = [0.0]
-        for size in col_sizes[:-1]:
-            col_positions.append(col_positions[-1] + size + spacing)
-        
-        row_positions = [0.0]
-        for size in row_sizes[:-1]:
-            row_positions.append(row_positions[-1] + size + spacing)
-        
-        # Flip rows (grid top-to-bottom, but Y/Z increase upward)
-        total_height = row_positions[-1] + row_sizes[-1] if row_sizes else 0
-        row_positions = [total_height - p - row_sizes[i] 
-                        for i, p in enumerate(row_positions)]
-        
-        # Add components
-        added = set()
-        for i, row in enumerate(grid):
-            for j, cell in enumerate(row):
-                if cell and cell != '.' and cell not in added:
-                    if cell in components:
-                        geo = components[cell]
-                        
-                        pos = [0.0, 0.0, 0.0]
-                        pos[col_idx] = col_positions[j]
-                        pos[row_idx] = row_positions[i]
-                        
-                        # Center alignment
-                        if alignment == 'center' and geo.geo is not None:
-                            try:
-                                bb = geo.geo.bounding_box
-                                size = tuple(bb[1][k] - bb[0][k] for k in range(3))
-                                pos[col_idx] += (col_sizes[j] - size[col_idx]) / 2
-                                pos[row_idx] += (row_sizes[i] - size[row_idx]) / 2
-                            except:
-                                pass
-                        
-                        assembly.add(cell, geo, position=tuple(pos))
-                        added.add(cell)
-        
-        return assembly
-    
-    @staticmethod
-    def _parse_mosaic(mosaic: Union[str, List[List[str]]]) -> List[List[str]]:
-        """Parse mosaic specification to grid."""
-        if isinstance(mosaic, str):
-            lines = [line.strip() for line in mosaic.strip().split('\n')]
-            lines = [line for line in lines if line]
-            
-            grid = []
-            for line in lines:
-                cells = line.split()
-                cells = ['' if c == '.' else c for c in cells]
-                grid.append(cells)
-            return grid
-        
-        elif isinstance(mosaic, list):
-            return [['' if c in ('.', None) else str(c) for c in row] 
-                   for row in mosaic]
-        
-        raise TypeError(f"Mosaic must be str or list, got {type(mosaic)}")
-    
-    # =========================================================================
-    # Layout Computation
+    # Layout Computation (unchanged)
     # =========================================================================
     
     def compute_layout(self) -> 'Assembly':
@@ -600,12 +529,9 @@ class Assembly(BaseGeometry):
             return self
         
         positioned = set()
-        
-        # First component at origin
         first_key = self._component_order[0]
         positioned.add(first_key)
         
-        # Process connections iteratively
         max_iter = len(self._connections) * 2 + 1
         for _ in range(max_iter):
             for conn in self._connections:
@@ -613,11 +539,9 @@ class Assembly(BaseGeometry):
                     continue
                 if conn.from_key not in positioned:
                     continue
-                
                 self._position_connected(conn)
                 positioned.add(conn.to_key)
         
-        # Position remaining unconnected components
         for key in self._component_order:
             if key not in positioned:
                 if positioned:
@@ -633,54 +557,23 @@ class Assembly(BaseGeometry):
         entry: ComponentEntry, 
         port_name: str
     ) -> Optional[Tuple[float, float, float]]:
-        """
-        Get port position in local coordinates.
-        
-        Uses bounding box estimation for reliable, deterministic results.
-        The port center is computed as the face centroid.
-        """
+        """Get port position in local coordinates."""
         if entry.original_bounds is None:
             return None
         
         pmin, pmax = entry.original_bounds
-        
-        # Compute face center (centroid of the port face)
-        # Port faces are perpendicular to the main axis
         axis_idx = self._AXIS_IDX[self.main_axis]
-        
-        # Center coordinates on the non-main axes
         center = [(pmin[i] + pmax[i]) / 2 for i in range(3)]
         
-        # Determine which end of main axis based on port name
         if 'port1' in port_name.lower() or 'min' in port_name.lower():
             center[axis_idx] = pmin[axis_idx]
         elif 'port2' in port_name.lower() or 'max' in port_name.lower():
             center[axis_idx] = pmax[axis_idx]
-        else:
-            # Unknown port, try to get from mesh if available
-            geo = entry.geometry
-            if hasattr(geo, 'get_point_on_boundary') and geo.mesh is not None:
-                try:
-                    # Get any point on boundary, then project to face center
-                    pt = geo.get_point_on_boundary(port_name)
-                    if pt is not None:
-                        # Use the axis coordinate from the point, but center on other axes
-                        result = list(center)
-                        # Keep the main axis coordinate from the actual point
-                        # This handles non-standard port positions
-                        return tuple(result)
-                except:
-                    pass
         
         return tuple(center)
     
     def _position_connected(self, conn: Connection) -> None:
-        """
-        Position component based on port connection.
-        
-        Aligns the ports of two components along the main axis,
-        while keeping other coordinates aligned.
-        """
+        """Position component based on port connection."""
         from_entry = self._components[conn.from_key]
         to_entry = self._components[conn.to_key]
         
@@ -688,36 +581,26 @@ class Assembly(BaseGeometry):
         to_port_pos = self._get_port_position(to_entry, conn.to_port)
         
         if from_port_pos is None or to_port_pos is None:
-            # Fallback to simple stacking
             self._position_after(conn.to_key, conn.from_key)
             return
         
         axis_idx = self._AXIS_IDX[self.main_axis]
         
-        # Calculate from_port position in world coordinates
         from_world = tuple(
             from_port_pos[i] + from_entry.transform.translation[i]
             for i in range(3)
         )
         
-        # Calculate translation needed:
-        # - Along main axis: align ports (with gap)
-        # - On other axes: align centers (so components stack properly)
         translation = [0.0, 0.0, 0.0]
         
         for i in range(3):
             if i == axis_idx:
-                # Main axis: align port positions with gap
                 translation[i] = from_world[i] - to_port_pos[i] + conn.gap
             else:
-                # Other axes: align bounding box centers
-                # This ensures the components are centered relative to each other
                 from_center = (from_entry.original_bounds[0][i] + 
                              from_entry.original_bounds[1][i]) / 2
                 to_center = (to_entry.original_bounds[0][i] + 
                            to_entry.original_bounds[1][i]) / 2
-                
-                # Translate so centers align (accounting for from_entry's position)
                 translation[i] = (from_center + from_entry.transform.translation[i] 
                                  - to_center)
         
@@ -728,31 +611,23 @@ class Assembly(BaseGeometry):
         )
     
     def _position_after(self, key: str, after_key: str) -> None:
-        """
-        Position component after another along main axis.
-        
-        Aligns centers on perpendicular axes.
-        """
+        """Position component after another along main axis."""
         entry = self._components[key]
         after_entry = self._components[after_key]
         
         axis_idx = self._AXIS_IDX[self.main_axis]
         
-        # Get the max position of 'after' component along main axis
         after_max = (
             after_entry.transform.translation[axis_idx] + 
             after_entry.size[axis_idx]
         )
         
-        # Build translation vector
         translation = [0.0, 0.0, 0.0]
         
         for i in range(3):
             if i == axis_idx:
-                # Main axis: place after the previous component
                 translation[i] = after_max
             else:
-                # Other axes: align centers
                 if after_entry.original_bounds and entry.original_bounds:
                     after_center = (after_entry.original_bounds[0][i] + 
                                    after_entry.original_bounds[1][i]) / 2
@@ -767,13 +642,22 @@ class Assembly(BaseGeometry):
             rotation=entry.transform.rotation,
             rotation_center=entry.transform.rotation_center
         )
-    
+
     # =========================================================================
-    # Build
+    # Build - Multi-solid Assembly
     # =========================================================================
     
     def build(self) -> None:
-        """Build combined geometry from all components."""
+        """
+        Build multi-solid geometry from all components.
+        
+        Creates a compound where each component is a separate solid with:
+        - Solid named after component key (e.g., 'midcell_1', 'midcell_2')
+        - Sequential port naming (port1, port2, ...) along main axis
+        - Interface ports (where solids meet) shared between adjacent components
+        - External ports at assembly ends
+        - All other faces named 'wall'
+        """
         if not self._components:
             raise ValueError("No components in assembly")
         
@@ -784,21 +668,250 @@ class Assembly(BaseGeometry):
             if entry.is_assembly and not entry.geometry._is_built:
                 entry.geometry.build()
         
+        # Collect transformed shapes
         shapes = []
+        shape_keys = []  # Track which key each shape belongs to
         
         for key in self._component_order:
             entry = self._components[key]
             shape = entry.geometry.geo
             transformed = self._apply_transform(shape, entry.transform)
             shapes.append(transformed)
+            shape_keys.append(key)
         
+        # Create multi-solid compound using Glue
         if len(shapes) == 1:
             self.geo = shapes[0]
         else:
             self.geo = Glue(shapes)
         
+        # Name solids and setup boundaries
+        self._name_solids(shape_keys)
         self._setup_boundaries()
+        
         self._is_built = True
+    
+    def _name_solids(self, shape_keys: List[str]) -> None:
+        """Name each solid in the geometry based on component keys."""
+        self._solid_info = {}
+        
+        try:
+            solids = list(self.geo.solids)
+            n_solids = len(solids)
+            
+            if n_solids != len(shape_keys):
+                # Mismatch - solids might have been merged or split
+                # Fall back to position-based naming
+                print(f"Warning: Expected {len(shape_keys)} solids, found {n_solids}")
+                self._name_solids_by_position(solids)
+                return
+            
+            # Sort solids by position along main axis to match component order
+            axis_idx = self._AXIS_IDX[self.main_axis]
+            
+            def get_solid_position(solid):
+                bb = solid.bounding_box
+                return (bb[0][axis_idx] + bb[1][axis_idx]) / 2
+            
+            solids_with_pos = [(get_solid_position(s), i, s) for i, s in enumerate(solids)]
+            solids_with_pos.sort(key=lambda x: x[0])
+            
+            # Match sorted solids to component order
+            for order_idx, (pos, orig_idx, solid) in enumerate(solids_with_pos):
+                key = shape_keys[order_idx]
+                entry = self._components[key]
+                
+                # Name the solid
+                solid.mat(key)
+                
+                # Store solid info
+                bb = solid.bounding_box
+                self._solid_info[key] = {
+                    'material': key,
+                    'base_name': entry.base_name,
+                    'position': pos,
+                    'bounds': (tuple(bb[0]), tuple(bb[1])),
+                    'is_identical': len(self._base_name_groups.get(entry.base_name, [])) > 1
+                }
+                
+        except AttributeError:
+            # Single solid
+            key = shape_keys[0]
+            entry = self._components[key]
+            self.geo.mat(key)
+            self._solid_info[key] = {
+                'material': key,
+                'base_name': entry.base_name,
+                'position': 0,
+                'bounds': None,
+                'is_identical': False
+            }
+    
+    def _name_solids_by_position(self, solids: list) -> None:
+        """Fallback: name solids by their position along main axis."""
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        
+        def get_solid_position(solid):
+            bb = solid.bounding_box
+            return (bb[0][axis_idx] + bb[1][axis_idx]) / 2
+        
+        solids_sorted = sorted(solids, key=get_solid_position)
+        
+        for i, solid in enumerate(solids_sorted):
+            name = f"cell_{i + 1}"
+            solid.mat(name)
+            bb = solid.bounding_box
+            self._solid_info[name] = {
+                'material': name,
+                'base_name': name,
+                'position': get_solid_position(solid),
+                'bounds': (tuple(bb[0]), tuple(bb[1])),
+                'is_identical': False
+            }
+    
+    def _setup_boundaries(self) -> None:
+        """
+        Setup boundary conditions with unified sequential port naming.
+        
+        - All flat faces perpendicular to main axis are ports
+        - Faces at the same position share the same port name (interfaces)
+        - Port numbers increase along the positive main axis direction
+        - Non-port faces are named 'wall'
+        """
+        if self.geo is None:
+            return
+        
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        tolerance = 1e-6
+        
+        # Step 1: Name all faces 'wall' first
+        self._name_all_faces_wall()
+        
+        # Step 2: Identify all port faces and their positions
+        port_faces = []
+        
+        try:
+            for face in self.geo.faces:
+                try:
+                    fbb = face.bounding_box
+                    face_extent = fbb[1][axis_idx] - fbb[0][axis_idx]
+                    
+                    if face_extent < tolerance:
+                        face_pos = (fbb[0][axis_idx] + fbb[1][axis_idx]) / 2
+                        port_faces.append((face_pos, face))
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Warning: Error identifying faces: {e}")
+            self.bc = 'wall'
+            self._bc_explicitly_set = True
+            return
+        
+        if not port_faces:
+            print("Warning: No port faces found")
+            self.bc = 'wall'
+            self._bc_explicitly_set = True
+            return
+        
+        # Step 3: Group faces by position
+        port_faces.sort(key=lambda x: x[0])
+        
+        port_groups = []
+        for pos, face in port_faces:
+            matched = False
+            for group in port_groups:
+                if abs(group['position'] - pos) < tolerance:
+                    group['faces'].append(face)
+                    matched = True
+                    break
+            
+            if not matched:
+                port_groups.append({
+                    'position': pos,
+                    'faces': [face]
+                })
+        
+        # Step 4: Sort groups by position and assign sequential port names
+        port_groups.sort(key=lambda g: g['position'])
+        
+        self._port_info = {}
+        
+        for port_num, group in enumerate(port_groups, start=1):
+            port_name = f'port{port_num}'
+            
+            is_external = len(group['faces']) == 1
+            is_interface = len(group['faces']) > 1
+            
+            for face in group['faces']:
+                face.name = port_name
+            
+            # Find which components connect at this port
+            connected_components = self._find_components_at_position(
+                group['position'], tolerance
+            )
+            
+            self._port_info[port_name] = {
+                'position': group['position'],
+                'num_faces': len(group['faces']),
+                'type': 'external' if is_external else 'interface',
+                'axis': self.main_axis,
+                'connected_components': connected_components
+            }
+        
+        # Summary
+        n_external = sum(1 for p in self._port_info.values() if p['type'] == 'external')
+        n_interface = sum(1 for p in self._port_info.values() if p['type'] == 'interface')
+        
+        print(f"Port naming complete:")
+        print(f"  Total ports: {len(self._port_info)}")
+        print(f"  External ports: {n_external}")
+        print(f"  Interface ports: {n_interface}")
+        
+        self.bc = 'wall'
+        self._bc_explicitly_set = True
+    
+    def _name_all_faces_wall(self) -> None:
+        """Name every face 'wall' as default."""
+        if self.geo is None:
+            return
+        
+        try:
+            for solid in self.geo.solids:
+                for face in solid.faces:
+                    face.name = 'wall'
+        except AttributeError:
+            try:
+                for face in self.geo.faces:
+                    face.name = 'wall'
+            except AttributeError:
+                pass
+    
+    def _find_components_at_position(
+        self, 
+        position: float, 
+        tolerance: float
+    ) -> List[Tuple[str, str]]:
+        """Find which components have ports at a given position."""
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        connected = []
+        
+        for key in self._component_order:
+            entry = self._components[key]
+            if entry.original_bounds is None:
+                continue
+            
+            pmin, pmax = entry.original_bounds
+            t = entry.transform.translation
+            
+            world_min = pmin[axis_idx] + t[axis_idx]
+            world_max = pmax[axis_idx] + t[axis_idx]
+            
+            if abs(world_min - position) < tolerance:
+                connected.append((key, 'port1'))
+            if abs(world_max - position) < tolerance:
+                connected.append((key, 'port2'))
+        
+        return connected
     
     def _apply_transform(self, shape, transform: Transform3D):
         """Apply transformation to OCC shape."""
@@ -807,7 +920,6 @@ class Assembly(BaseGeometry):
         
         result = shape
         
-        # Rotation
         rx, ry, rz = transform.rotation
         if abs(rx) > 1e-12 or abs(ry) > 1e-12 or abs(rz) > 1e-12:
             if transform.rotation_center:
@@ -826,25 +938,106 @@ class Assembly(BaseGeometry):
             if abs(rx) > 1e-12:
                 result = result.Rotate(Axes(center, X), rx)
         
-        # Translation
         tx, ty, tz = transform.translation
         if abs(tx) > 1e-12 or abs(ty) > 1e-12 or abs(tz) > 1e-12:
             result = result.Move((tx, ty, tz))
         
         return result
+
+    # =========================================================================
+    # Port and Solid Information
+    # =========================================================================
     
-    def _setup_boundaries(self) -> None:
-        """Setup boundary conditions."""
-        try:
-            for face in self.geo.faces:
-                if not face.name or face.name == 'default':
-                    face.name = 'wall'
-        except:
-            pass
+    def get_port_info(self) -> Dict[str, Dict]:
+        """Get information about all ports in the assembly."""
+        return dict(self._port_info) if self._port_info else {}
+    
+    def get_solid_info(self) -> Dict[str, Dict]:
+        """Get information about all solids in the assembly."""
+        return dict(self._solid_info) if self._solid_info else {}
+    
+    def get_external_ports(self) -> List[str]:
+        """Get list of external port names."""
+        return [name for name, info in self._port_info.items() 
+                if info['type'] == 'external']
+    
+    def get_interface_ports(self) -> List[str]:
+        """Get list of interface port names."""
+        return [name for name, info in self._port_info.items() 
+                if info['type'] == 'interface']
+    
+    def print_port_info(self) -> None:
+        """Print detailed port information."""
+        if not self._port_info:
+            print("No port information available. Call build() first.")
+            return
         
-        self.bc = 'wall'
-        self._bc_explicitly_set = True
+        print("\n" + "=" * 70)
+        print("ASSEMBLY PORT MAP")
+        print("=" * 70)
+        print(f"Main axis: {self.main_axis}")
+        print(f"Total ports: {len(self._port_info)}")
+        print("-" * 70)
+        
+        for port_name in sorted(self._port_info.keys(), 
+                                key=lambda x: int(x.replace('port', ''))):
+            info = self._port_info[port_name]
+            port_type = info['type'].upper()
+            pos = info['position']
+            n_faces = info['num_faces']
+            
+            type_marker = "◀▶" if info['type'] == 'external' else "◀┃▶"
+            
+            components = info.get('connected_components', [])
+            comp_str = ", ".join(f"{k}.{p}" for k, p in components) if components else "?"
+            
+            print(f"  {port_name:8s} │ {self.main_axis}={pos:+.6f} │ "
+                  f"{port_type:10s} │ {n_faces} face(s) {type_marker}")
+            print(f"           │ Components: {comp_str}")
+        
+        print("=" * 70)
+        
+        # Visual schematic
+        self._print_schematic()
     
+    def _print_schematic(self) -> None:
+        """Print a visual schematic of the assembly."""
+        ports_sorted = sorted(
+            self._port_info.items(), 
+            key=lambda x: x[1]['position']
+        )
+        
+        print(f"\nSchematic (along {self.main_axis}):\n")
+        
+        # Build port line
+        port_parts = []
+        for port_name, info in ports_sorted:
+            if info['type'] == 'external':
+                port_parts.append(f"║{port_name}║")
+            else:
+                port_parts.append(f"┃{port_name}┃")
+        
+        # Build component line
+        comp_parts = []
+        for key in self._component_order:
+            entry = self._components[key]
+            if entry.base_name != key:
+                # Show base name for duplicates
+                comp_parts.append(f"[{key}]")
+            else:
+                comp_parts.append(f"[{key}]")
+        
+        print("  Ports:      " + " ─── ".join(port_parts))
+        print("  Components: " + " ─── ".join(comp_parts))
+        
+        # Show identical component groups
+        identical = self.get_identical_components()
+        if identical:
+            print(f"\n  Identical components (compute once, reuse):")
+            for base_name, keys in identical.items():
+                print(f"    {base_name}: {', '.join(keys)}")
+        print()
+
     # =========================================================================
     # Visualization
     # =========================================================================
@@ -888,21 +1081,27 @@ class Assembly(BaseGeometry):
         
         # Summary
         print(f"\nAssembly: {len(self._components)} components")
-        print("-" * 50)
+        print("-" * 60)
         for i, key in enumerate(self._component_order):
             entry = self._components[key]
             pos = entry.transform.translation
             geo_type = type(entry.geometry).__name__
-            tag_short = str(entry.tag)
             size = entry.size
             
-            sub = " (sub-assembly)" if entry.is_assembly else ""
+            base_info = f" (={entry.base_name})" if entry.base_name != key else ""
+            sub = " [sub-assembly]" if entry.is_assembly else ""
             cached = " [CACHED]" if entry.geometry.has_cached_solution() else ""
             
-            print(f"  [{i}] {key}: {geo_type}{sub}{cached}")
+            print(f"  [{i}] {key}{base_info}: {geo_type}{sub}{cached}")
             print(f"      Position: ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
             print(f"      Size:     ({size[0]:.4f}, {size[1]:.4f}, {size[2]:.4f})")
-            print(f"      Tag: {tag_short}")
+        
+        # Show identical groups
+        identical = self.get_identical_components()
+        if identical:
+            print(f"\nIdentical components:")
+            for base_name, keys in identical.items():
+                print(f"  {base_name}: {len(keys)} instances -> compute once")
 
     def show(
         self,
@@ -921,7 +1120,6 @@ class Assembly(BaseGeometry):
         elif what == "mesh":
             if self.mesh is None:
                 raise ValueError("Mesh not generated. Call generate_mesh() first.")
-            # Use NGSolve's Draw for NGSolve Mesh objects
             Draw(self.mesh, **kwargs)
         else:
             raise ValueError(f"Invalid option '{what}'")
@@ -946,9 +1144,9 @@ class Assembly(BaseGeometry):
             
             colors.append((r + m, g + m, b + m))
         return colors
-    
+
     # =========================================================================
-    # Bounds and Info
+    # Assembly Bounds and Info
     # =========================================================================
     
     def get_assembly_bounds(self) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
@@ -969,169 +1167,25 @@ class Assembly(BaseGeometry):
                 all_max[i] = max(all_max[i], pmax[i] + t[i])
         
         return tuple(all_min), tuple(all_max)
-    
-        # =========================================================================
-    # Tagging (for cache identification)
-    # =========================================================================
-    
-    def _get_geometry_params(self) -> Dict[str, Any]:
-        """Get parameters for tag computation."""
-        # Include all component tags - this makes the assembly tag
-        # dependent on all its constituents
-        component_tags = {}
-        for key, entry in self._components.items():
-            component_tags[key] = {
-                'tag_hash': entry.tag.full_hash,
-                'transform': {
-                    'translation': entry.transform.translation,
-                    'rotation': entry.transform.rotation
-                }
-            }
-        
-        return {
-            'class': 'Assembly',
-            'main_axis': self.main_axis,
-            'components': component_tags,
-            'order': list(self._component_order)
-        }
-    
-    def _get_mesh_params(self) -> Dict[str, Any]:
-        """Get mesh parameters for tag computation."""
-        return {
-            'maxh': getattr(self, 'maxh', None),
-            'component_count': len(self._components)
-        }
-    
-    # =========================================================================
-    # Cache-Aware Methods
-    # =========================================================================
-    
-    def get_component_cache_status(self) -> Dict[str, bool]:
-        """
-        Check cache status for all components.
-        
-        Returns
-        -------
-        dict
-            Mapping of component key to cache status (True if cached)
-        """
-        status = {}
-        for key, entry in self._components.items():
-            status[key] = entry.geometry.has_cached_solution()
-        return status
-    
-    def get_uncached_components(self) -> List[str]:
-        """Get list of components that need computation."""
-        return [
-            key for key, entry in self._components.items()
-            if not entry.geometry.has_cached_solution()
-        ]
-    
-    def get_unique_components(self) -> Dict[str, List[str]]:
-        """
-        Group components by their geometry tag.
-        
-        Returns dict mapping tag hash to list of component keys.
-        Components with the same tag are geometrically identical
-        and can share solutions.
-        
-        Returns
-        -------
-        dict
-            {tag_hash: [key1, key2, ...]}
-        
-        Examples
-        --------
-        >>> # If 'left' and 'right' use the same waveguide object
-        >>> unique = assembly.get_unique_components()
-        >>> # unique might be: {'abc123...': ['left', 'right'], 'def456...': ['center']}
-        """
-        groups = {}
-        for key, entry in self._components.items():
-            tag_hash = entry.tag.geometry_hash  # Use geometry hash, not full
-            if tag_hash not in groups:
-                groups[tag_hash] = []
-            groups[tag_hash].append(key)
-        return groups
-    
-    def count_unique_geometries(self) -> int:
-        """Count number of unique geometries (for computation estimation)."""
-        return len(self.get_unique_components())
-    
-    # =========================================================================
-    # Flattening (for solver access)
-    # =========================================================================
-    
-    def flatten(self) -> List[Tuple[str, BaseGeometry, Transform3D]]:
-        """
-        Flatten assembly hierarchy to list of (key, geometry, transform).
-        
-        Recursively expands sub-assemblies with composed transforms.
-        Useful for solvers that need to process each geometry individually.
-        
-        Returns
-        -------
-        list
-            List of (key, geometry, world_transform) tuples
-        """
-        result = []
-        
-        for key in self._component_order:
-            entry = self._components[key]
-            
-            if entry.is_assembly:
-                # Recursively flatten sub-assembly
-                sub_flat = entry.geometry.flatten()
-                for sub_key, sub_geo, sub_transform in sub_flat:
-                    # Compose transforms: sub_transform then entry.transform
-                    composed = Transform3D(
-                        translation=tuple(
-                            sub_transform.translation[i] + entry.transform.translation[i]
-                            for i in range(3)
-                        ),
-                        rotation=tuple(
-                            sub_transform.rotation[i] + entry.transform.rotation[i]
-                            for i in range(3)
-                        )
-                    )
-                    result.append((f"{key}.{sub_key}", sub_geo, composed))
-            else:
-                result.append((key, entry.geometry, entry.transform))
-        
-        return result
-    
-    def get_all_tags(self) -> Dict[str, ComponentTag]:
-        """
-        Get tags for all geometries (flattened).
-        
-        Returns
-        -------
-        dict
-            Mapping of flattened key to ComponentTag
-        """
-        return {key: geo.tag for key, geo, _ in self.flatten()}
-    
-    # =========================================================================
-    # Summary and Info
-    # =========================================================================
-    
+
     def summary(self) -> Dict[str, Any]:
         """Get assembly summary information."""
-        cache_status = self.get_component_cache_status()
-        unique = self.get_unique_components()
+        identical = self.get_identical_components()
         
         return {
             'n_components': len(self._components),
-            'n_unique_geometries': len(unique),
+            'n_unique_geometries': len(self._base_name_groups),
+            'n_identical_groups': len(identical),
             'n_connections': len(self._connections),
+            'n_ports': len(self._port_info),
+            'n_external_ports': len(self.get_external_ports()),
+            'n_interface_ports': len(self.get_interface_ports()),
             'main_axis': self.main_axis,
             'is_built': self._is_built,
             'has_mesh': self.mesh is not None,
             'component_keys': list(self._component_order),
-            'cached_count': sum(cache_status.values()),
-            'uncached_count': len(self._components) - sum(cache_status.values()),
+            'identical_groups': identical,
             'bounds': self.get_assembly_bounds() if self._components else None,
-            'has_sub_assemblies': any(e.is_assembly for e in self._components.values())
         }
     
     def print_info(self) -> None:
@@ -1139,19 +1193,19 @@ class Assembly(BaseGeometry):
         info = self.summary()
         
         print("\n" + "=" * 70)
-        print("Assembly Information")
+        print("ASSEMBLY INFORMATION")
         print("=" * 70)
-        print(f"Components:             {info['n_components']}")
+        print(f"Total components:       {info['n_components']}")
         print(f"Unique geometries:      {info['n_unique_geometries']}")
-        print(f"Connections:            {info['n_connections']}")
+        print(f"Identical groups:       {info['n_identical_groups']}")
         print(f"Main axis:              {info['main_axis']}")
         print(f"Built:                  {info['is_built']}")
         print(f"Has mesh:               {info['has_mesh']}")
-        print(f"Has sub-assemblies:     {info['has_sub_assemblies']}")
         
-        print(f"\nCache Status:")
-        print(f"  Cached:               {info['cached_count']}")
-        print(f"  Need computation:     {info['uncached_count']}")
+        print(f"\nPorts:")
+        print(f"  Total:                {info['n_ports']}")
+        print(f"  External:             {info['n_external_ports']}")
+        print(f"  Interfaces:           {info['n_interface_ports']}")
         
         if info['bounds']:
             pmin, pmax = info['bounds']
@@ -1165,68 +1219,105 @@ class Assembly(BaseGeometry):
             geo_type = type(entry.geometry).__name__
             pos = entry.transform.translation
             
-            flags = []
-            if entry.is_assembly:
-                flags.append("sub-assembly")
-            if entry.geometry.has_cached_solution():
-                flags.append("cached")
-            if hasattr(entry.geometry, 'supports_analytical') and entry.geometry.supports_analytical:
-                flags.append(f"method={entry.geometry.compute_method}")
+            base_info = f" (base: {entry.base_name})" if entry.base_name != key else ""
             
-            flag_str = f" [{', '.join(flags)}]" if flags else ""
-            
-            print(f"  [{i}] {key}: {geo_type}{flag_str}")
+            print(f"  [{i}] {key}{base_info}: {geo_type}")
             print(f"       Position: ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
-            print(f"       Tag: {entry.tag}")
         
-        # Show unique geometry groups
-        unique = self.get_unique_components()
-        if any(len(v) > 1 for v in unique.values()):
-            print(f"\nShared Geometries (can reuse solutions):")
-            for tag_hash, keys in unique.items():
-                if len(keys) > 1:
-                    print(f"  {tag_hash[:12]}...: {', '.join(keys)}")
+        # Identical component groups
+        if info['identical_groups']:
+            print(f"\nIdentical Component Groups (solver optimization):")
+            for base_name, keys in info['identical_groups'].items():
+                print(f"  '{base_name}': {len(keys)} instances")
+                print(f"    Keys: {', '.join(keys)}")
+                print(f"    -> Compute once, reuse {len(keys)-1} times")
         
         print("=" * 70)
-    
-    # =========================================================================
-    # Serialization (for saving/loading assemblies)
-    # =========================================================================
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Serialize assembly structure to dictionary.
         
-        Note: Does not serialize actual geometries, only structure.
-        Useful for saving assembly configurations.
-        """
-        components = {}
+        # Print port map if built
+        if self._is_built and self._port_info:
+            self.print_port_info()
+
+    # =========================================================================
+    # Tagging and Cache Support
+    # =========================================================================
+    
+    def _get_geometry_params(self) -> Dict[str, Any]:
+        """Get parameters for tag computation."""
+        component_tags = {}
         for key, entry in self._components.items():
-            components[key] = {
-                'geometry_type': type(entry.geometry).__name__,
-                'geometry_tag': entry.tag.full_hash,
-                'is_assembly': entry.is_assembly,
+            component_tags[key] = {
+                'tag_hash': entry.tag.full_hash,
+                'base_name': entry.base_name,
                 'transform': {
                     'translation': entry.transform.translation,
                     'rotation': entry.transform.rotation
-                },
-                'metadata': entry.metadata
+                }
             }
         
-        connections = []
-        for conn in self._connections:
-            connections.append({
-                'from_key': conn.from_key,
-                'to_key': conn.to_key,
-                'from_port': conn.from_port,
-                'to_port': conn.to_port,
-                'gap': conn.gap
-            })
+        return {
+            'class': 'Assembly',
+            'main_axis': self.main_axis,
+            'components': component_tags,
+            'order': list(self._component_order),
+            'identical_groups': self.get_identical_components()
+        }
+    
+    def _get_mesh_params(self) -> Dict[str, Any]:
+        """Get mesh parameters for tag computation."""
+        return {
+            'maxh': getattr(self, 'maxh', None),
+            'component_count': len(self._components)
+        }
+    
+    def get_solver_optimization_info(self) -> Dict[str, Any]:
+        """
+        Get information for solver optimization.
+        
+        Returns details about which components are identical and can
+        share computed solutions.
+        
+        Returns
+        -------
+        dict
+            {
+                'total_components': int,
+                'unique_computations': int,
+                'reusable_results': int,
+                'groups': {
+                    base_name: {
+                        'keys': [key1, key2, ...],
+                        'compute_key': key1,  # Which one to compute
+                        'reuse_keys': [key2, ...]  # Which ones reuse the result
+                    }
+                }
+            }
+        """
+        identical = self.get_identical_components()
+        
+        # Single-instance components
+        unique_keys = [
+            keys[0] for name, keys in self._base_name_groups.items()
+            if len(keys) == 1
+        ]
+        
+        groups = {}
+        total_reuse = 0
+        
+        for base_name, keys in identical.items():
+            groups[base_name] = {
+                'keys': keys,
+                'compute_key': keys[0],
+                'reuse_keys': keys[1:]
+            }
+            total_reuse += len(keys) - 1
         
         return {
-            'main_axis': self.main_axis,
-            'component_order': list(self._component_order),
-            'components': components,
-            'connections': connections,
-            'assembly_tag': self.tag.full_hash
+            'total_components': len(self._components),
+            'unique_computations': len(self._base_name_groups),
+            'reusable_results': total_reuse,
+            'efficiency': 1 - (len(self._base_name_groups) / len(self._components)) 
+                         if self._components else 0,
+            'unique_keys': unique_keys,
+            'groups': groups
         }
