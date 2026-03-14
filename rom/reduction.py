@@ -14,11 +14,12 @@ from rom.structures import ReducedStructure
 from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
 from ngsolve.webgui import Draw
 from core.constants import mu0
-from core.persistence import H5Serializer
+from core.persistence import H5Serializer, ProjectManager
 import h5py
 import json
 from pathlib import Path
 from datetime import datetime
+import cavsim3d.utils.printing as pr
 
 
 class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
@@ -114,6 +115,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self._r_global: Optional[int] = None
         self._concatenated: Optional['ConcatenatedSystem'] = None
 
+        # Caches
+        self._resonant_mode_cache = {}
+
         # Snapshot storage for field reconstruction
         self._x_r_snapshots: Optional[Dict[str, np.ndarray]] = None
 
@@ -152,16 +156,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         # Provide helpful warnings
         if not has_matrices:
-            print("Warning: No matrices found in solver. "
-                  "Ensure assemble_matrices() was called.")
-
-        if not has_per_domain_snapshots and not has_global_snapshots:
-            print("Warning: No snapshots found in solver. "
-                  "Ensure solve() was called with store_snapshots=True")
-        elif self.n_domains > 1 and not has_per_domain_snapshots:
-            print("Warning: Multi-domain structure detected but only global snapshots available.")
-            print("         For multi-domain ROM, re-run solve() with per_domain=True:")
-            print("         solver.solve(fmin, fmax, nsamples, per_domain=True, store_snapshots=True)")
+            pr.warning("No matrices found in solver. Ensure assemble_matrices() was called.")
+            return
+        if not self.solver.snapshots:
+            pr.warning("No snapshots found in solver. Ensure solve(..., store_snapshots=True) was called.")
+            if self.solver.n_domains > 1:
+                pr.warning("Multi-domain structure detected but only global snapshots available.")
+                pr.warning("         For multi-domain ROM, re-run solve() with per_domain=True:")
+                pr.warning("         solver.solve(fmin, fmax, nsamples, per_domain=True, store_snapshots=True)")
 
     def _validate_snapshots_for_reduction(self) -> None:
         """Validate that required snapshots are available for reduction."""
@@ -219,6 +221,40 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """Get port impedance from underlying solver."""
         return self._port_impedance_func(port, mode, freq)
 
+    # ------------------------------------------------------------------
+    # Logical Matrix Access (Reduced)
+    # ------------------------------------------------------------------
+
+    @property
+    def A(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the reduced system matrix.
+        Returns the global coupled matrix if available, otherwise a dictionary of per-domain matrices.
+        """
+        if self._A_r_global is not None:
+            return self._A_r_global
+        return self._A_r
+
+    @property
+    def B(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the reduced port basis (mass-weighted).
+        Returns the global coupled matrix if available, otherwise a dictionary of per-domain matrices.
+        """
+        if self._B_r_global is not None:
+            return self._B_r_global
+        return self._B_r
+
+    @property
+    def W(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the POD projection basis.
+        Returns the global coupled basis if available, otherwise a dictionary of per-domain bases.
+        """
+        if self._W_r_global is not None:
+            return self._W_r_global
+        return self._W
+
     @staticmethod
     def _filter_eigenvalues(
         eigenvalues: np.ndarray,
@@ -261,106 +297,112 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return eigs_sorted
 
-    def get_eigenvalues(
-        self,
-        domain: str = None,
-        source: str = 'auto',
-        filter_static: bool = True,
-        min_eigenvalue: float = None,
-        n_modes: int = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    def calculate_resonant_modes(
+            self,
+            domain: str = None,
+            source: str = 'auto',
+            filter_static: bool = True,
+            min_eigenvalue: float = None,
+            n_modes: int = None
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
         """
-        Compute eigenvalues of reduced system matrix A_r.
-
-        For the system (A_r - ω²I)x = ωB_r u, eigenvalues of A_r give ω².
-
-        **Default behavior**: Returns global (concatenated) eigenvalues for
-        multi-domain structures, with static modes filtered out.
-
-        Parameters
-        ----------
-        domain : str, optional
-            Specific domain name, or 'global' for concatenated system.
-            If None, uses 'source' parameter to determine behavior.
-        source : str
-            Only used when domain is None:
-            - 'auto': Returns global if available, else single domain (default)
-            - 'global': Returns only global eigenvalues
-            - 'per_domain': Returns dict of per-domain eigenvalues
-            - 'all': Returns dict with both global and per-domain
-        filter_static : bool
-            If True (default), remove static modes (eigenvalues <= min_eigenvalue)
-        min_eigenvalue : float, optional
-            Threshold for static mode filtering. Default: 1.0 (ω² > 1)
-        n_modes : int, optional
-            Return only first n_modes eigenvalues (after filtering)
-
-        Returns
-        -------
-        eigenvalues : ndarray or dict
-            Eigenvalues (ω² values), sorted and filtered
+        Compute eigenvalues and eigenvectors for the reduced system.
         """
         if not self._is_reduced:
             raise ValueError("Must call reduce() first")
 
-        def process_eigs(raw_eigs: np.ndarray) -> np.ndarray:
-            return self._filter_eigenvalues(raw_eigs, filter_static, min_eigenvalue, n_modes)
+        # Check cache
+        cache_params = {
+            'domain': domain,
+            'source': source,
+            'filter_static': filter_static,
+            'min_eigenvalue': min_eigenvalue,
+            'n_modes': n_modes
+        }
+        cache_key = tuple(sorted(cache_params.items()))
+        if cache_key in self._resonant_mode_cache:
+            return self._resonant_mode_cache[cache_key]
+
+        def process_modes(raw_eigs: np.ndarray, raw_vecs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            # Use FrequencyDomainSolver's filter helper
+            from solvers.frequency_domain import FrequencyDomainSolver
+            return FrequencyDomainSolver._filter_eigenvalues(raw_eigs, raw_vecs, filter_static, min_eigenvalue, n_modes)
+
+        def get_raw_modes(A):
+             eigs, vecs = np.linalg.eigh(A)
+             return eigs, vecs
 
         # Specific domain requested
         if domain is not None:
             if domain == 'global':
-                raw_eigs = self._get_global_eigenvalues_raw()
+                raw_eigs, raw_vecs = get_raw_modes(self._get_global_matrix_raw())
             elif domain in self._A_r:
-                raw_eigs = np.linalg.eigvalsh(self._A_r[domain])
+                raw_eigs, raw_vecs = get_raw_modes(self._A_r[domain])
             else:
                 raise KeyError(f"Domain '{domain}' not found. "
                                f"Available: {list(self._A_r.keys())} + ['global']")
-            return process_eigs(raw_eigs)
+            res = process_modes(raw_eigs, raw_vecs)
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         # Auto-detect based on source parameter
-        if source == 'auto':
-            raw_eigs = self._get_global_eigenvalues_raw()
-            return process_eigs(raw_eigs)
-
-        elif source == 'global':
-            raw_eigs = self._get_global_eigenvalues_raw()
-            return process_eigs(raw_eigs)
+        if source == 'auto' or source == 'global':
+            raw_eigs, raw_vecs = get_raw_modes(self._get_global_matrix_raw())
+            res = process_modes(raw_eigs, raw_vecs)
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         elif source == 'per_domain':
-            return {
-                d: process_eigs(np.linalg.eigvalsh(self._A_r[d]))
+            res = {
+                d: process_modes(*get_raw_modes(self._A_r[d]))
                 for d in self.domains
             }
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         elif source == 'all':
             results = {
-                d: process_eigs(np.linalg.eigvalsh(self._A_r[d]))
+                d: process_modes(*get_raw_modes(self._A_r[d]))
                 for d in self.domains
             }
             try:
-                results['global'] = process_eigs(self._get_global_eigenvalues_raw())
-            except ValueError:
+                results['global'] = process_modes(*get_raw_modes(self._get_global_matrix_raw()))
+            except (ValueError, RuntimeError):
                 pass
+            self._resonant_mode_cache[cache_key] = results
             return results
 
         else:
             raise ValueError(f"Invalid source: {source}. "
                              "Use 'auto', 'global', 'per_domain', or 'all'")
 
-    def _get_global_eigenvalues_raw(self) -> np.ndarray:
-        """Get raw eigenvalues from the global (concatenated) system."""
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
+
+    def _get_global_matrix_raw(self, auto_concatenate: bool = False) -> np.ndarray:
+        """Get raw global (concatenated) matrix."""
         if self._A_r_global is not None:
-            return np.linalg.eigvalsh(self._A_r_global)
+            return self._A_r_global
 
         if self._concatenated is not None and self._concatenated.A_coupled is not None:
-            return np.linalg.eigvalsh(self._concatenated.A_coupled)
+            return self._concatenated.A_coupled
 
         if self.n_domains == 1:
-            return np.linalg.eigvalsh(self._A_r[self.domains[0]])
+            return self._A_r[self.domains[0]]
 
-        print("Auto-concatenating to compute global eigenvalues...")
+        if not auto_concatenate:
+            raise RuntimeError("Global matrix not available. Call concatenate() first.")
+
+        pr.debug("Auto-concatenating to get global matrix...")
         self.concatenate()
-        return np.linalg.eigvalsh(self._A_r_global)
+        return self._A_r_global
 
     def get_resonant_frequencies(
             self,
@@ -405,7 +447,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         else:
             min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
 
-        eigs = self.get_eigenvalues(
+        modes = self.calculate_resonant_modes(
             domain=domain,
             source=source,
             filter_static=filter_static,
@@ -413,10 +455,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             n_modes=None  # Don't limit here, do it after freq conversion
         )
 
-        if isinstance(eigs, dict):
-            all_eigs = np.concatenate(list(eigs.values()))
+        if isinstance(modes, dict):
+            all_eigs = np.concatenate([v[0] for v in modes.values()])
         else:
-            all_eigs = eigs
+            all_eigs = modes[0]
 
         # Eigenvalues are already filtered, but ensure positive for sqrt
         eigs_pos = all_eigs[all_eigs > 0]
@@ -427,6 +469,36 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             freqs = freqs[:n_modes]
 
         return freqs
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Compute or retrieve eigenmodes for the reduced structure(s).
+        """
+        res = self.calculate_resonant_modes(**kwargs)
+        
+        # Hierarchical save
+        if _auto_save:
+            self._auto_save_eigenmodes(res, **kwargs)
+        
+        return res
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self.solver is None or not hasattr(self.solver, '_project_path'):
+            return
+        
+        # Determine path based on single vs multi domain
+        project_path = Path(self.solver._project_path)
+        if self.n_domains == 1:
+            # fds/fom/rom -> fds/fom/rom/eigenmodes
+            save_path = project_path / "fds" / "fom" / "rom" / "eigenmodes"
+        else:
+            # fds/foms/roms -> fds/foms/roms/eigenmodes
+            save_path = project_path / "fds" / "foms" / "roms" / "eigenmodes"
+            
+        try:
+            self.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes for ModelOrderReduction: {e}")
 
     # =========================================================================
     # Model Reduction
@@ -455,9 +527,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self
             For method chaining
         """
-        print("\n" + "=" * 60)
-        print("Model Order Reduction")
-        print("=" * 60)
+        pr.running("\n" + "=" * 60)
+        pr.running("Model Order Reduction")
+        pr.running("=" * 60)
 
         # Validate snapshots
         self._validate_snapshots_for_reduction()
@@ -466,14 +538,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         total_reduced = 0
 
         for domain in self.domains:
-            print(f"\nDomain: {domain}")
+            pr.info(f"\nDomain: {domain}")
 
             # Get snapshots for this domain
             if domain in self._snapshots:
                 snapshots = self._snapshots[domain]
             elif 'global' in self._snapshots and self.n_domains == 1:
                 # Single domain can use global snapshots
-                print("  Using global snapshots (single-domain structure)")
+                pr.debug("  Using global snapshots (single-domain structure)")
                 snapshots = self._snapshots['global']
             else:
                 # This shouldn't happen if _validate_snapshots_for_reduction passed
@@ -515,11 +587,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             W = U[:, :r]
             self._W[domain] = W
 
-            print(f"  Full DOFs: {n}")
-            print(f"  Snapshots: {snapshots.shape[1]}")
-            print(f"  Reduced DOFs: {r}")
-            print(f"  Compression: {100*(1-r/n):.1f}%")
-            print(f"  Singular value decay: {S[0]:.2e} → {S[min(r, len(S)-1)]:.2e}")
+            pr.debug(f"  Full DOFs: {n}")
+            pr.debug(f"  Snapshots: {snapshots.shape[1]}")
+            pr.debug(f"  Reduced DOFs: {r}")
+            pr.debug(f"  Compression: {100*(1-r/n):.1f}%")
+            pr.debug(f"  Singular value decay: {S[0]:.2e} → {S[min(r, len(S)-1)]:.2e}")
 
             # Project matrices
             M_r = W.T @ M @ W
@@ -547,10 +619,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             total_full += n
             total_reduced += r
 
-        print("\n" + "-" * 60)
-        print(f"Total: {total_full} → {total_reduced} DOFs")
-        print(f"Overall compression: {100*(1-total_reduced/total_full):.1f}%")
-        print("=" * 60)
+        pr.done(f"Total: {total_full} → {total_reduced} DOFs")
+        pr.done(f"Overall compression: {100*(1-total_reduced/total_full):.1f}%")
+        pr.done("=" * 60)
 
         self._is_reduced = True
 
@@ -562,6 +633,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             self._W_r_global = self._W[domain]
             self._r_global = self._r[domain]
 
+        # Automatic save after reduction
+        if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
+            self.solver._project_ref.save()
+
         return self
 
     # =========================================================================
@@ -570,34 +645,62 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     def solve(
         self,
-        fmin: float,
-        fmax: float,
-        nsamples: int = 100,
-        solver_type: str = 'auto',
+        fmin: float = None,
+        fmax: float = None,
+        nsamples: int = None,
+        config: Optional[Dict] = None,
         **kwargs
     ) -> Dict:
         """
         Solve reduced system over frequency range.
 
-        For multi-domain systems, automatically concatenates internal
-        domains and returns results for external ports only.
+        Supports passing arguments directly or via a 'config' dictionary.
+        Individual keyword arguments override the config dictionary.
 
         Parameters
         ----------
-        fmin, fmax : float
+        fmin, fmax : float, optional
             Frequency range [GHz]
-        nsamples : int
+        nsamples : int, optional
             Number of frequency samples
-        solver_type : str
-            ``'auto'`` (default) picks direct for small systems, GMRES for
-            large.  ``'iterative'`` forces GMRES.  ``'direct'`` forces
-            ``np.linalg.solve``.
-
-        Returns
-        -------
-        dict
-            Results with frequencies, Z, S matrices and dicts
+        config : dict, optional
+            Dictionary containing solve parameters
+        **kwargs :
+            Individual solve parameters (solver_type, rerun, etc.)
         """
+        # 1. Merge config and kwargs
+        cfg = (config or {}).copy()
+        cfg.update(kwargs)
+
+        # 2. Extract core parameters with defaults
+        fmin = fmin if fmin is not None else cfg.get('fmin')
+        fmax = fmax if fmax is not None else cfg.get('fmax')
+        nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
+
+        # Validate mandatory frequency range
+        if fmin is None or fmax is None:
+            raise ValueError("fmin and fmax must be provided (either directly or via config).")
+
+        # 3. Extract other options from merged cfg
+        solver_type = cfg.get('solver_type', 'auto')
+        rerun = cfg.get('rerun', False)
+        verbose = cfg.get('verbose', False)
+
+        # Set verbosity level
+        pr.set_verbosity(verbose)
+
+        # --- Rerun protection ---
+        has_results = (self._Z_matrix is not None)
+        if has_results and not rerun:
+            import warnings
+            warnings.warn(
+                "Results already exist for this ROM solver. "
+                "To overwrite, call solve(..., rerun=True).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self._build_results_dict()
+
         if not self._is_reduced:
             raise ValueError("Must call reduce() first")
 
@@ -608,6 +711,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         else:
             return self._solve_multi_domain(solver_type=solver_type)
 
+    def _build_results_dict(self) -> Dict:
+        """Build results dictionary for reduced solver."""
+        return {
+            'frequencies': self.frequencies,
+            'Z': self._Z_matrix,
+            'S': self._S_matrix,
+            'Z_dict': self.Z_dict,
+            'S_dict': self.S_dict,
+            'x_r': getattr(self, '_x_r_snapshots', None),
+        }
+
     # =========================================================================
     # Persistence
     # =========================================================================
@@ -616,29 +730,91 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """
         Save ModelOrderReduction data to disk.
         
-        Saves reduced matrices (A_r, B_r) and projection matrix (W)
-        to HDF5 files.
+        Saves reduced matrices (A_r, B_r, W, Q_L_inv) to separate files in matrices/
+        and S/Z parameters, snapshots, and eigenmodes to their respective folders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save reduced and projection matrices
-        with h5py.File(path / "matrices.h5", "w") as f:
-            for domain in self.domains:
-                group = f.create_group(domain)
-                H5Serializer.save_dataset(group, "A_r", self._A_r.get(domain))
-                H5Serializer.save_dataset(group, "B_r", self._B_r.get(domain))
-                H5Serializer.save_dataset(group, "W", self._W.get(domain))
-                H5Serializer.save_dataset(group, "Q_L_inv", self._Q_L_inv.get(domain))
+        # Subfolders
+        s_path_dir = path / "s"
+        z_path_dir = path / "z"
+        snap_path_dir = path / "snapshots"
+        eig_path_dir = path / "eigenmodes"
+        for p in [s_path_dir, z_path_dir, snap_path_dir, eig_path_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
-        # 2. Save snapshots and frequencies if available
-        with h5py.File(path / "snapshots.h5", "w") as f:
-            if hasattr(self, 'frequencies') and self.frequencies is not None:
-                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
-            if self._x_r_snapshots:
-                H5Serializer.save_dataset(f, "x_r_snapshots", self._x_r_snapshots)
+        # 1. Save reduced and projection matrices to modular files
+        mat_path = path / "matrices"
+        mat_path.mkdir(parents=True, exist_ok=True)
         
-        # 3. Save metadata
+        with h5py.File(mat_path / "A_r.h5", "a") as fa, \
+             h5py.File(mat_path / "B_r.h5", "a") as fb, \
+             h5py.File(mat_path / "W.h5", "a") as fw, \
+             h5py.File(mat_path / "Q_L_inv.h5", "a") as fq:
+            for domain in self.domains:
+                if domain in self._A_r:
+                    # Save with domain suffix for modularity
+                    H5Serializer.save_dataset(fa, domain, self._A_r.get(domain))
+                    H5Serializer.save_dataset(fb, domain, self._B_r.get(domain))
+                    H5Serializer.save_dataset(fw, domain, self._W.get(domain))
+                    H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
+                    
+                    # Also save individual files for user-friendly access
+                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W), ("Q_L_inv", self._Q_L_inv)]:
+                         with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
+                             H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
+
+        # 2. Save S and Z results
+        if self._Z_matrix is not None:
+             z_file = "z.h5" 
+             if self.n_domains == 1: z_file = f"z_{self.domains[0]}.h5"
+             with h5py.File(z_path_dir / z_file, "a") as f:
+                H5Serializer.save_dataset(f, "data", self._Z_matrix)
+        if self._S_matrix is not None:
+             s_file = "s.h5"
+             if self.n_domains == 1: s_file = f"s_{self.domains[0]}.h5"
+             with h5py.File(s_path_dir / s_file, "a") as f:
+                H5Serializer.save_dataset(f, "data", self._S_matrix)
+
+        # 3. Save snapshots and frequencies
+        snap_file = "snapshots.h5"
+        if self.n_domains == 1: snap_file = f"snapshots_{self.domains[0]}.h5"
+        
+        with h5py.File(snap_path_dir / snap_file, "a") as f:
+            if self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if self._x_r_snapshots is not None:
+                group = f.require_group("x_r_snapshots")
+                for domain, snapshots_data in self._x_r_snapshots.items():
+                    H5Serializer.save_dataset(group, domain, snapshots_data)
+
+        # 4. Save eigenmodes ONLY if already computed (passive)
+        cache = getattr(self, '_resonant_mode_cache', {})
+        if cache:
+            # Find a 'source=all' or 'source=auto' result if possible
+            modes = None
+            for key, val in self._resonant_mode_cache.items():
+                if isinstance(val, dict):
+                    modes = val
+                    break
+            if modes is None:
+                # Just use whatever is there if it's a single tuple
+                pass 
+                
+            if modes:
+                try:
+                    eig_file = "eigenmodes.h5"
+                    if self.n_domains == 1: eig_file = f"eigenmodes_{self.domains[0]}.h5"
+                    with h5py.File(eig_path_dir / eig_file, "a") as f:
+                        for domain, (eigs, vecs) in modes.items():
+                            group = f.require_group(domain)
+                            H5Serializer.save_dataset(group, "eigenvalues", eigs)
+                            H5Serializer.save_dataset(group, "eigenvectors", vecs)
+                except Exception as e:
+                    print(f"Note: Could not save reduced eigenmodes: {e}")
+        
+        # 5. Save metadata
         metadata = {
             "domains": self.domains,
             "n_domains": self.n_domains,
@@ -649,8 +825,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             "n_modes_per_port": self._n_modes_per_port,
             "timestamp": datetime.now().isoformat()
         }
-        with open(path / "metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        ProjectManager.save_json(path, metadata)
+        
+        # 5. Save cached concatenation if available
+        if self._concatenated is not None:
+            self._concatenated.save(path / "concat")
 
     @classmethod
     def load(cls, path: Union[str, Path], solver=None) -> ModelOrderReduction:
@@ -673,6 +852,13 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._n_ports_external = metadata["n_ports_external"]
         rom._n_modes_per_port = metadata["n_modes_per_port"]
         
+        # Initialize caches
+        rom._resonant_mode_cache = {}
+        
+        # Initialize result dicts for PlotMixin
+        rom._S_dict = None
+        rom._Z_dict = None
+        
         # We also need port lists and mappings which are usually in solver
         # If solver is None, some functionality might be limited
         if solver:
@@ -680,6 +866,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             rom._all_ports = solver.all_ports
             rom._external_ports = solver.external_ports
             rom.domain_port_map = solver.domain_port_map
+            rom._port_impedance_func = solver._get_port_impedance
             rom.port_modes = solver.port_modes
         else:
             rom.mesh = None
@@ -698,19 +885,95 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._Q_L_inv = {}
         rom._singular_values = {}
 
-        with h5py.File(path / "matrices.h5", "r") as f:
-            for domain in rom.domains:
-                group = f[domain]
-                rom._A_r[domain] = H5Serializer.load_dataset(group["A_r"])
-                rom._B_r[domain] = H5Serializer.load_dataset(group["B_r"])
-                rom._W[domain] = H5Serializer.load_dataset(group["W"])
-                rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
+        # 1. Load matrices from modular files or legacy matrices.h5
+        mat_path = path / "matrices"
+        if mat_path.exists():
+             for mname in ["A_r", "B_r", "W", "Q_L_inv"]:
+                 target_dict = getattr(rom, f"_{mname}")
+                 mfile_agg = mat_path / f"{mname}.h5"
+                 
+                 # Try individual files first, then fallback to aggregated
+                 for domain in rom.domains:
+                     mfile_indiv = mat_path / f"{mname}_{domain}.h5"
+                     if mfile_indiv.exists():
+                         with h5py.File(mfile_indiv, "r") as f:
+                             target_dict[domain] = H5Serializer.load_dataset(f["data"])
+                     elif mfile_agg.exists():
+                         with h5py.File(mfile_agg, "r") as f:
+                             if domain in f:
+                                 target_dict[domain] = H5Serializer.load_dataset(f[domain])
+        elif (path / "matrices.h5").exists():
+            with h5py.File(path / "matrices.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        group = f[domain]
+                        rom._A_r[domain] = H5Serializer.load_dataset(group["A_r"])
+                        rom._B_r[domain] = H5Serializer.load_dataset(group["B_r"])
+                        rom._W[domain] = H5Serializer.load_dataset(group["W"])
+                        rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
 
-        with h5py.File(path / "snapshots.h5", "r") as f:
-            if "frequencies" in f:
-                rom.frequencies = H5Serializer.load_dataset(f["frequencies"])
-            if "x_r_snapshots" in f:
-                rom._x_r_snapshots = H5Serializer.load_dataset(f["x_r_snapshots"])
+        # 2. Load S/Z results
+        rom._Z_matrix = None
+        rom._S_matrix = None
+        
+        z_files = ["z.h5"]
+        if rom.n_domains == 1: z_files.insert(0, f"z_{rom.domains[0]}.h5")
+        for zf in z_files:
+            zp = path / "z" / zf
+            if not zp.exists(): zp = path / zf
+            if zp.exists():
+                with h5py.File(zp, "r") as f:
+                    rom._Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                    if rom._Z_matrix is not None: break
+        
+        s_files = ["s.h5"]
+        if rom.n_domains == 1: s_files.insert(0, f"s_{rom.domains[0]}.h5")
+        for sf in s_files:
+            sp = path / "s" / sf
+            if not sp.exists(): sp = path / sf
+            if sp.exists():
+                with h5py.File(sp, "r") as f:
+                    rom._S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                    if rom._S_matrix is not None: break
+
+        # 3. Load snapshots and frequencies
+        rom.frequencies = None
+        rom._x_r_snapshots = {}
+        snap_files = ["snapshots.h5"]
+        if rom.n_domains == 1: snap_files.insert(0, f"snapshots_{rom.domains[0]}.h5")
+        
+        for snap_f in snap_files:
+            snapp = path / "snapshots" / snap_f
+            if not snapp.exists(): snapp = path / snap_f
+            if snapp.exists():
+                with h5py.File(snapp, "r") as f:
+                    if rom.frequencies is None:
+                        rom.frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
+                    
+                    if "x_r_snapshots" in f:
+                        group = f["x_r_snapshots"]
+                        if isinstance(group, h5py.Group):
+                            for domain in rom.domains:
+                                if domain in group:
+                                    rom._x_r_snapshots[domain] = H5Serializer.load_dataset(group[domain])
+                        else:
+                            rom._x_r_snapshots = H5Serializer.load_dataset(group)
+                    
+                    # Support legacy loading of Z/S
+                    if rom._Z_matrix is None and "Z_matrix" in f:
+                        rom._Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
+                    if rom._S_matrix is None and "S_matrix" in f:
+                        rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
+
+        # 4. Load concatenated system if it exists
+        concat_path = path / "concat"
+        rom._concatenated = None
+        if concat_path.exists():
+            from solvers.concatenation import ConcatenatedSystem
+            try:
+                rom._concatenated = ConcatenatedSystem.load(concat_path, solver_ref=solver)
+            except Exception as e:
+                print(f"Warning: Could not load concatenated system from {concat_path}: {e}")
 
         return rom
 
@@ -724,7 +987,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         # Resolve 'auto' solver type
         if solver_type == 'auto':
             solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
-            print(f"  Solver: {solver_type} (system size {r})")
+            pr.debug(f"  Solver: {solver_type} (system size {r})")
 
         n_freq = len(self.frequencies)
         n_ports = B_r.shape[1]
@@ -790,10 +1053,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
             if gmres_failures > 0:
                 total_solves = n_freq * n_ports
-                print(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
+                pr.warning(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
 
         t1 = time.time()
-        print(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
+        pr.done(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
 
         # ================================================================
         # Store reduced snapshots for field reconstruction
@@ -803,6 +1066,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         self._compute_s_from_z()
         self._invalidate_cache()
+
+        # Automatic save after simulation
+        if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
+            self.solver._project_ref.save()
 
         return {
             'frequencies': self.frequencies,
@@ -1048,7 +1315,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             order = getattr(self.solver, 'order', 3)
             bc = getattr(self.solver, 'bc', 'default')
             fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
-            print(f"  Created FES for {domain}: {fes.ndof} DOFs")
+            pr.debug(f"  Created FES for {domain}: {fes.ndof} DOFs")
             return fes
 
         raise ValueError(
@@ -1277,6 +1544,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         component: Literal['real', 'imag', 'abs'] = 'abs',
         field_type: Literal['E', 'H'] = 'E',
         clipping: Optional[Dict] = None,
+        euler_angles: Optional[List] = [45, -45, 0],
         **kwargs
     ) -> None:
         """
@@ -1318,15 +1586,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 raise ValueError(
                     "Multi-domain ROM: call solve() first to create concatenated system."
                 )
-            self._concatenated.plot_field(
-                freq_idx=freq_idx,
-                excitation_port=excitation_port,
-                excitation_mode=excitation_mode,
-                component=component,
-                field_type=field_type,
-                clipping=clipping,
-                **kwargs
-            )
+            self._concatenated.plot_field(freq_idx=freq_idx, excitation_port=excitation_port,
+                                          excitation_mode=excitation_mode, component=component, field_type=field_type,
+                                          clipping=clipping, **kwargs)
             return
 
         # Single domain case
@@ -1347,9 +1609,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 f"Available: {domain_ports}"
             )
 
-        print(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
-        print(f"  Domain: {domain}")
-        print(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+        pr.info(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        pr.info(f"  Domain: {domain}")
+        pr.info(f"  Excitation: {excitation_port}, mode {excitation_mode}")
 
         # Reconstruct field
         E_gf = self._reconstruct_field_gf(freq_idx, excitation_port, excitation_mode, domain)
@@ -1377,11 +1639,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         else:
             raise ValueError(f"Invalid component: {component}")
 
-        print(f"  Plotting: {plot_name}")
+        pr.debug(f"  Plotting: {plot_name}")
 
         draw_kwargs = kwargs.copy()
         if clipping:
             draw_kwargs['clipping'] = clipping
+
+        if euler_angles:
+            draw_kwargs['euler_angles'] = euler_angles
 
         Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
 
@@ -1403,7 +1668,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         actual_freq = self.frequencies[freq_idx]
 
         if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
-            print(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
+            pr.debug(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
 
         self.plot_field(freq_idx=freq_idx, **kwargs)
 
@@ -1550,47 +1815,47 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     def print_info(self) -> None:
         """Print ROM information."""
-        print("\n" + "=" * 60)
-        print("ModelOrderReduction Information")
-        print("=" * 60)
-        print(f"Structure: {'Compound' if self.n_domains > 1 else 'Single'}")
-        print(f"Domains: {self.domains}")
-        print(f"External ports: {self._external_ports}")
+        pr.info("\n" + "=" * 60)
+        pr.info("ModelOrderReduction Information")
+        pr.info("=" * 60)
+        pr.info(f"Structure: {'Compound' if self.n_domains > 1 else 'Single'}")
+        pr.info(f"Domains: {self.domains}")
+        pr.info(f"External ports: {self._external_ports}")
         if self.n_domains > 1:
-            print(f"All ports: {self._all_ports}")
+            pr.info(f"All ports: {self._all_ports}")
 
         print(f"\nSnapshots available: {list(self._snapshots.keys())}")
 
         if self._is_reduced:
-            print("\nPer-domain reduction:")
+            pr.info("\nPer-domain reduction:")
             for domain in self.domains:
                 n = self._M[domain].shape[0]
                 r = self._r[domain]
                 ports = self.domain_port_map[domain]
-                print(f"  {domain}: {n} → {r} DOFs, ports: {ports}")
+                pr.info(f"  {domain}: {n} → {r} DOFs, ports: {ports}")
 
-            print(f"\nTotal: {self.total_dofs} → {self.total_reduced_dofs} DOFs")
-            print(f"Compression: {100*self.compression_ratio:.1f}%")
+            pr.info(f"\nTotal: {self.total_dofs} → {self.total_reduced_dofs} DOFs")
+            pr.info(f"Compression: {100*self.compression_ratio:.1f}%")
 
             if self.has_global_system:
-                print(f"\nGlobal system:")
-                print(f"  Global reduced DOFs: {self._r_global}")
-                print(f"  A_global shape: {self._A_r_global.shape}")
-                print(f"  B_global shape: {self._B_r_global.shape}")
+                pr.debug(f"\nGlobal system:")
+                pr.debug(f"  Global reduced DOFs: {self._r_global}")
+                pr.debug(f"  A_global shape: {self._A_r_global.shape}")
+                pr.debug(f"  B_global shape: {self._B_r_global.shape}")
                 if self._concatenated is not None:
-                    print(f"  External ports: {self._concatenated.ports}")
+                    pr.debug(f"  External ports: {self._concatenated.ports}")
 
-            print(f"\nField reconstruction: {'Available' if self.can_reconstruct() else 'Not available'}")
+            pr.debug(f"\nField reconstruction: {'Available' if self.can_reconstruct() else 'Not available'}")
         else:
-            print("\nNot yet reduced. Call reduce() first.")
+            pr.info("\nNot yet reduced. Call reduce() first.")
 
         if self.frequencies is not None:
-            print(f"\nSolution available:")
-            print(f"  Frequency range: {self.frequencies[0]/1e9:.4f} - "
+            pr.info(f"\nSolution available:")
+            pr.info(f"  Frequency range: {self.frequencies[0]/1e9:.4f} - "
                   f"{self.frequencies[-1]/1e9:.4f} GHz")
-            print(f"  Number of samples: {len(self.frequencies)}")
+            pr.info(f"  Number of samples: {len(self.frequencies)}")
 
-        print("=" * 60)
+        pr.info("=" * 60)
 
     def print_eigenfrequency_comparison(
         self,

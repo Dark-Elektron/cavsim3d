@@ -28,11 +28,12 @@ from core.constants import Z0, mu0
 from solvers.base import BaseEMSolver
 from utils.plot_mixin import PlotMixin
 from rom.structures import ReducedStructure
-from core.persistence import H5Serializer
+from core.persistence import H5Serializer, ProjectManager
 import h5py
 import json
 from pathlib import Path
 from datetime import datetime
+import cavsim3d.utils.printing as pr
 
 
 # Connection specification: ((struct_idx, port_name), (struct_idx, port_name))
@@ -101,7 +102,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     """
 
     DEFAULT_MIN_EIGENVALUE = 1.0
-    ITERATIVE_SIZE_THRESHOLD = 500
+    ITERATIVE_SIZE_THRESHOLD = 10000
 
     def __init__(
         self,
@@ -137,10 +138,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Compute DOF offsets for reconstruction
         self._compute_dof_offsets()
 
-        # Coupling results (populated by couple())
         self.A_coupled: Optional[np.ndarray] = None
         self.B_coupled: Optional[np.ndarray] = None
         self.W_coupled: Optional[np.ndarray] = None
+
+        # Caches
+        self._resonant_mode_cache = {}
 
         # Connection tracking
         self.connections: Optional[List[Conn]] = None
@@ -161,6 +164,30 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Compute or retrieve eigenmodes for the concatenated system.
+        """
+        res = super().get_eigenmodes(**kwargs)
+        
+        # Hierarchical save
+        if _auto_save:
+            self._auto_save_eigenmodes(res, **kwargs)
+            
+        return res
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self._solver_ref is None or not hasattr(self._solver_ref, '_project_path'):
+            return
+        
+        # Mirror: fds/foms/roms/concat -> eigenmode/foms/roms/concat
+        # Note: Concatenated systems are usually under roms
+        save_path = Path(self._solver_ref._project_path) / "eigenmode" / "foms" / "roms" / "concat"
+        try:
+            self.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            pr.warning(f"Could not auto-save eigenmodes for ConcatenatedSystem: {e}")
 
     def _resolve_mesh_and_fes(self) -> None:
         """Resolve mesh and fes from available sources."""
@@ -210,7 +237,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         from ngsolve import HCurl
         self.fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
-        print(f"  Created unified FES: {self.fes.ndof} DOFs (order={order})")
+        pr.debug(f"  Created unified FES: {self.fes.ndof} DOFs (order={order})")
 
     def _validate_mode_counts(self) -> None:
         """Validate consistent mode counts across all structures."""
@@ -459,12 +486,91 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Ensure Hermitian symmetry
         self.A_coupled = 0.5 * (self.A_coupled + self.A_coupled.T.conj())
 
-        print(f"\nCoupled unified system: {A_blk.shape[0]} -> {self.A_coupled.shape[0]} DOFs")
-        print(f"  External port-modes: {self._n_external}")
-        print(f"  Internal port-modes (eliminated): {self._n_internal}")
-        print(f"  Connections: {self.n_connections}")
+        pr.info(f"\nCoupled unified system: {A_blk.shape[0]} -> {self.A_coupled.shape[0]} DOFs")
+        pr.debug(f"  External port-modes: {self._n_external}")
+        pr.debug(f"  Internal port-modes (eliminated): {self._n_internal}")
+        pr.debug(f"  Connections: {self.n_connections}")
+
+        if hasattr(self, '_mor_ref') and self._mor_ref:
+             self._mor_ref._A_r_global = self.A_coupled
+             self._mor_ref._B_r_global = self.B_coupled
+             self._mor_ref._W_r_global = self.W_coupled
+
+        # Automatic save after state is synchronized
+        if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
+            if self._solver_ref._project_ref:
+                self._solver_ref._project_ref.save()
 
         return self
+
+
+    def calculate_resonant_modes(self, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute eigenvalues and eigenvectors for the coupled system."""
+        # Check cache
+        cache_key = tuple(sorted(kwargs.items()))
+        if cache_key in self._resonant_mode_cache:
+            return self._resonant_mode_cache[cache_key]
+
+        from solvers.frequency_domain import FrequencyDomainSolver
+        eigenvalues, eigenvectors = np.linalg.eigh(self.A_coupled)
+        res = FrequencyDomainSolver._filter_eigenvalues(eigenvalues, eigenvectors, **kwargs)
+        
+        # Update cache
+        self._resonant_mode_cache[cache_key] = res
+        return res
+
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """Standardized API for eigenmode computation with auto-save."""
+        res = self.calculate_resonant_modes(**kwargs)
+        if _auto_save:
+            self._auto_save_eigenmodes(res, **kwargs)
+        return res
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self._solver_ref is None:
+            return
+        
+        # Resolve project path from solver_ref
+        project_path = None
+        if hasattr(self._solver_ref, '_project_path'):
+            project_path = self._solver_ref._project_path
+        elif hasattr(self._solver_ref, 'solver') and hasattr(self._solver_ref.solver, '_project_path'):
+            project_path = self._solver_ref.solver._project_path
+        
+        if project_path is None:
+            return
+
+        # Determine path: eigenmode/foms/concat or eigenmode/fom/rom/concat etc.
+        # We look at the solver_ref to see where the FOM results are stored
+        # This is a bit heuristic but aligns with the hierarchy
+        project_path = Path(project_path)
+        
+        # Default for ConcatenatedSystem (usually multi-solid)
+        sub_path = "foms/concat"
+        
+        # Check if we are in a ROM hierarchy
+        from rom.reduction import ModelOrderReduction
+        if isinstance(self._solver_ref, ModelOrderReduction):
+            if self._solver_ref.n_domains == 1:
+                sub_path = "fom/rom/concat"
+            else:
+                sub_path = "foms/roms/concat"
+        
+        save_path = project_path / "fds" / sub_path / "eigenmodes"
+        try:
+            self.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes for ConcatenatedSystem: {e}")
 
     # =========================================================================
     # BaseEMSolver Interface
@@ -507,23 +613,65 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def save(self, path: Union[str, Path]):
         """
         Save ConcatenatedSystem data to disk.
+        
+        Saves coupled matrices (A, B, W) to separate files in matrices/
+        and S/Z parameters, snapshots, and eigenmodes to their respective folders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save coupled matrices
-        with h5py.File(path / "matrices.h5", "w") as f:
-            H5Serializer.save_dataset(f, "A_coupled", self.A_coupled)
-            H5Serializer.save_dataset(f, "B_coupled", self.B_coupled)
-            H5Serializer.save_dataset(f, "W_coupled", self.W_coupled)
+        # Subfolders
+        s_path_dir = path / "s"
+        z_path_dir = path / "z"
+        snap_path_dir = path / "snapshots"
+        eig_path_dir = path / "eigenmodes"
+        for p in [s_path_dir, z_path_dir, snap_path_dir, eig_path_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
-        # 2. Save snapshots and frequencies
-        with h5py.File(path / "snapshots.h5", "w") as f:
-            H5Serializer.save_dataset(f, "frequencies", self.frequencies)
-            if self._snapshots is not None:
-                H5Serializer.save_dataset(f, "snapshots", self._snapshots)
+        # 1. Save coupled matrices to modular files
+        mat_path = path / "matrices"
+        mat_path.mkdir(parents=True, exist_ok=True)
         
-        # 3. Save metadata
+        with h5py.File(mat_path / "A.h5", "a") as fa, \
+             h5py.File(mat_path / "B.h5", "a") as fb, \
+             h5py.File(mat_path / "W.h5", "a") as fw:
+            H5Serializer.save_dataset(fa, "data", self.A_coupled)
+            H5Serializer.save_dataset(fb, "data", self.B_coupled)
+            if self.W_coupled is not None:
+                H5Serializer.save_dataset(fw, "data", self.W_coupled)
+
+        # 2. Save S and Z results
+        if self._Z_matrix is not None:
+            with h5py.File(z_path_dir / "z.h5", "a") as f:
+                H5Serializer.save_dataset(f, "data", self._Z_matrix)
+        if self._S_matrix is not None:
+            with h5py.File(s_path_dir / "s.h5", "a") as f:
+                H5Serializer.save_dataset(f, "data", self._S_matrix)
+
+        # 3. Save frequencies and snapshots
+        with h5py.File(snap_path_dir / "snapshots.h5", "a") as f:
+            if hasattr(self, 'frequencies') and self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if self._snapshots is not None:
+                # Concatenated snapshots are stored as a single array
+                if "coupled_snapshots" in f: del f["coupled_snapshots"]
+                H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
+
+        # 4. Save eigenmodes ONLY if already computed (passive)
+        cache = getattr(self, '_resonant_mode_cache', {})
+        if cache:
+            # Save the first entry in cache as default
+            modes = list(self._resonant_mode_cache.values())[0]
+            try:
+                with h5py.File(eig_path_dir / "eigenmodes.h5", "a") as f:
+                    # Clean previous entries for this group if relevant? 
+                    # For coupled, we just have values/vectors at root or a group
+                    group = f.require_group("modes")
+                    H5Serializer.save_dataset(group, "eigenvalues", modes[0])
+                    H5Serializer.save_dataset(group, "eigenvectors", modes[1])
+            except Exception as e:
+                print(f"Note: Could not save concatenated eigenmodes: {e}")
+
         metadata = {
             "n_structures": self.n_structures,
             "domains": self.domains,
@@ -533,8 +681,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             "n_modes_per_port": self._n_modes_per_port,
             "timestamp": datetime.now().isoformat()
         }
-        with open(path / "metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        ProjectManager.save_json(path, metadata)
 
     @classmethod
     def load(cls, path: Union[str, Path], solver_ref=None) -> ConcatenatedSystem:
@@ -553,17 +700,67 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         cs._n_external = metadata["n_external"]
         cs._n_modes_per_port = metadata["n_modes_per_port"]
         
-        # Load matrices
-        with h5py.File(path / "matrices.h5", "r") as f:
-            cs.A_coupled = H5Serializer.load_dataset(f["A_coupled"])
-            cs.B_coupled = H5Serializer.load_dataset(f["B_coupled"])
-            cs.W_coupled = H5Serializer.load_dataset(f["W_coupled"])
+        # Initialize caches
+        cs._resonant_mode_cache = {}
+        
+        # Initialize result dicts for PlotMixin
+        cs._S_dict = None
+        cs._Z_dict = None
+        
+        # 1. Load matrices from modular files or legacy matrices.h5
+        mat_path = path / "matrices"
+        if mat_path.exists():
+            with h5py.File(mat_path / "A.h5", "r") as f:
+                cs.A_coupled = H5Serializer.load_dataset(f["data"])
+            with h5py.File(mat_path / "B.h5", "r") as f:
+                cs.B_coupled = H5Serializer.load_dataset(f["data"])
+            if (mat_path / "W.h5").exists():
+                with h5py.File(mat_path / "W.h5", "r") as f:
+                    cs.W_coupled = H5Serializer.load_dataset(f["data"])
+        elif (path / "matrices.h5").exists(): # Legacy
+            with h5py.File(path / "matrices.h5", "r") as f:
+                cs.A_coupled = H5Serializer.load_dataset(f["A_coupled"])
+                cs.B_coupled = H5Serializer.load_dataset(f["B_coupled"])
+                cs.W_coupled = H5Serializer.load_dataset(f["W_coupled"])
 
-        # Load snapshots
-        with h5py.File(path / "snapshots.h5", "r") as f:
-            cs.frequencies = H5Serializer.load_dataset(f["frequencies"])
-            if "snapshots" in f:
-                cs._snapshots = H5Serializer.load_dataset(f["snapshots"])
+        # 2. Load Z and S
+        cs.frequencies = None
+        cs._Z_matrix = None
+        cs._S_matrix = None
+        
+        z_path = path / "z" / "z.h5"
+        if not z_path.exists(): z_path = path / "z.h5"
+        if z_path.exists():
+            with h5py.File(z_path, "r") as f:
+                cs._Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                
+        s_path = path / "s" / "s.h5"
+        if not s_path.exists(): s_path = path / "s.h5"
+        if s_path.exists():
+            with h5py.File(s_path, "r") as f:
+                cs._S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+
+        # 3. Load snapshots and frequencies
+        cs._snapshots = {}
+        snap_path = path / "snapshots" / "snapshots.h5"
+        if not snap_path.exists(): snap_path = path / "snapshots.h5"
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as f:
+                if cs.frequencies is None:
+                    cs.frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
+                
+                if "field_snapshots" in f:
+                    group = f["field_snapshots"]
+                    for domain in metadata.get("structure_domains", []):
+                        if domain in group:
+                            cs._snapshots[domain] = H5Serializer.load_dataset(group[domain])
+
+        # 4. Load eigenmodes
+        eig_path = path / "eigenmodes" / "eigenmodes.h5"
+        if eig_path.exists():
+            # We don't have a cache on CS, but we can load them if needed.
+            # For now, we mainly want them saved for the user.
+            pass
 
         return cs
 
@@ -573,31 +770,50 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
     def solve(
         self,
-        fmin: float,
-        fmax: float,
-        nsamples: int = 100,
-        compute_s_params: bool = True,
-        solver_type: str = 'auto',
+        fmin: float = None,
+        fmax: float = None,
+        nsamples: int = None,
+        config: Optional[Dict] = None,
+        **kwargs
     ) -> Dict:
         """
         Solve the unified coupled system over a frequency range.
 
+        Supports passing arguments directly or via a 'config' dictionary.
+        Individual keyword arguments override the config dictionary.
+
         Parameters
         ----------
-        fmin, fmax : float
+        fmin, fmax : float, optional
             Frequency range [GHz]
-        nsamples : int
+        nsamples : int, optional
             Number of frequency samples
-        compute_s_params : bool
-            Compute S-parameters from Z-parameters
-        solver_type : str
-            'auto', 'direct', or 'iterative'
-
-        Returns
-        -------
-        dict
-            Results containing frequencies, Z, S, and snapshots
+        config : dict, optional
+            Dictionary containing solve parameters
+        **kwargs :
+            Individual solve parameters (compute_s_params, solver_type, rerun, etc.)
         """
+        # 1. Merge config and kwargs
+        cfg = (config or {}).copy()
+        cfg.update(kwargs)
+
+        # 2. Extract core parameters with defaults
+        fmin = fmin if fmin is not None else cfg.get('fmin')
+        fmax = fmax if fmax is not None else cfg.get('fmax')
+        nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
+
+        # Validate mandatory frequency range
+        if fmin is None or fmax is None:
+            raise ValueError("fmin and fmax must be provided (either directly or via config).")
+
+        # 3. Extract other options from merged cfg
+        compute_s_params = cfg.get('compute_s_params', True)
+        solver_type = cfg.get('solver_type', 'auto')
+        verbose = cfg.get('verbose', False)
+
+        # Set verbosity level
+        pr.set_verbosity(verbose)
+
         if self.A_coupled is None:
             raise ValueError("Must call couple() first")
 
@@ -607,7 +823,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         if solver_type == 'auto':
             solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
-            print(f"  Solver: {solver_type} (system size {r})")
+            pr.debug(f"  Solver: {solver_type} (system size {r})")
 
         self._Z_matrix = np.zeros((nsamples, n_ext, n_ext), dtype=complex)
         omegas = 2 * np.pi * self.frequencies
@@ -620,14 +836,18 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         else:
             x_all = self._solve_iterative(omegas, n_ext, r)
 
-        print(f"  Solve: {time.time() - t0:.3f}s ({nsamples} frequencies)")
+        pr.done(f"  Solve: {time.time() - t0:.3f}s ({nsamples} frequencies)")
 
         self._snapshots = np.array(x_all)
 
         if compute_s_params:
             self._compute_s_from_z()
-
         self._invalidate_cache()
+
+        # Automatic save after simulation
+        if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
+            if self._solver_ref._project_ref:
+                self._solver_ref._project_ref.save()
 
         return {
             "frequencies": self.frequencies,
@@ -658,7 +878,16 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         x_all = []
         failures = 0
 
+        num_freq = len(omegas)
+        pr.running(f"  Solving {num_freq} frequencies...")
+        
+        # Progress reporting logic
+        report_interval = max(1, num_freq // 10) # 10% steps
+        
         for k, omega in enumerate(omegas):
+            if (k + 1) % report_interval == 0 or k == 0 or k == num_freq - 1:
+                pr.debug(f"    - Frequency {k+1}/{num_freq} ({self.frequencies[k]/1e9:.4f} GHz)")
+                
             lhs = self.A_coupled - omega ** 2 * np.eye(r, dtype=complex)
             rhs = omega * self.B_coupled @ I_ext
 
@@ -673,7 +902,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             self._Z_matrix[k] = 1j * self.B_coupled.T.conj() @ x
 
         if failures > 0:
-            print(f"  Warning: {failures} GMRES solves did not converge")
+            pr.warning(f"{failures} GMRES solves did not converge")
 
         return x_all
 
@@ -762,6 +991,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         component: Literal['real', 'imag', 'abs'] = 'abs',
         field_type: Literal['E', 'H'] = 'E',
         clipping: Optional[Dict] = None,
+        euler_angles: Optional[List] = [45, -45, 0],
         **kwargs
     ) -> None:
         """
@@ -805,9 +1035,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if excitation_port not in self.ports:
             raise ValueError(f"Port '{excitation_port}' not found. Available: {self.ports}")
 
-        print(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
-        print(f"  Excitation: {excitation_port}, mode {excitation_mode}")
-        print(f"  Unified structure with {self.n_structures} domains: {self.domains}")
+        pr.info(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        pr.info(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+        pr.debug(f"  Unified structure with {self.n_structures} domains: {self.domains}")
 
         # Reconstruct unified field
         E_gf = self._reconstruct_field(freq_idx, excitation_port, excitation_mode)
@@ -835,11 +1065,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         else:
             raise ValueError(f"Invalid component: {component}")
 
-        print(f"  Plotting: {plot_name}")
+        pr.debug(f"  Plotting: {plot_name}")
 
         draw_kwargs = kwargs.copy()
         if clipping:
             draw_kwargs['clipping'] = clipping
+
+        if euler_angles:
+            draw_kwargs['euler_angles'] = euler_angles
 
         Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
 
@@ -859,7 +1092,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         freq_idx = int(np.argmin(np.abs(self.frequencies - freq)))
         actual_freq = self.frequencies[freq_idx]
         if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
-            print(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
+            pr.debug(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
         self.plot_field(freq_idx=freq_idx, **kwargs)
 
     def get_reconstruction_info(self) -> Dict:
@@ -1033,50 +1266,50 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
     def print_info(self) -> None:
         """Print unified system information."""
-        print("\n" + "=" * 60)
-        print("Unified Concatenated System")
-        print("=" * 60)
+        pr.info("\n" + "=" * 60)
+        pr.info("Unified Concatenated System")
+        pr.info("=" * 60)
 
-        print(f"\nComponent structures ({self.n_structures}):")
+        pr.info(f"\nComponent structures ({self.n_structures}):")
         for i, s in enumerate(self.structures):
             recon = "✓" if s.can_reconstruct() else "✗"
-            print(f"  [{i}] {s.domain}: r={s.r}, n_full={s.n_full}, ports={s.ports} [recon:{recon}]")
+            pr.info(f"  [{i}] {s.domain}: r={s.r}, n_full={s.n_full}, ports={s.ports} [recon:{recon}]")
 
         if self.connections:
-            print(f"\nInternal connections ({len(self.connections)}):")
+            pr.info(f"\nInternal connections ({len(self.connections)}):")
             for (sA, pA), (sB, pB) in self.connections:
-                print(f"  structure[{sA}].{pA} <-> structure[{sB}].{pB}")
+                pr.info(f"  structure[{sA}].{pA} <-> structure[{sB}].{pB}")
 
         dims = self.get_coupled_dimensions()
-        print(f"\nUnified system dimensions:")
-        print(f"  Total uncoupled DOFs: {dims['total_uncoupled_dofs']}")
-        print(f"  Coupled DOFs: {dims['coupled_dofs']}")
-        print(f"  External port-modes: {dims['n_external_port_modes']}")
-        print(f"  Internal port-modes: {dims['n_internal_port_modes']}")
+        pr.debug(f"\nUnified system dimensions:")
+        pr.debug(f"  Total uncoupled DOFs: {dims['total_uncoupled_dofs']}")
+        pr.debug(f"  Coupled DOFs: {dims['coupled_dofs']}")
+        pr.debug(f"  External port-modes: {dims['n_external_port_modes']}")
+        pr.debug(f"  Internal port-modes: {dims['n_internal_port_modes']}")
 
-        print(f"\nExternal ports: {self.ports}")
+        pr.info(f"\nExternal ports: {self.ports}")
 
         recon_ready = self.can_reconstruct()
-        print(f"\nField reconstruction: {'Ready' if recon_ready else 'Not available'}")
+        pr.debug(f"\nField reconstruction: {'Ready' if recon_ready else 'Not available'}")
         if not recon_ready:
             info = self.get_reconstruction_info()
             if not info['has_mesh']:
-                print("  - Missing: mesh")
+                pr.debug("  - Missing: mesh")
             if not info['has_fes']:
-                print("  - Missing: global fes")
+                pr.debug("  - Missing: global fes")
             if not info['has_snapshots']:
-                print("  - Missing: snapshots (call solve())")
+                pr.debug("  - Missing: snapshots (call solve())")
             for s_info in info['structures']:
                 if not s_info['can_reconstruct']:
-                    print(f"  - Structure {s_info['index']} ({s_info['domain']}): "
+                    pr.debug(f"  - Structure {s_info['index']} ({s_info['domain']}): "
                           f"W={'✓' if s_info['has_W'] else '✗'}, "
                           f"Q_L_inv={'✓' if s_info['has_Q_L_inv'] else '✗'}, "
                           f"fes={'✓' if s_info['has_fes'] else '✗'}")
         else:
             if self.mesh is not None:
-                print(f"  Mesh: {self.mesh.ne} elements")
+                pr.debug(f"  Mesh: {self.mesh.ne} elements")
             if self.fes is not None:
-                print(f"  FES: {self.fes.ndof} DOFs")
+                pr.debug(f"  FES: {self.fes.ndof} DOFs")
 
         if self.frequencies is not None:
             print(f"\nSolution:")
@@ -1229,24 +1462,23 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
 
     def print_info(self) -> None:
         """Print reduced system information."""
-        print("\n" + "=" * 60)
-        print(f"Reduced Concatenated System (Level {self._reduction_level})")
-        print("=" * 60)
+        pr.info("\n" + "=" * 60)
+        pr.info(f"Reduced Concatenated System (Level {self._reduction_level})")
+        pr.info("=" * 60)
 
-        print(f"\nReduction:")
-        print(f"  Parent coupled DOFs: {self._parent_coupled_dofs}")
-        print(f"  This level DOFs: {self.coupled_dofs}")
-        if self._parent_coupled_dofs:
-            compression = 100 * (1 - self.coupled_dofs / self._parent_coupled_dofs)
-            print(f"  Compression: {compression:.1f}%")
+        pr.debug(f"\nReduction:")
+        pr.debug(f"  Parent coupled DOFs: {self._parent_coupled_dofs}")
+        pr.debug(f"  This level DOFs: {self.coupled_dofs}")
+        if self._parent_coupled_dofs > 0:
+            compression = (1 - self.coupled_dofs / self._parent_coupled_dofs) * 100
+            pr.debug(f"  Compression: {compression:.1f}%")
 
-        print(f"\nSingular values (top 5):")
+        pr.debug(f"\nSingular values (top 5):")
         for i, sv in enumerate(self._singular_values[:5]):
             print(f"  σ_{i} = {sv:.4e}")
         if len(self._singular_values) > 5:
             print(f"  ... ({len(self._singular_values)} total)")
 
-        print(f"\nExternal ports: {self.ports}")
         print(f"Field reconstruction: {'Ready' if self.can_reconstruct() else 'Not available'}")
 
         if self.frequencies is not None:

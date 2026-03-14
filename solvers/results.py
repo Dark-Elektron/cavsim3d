@@ -31,7 +31,7 @@ import warnings
 import numpy as np
 
 from utils.plot_mixin import PlotMixin
-from core.persistence import H5Serializer
+from core.persistence import H5Serializer, ProjectManager
 import h5py
 from pathlib import Path
 from datetime import datetime
@@ -146,6 +146,53 @@ class FOMResult(PlotMixin):
                 "Call fom.reduce() first to compute the ROM."
             )
         return self._rom_cache
+    
+    # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Rerun simulation for this FOM.
+        
+        Delegates to the underlying FrequencyDomainSolver.
+        """
+        if self._solver_ref is None:
+            raise RuntimeError("Cannot solve: no solver reference available.")
+        return self._solver_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                     config=config, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Logical Matrix Access
+    # ------------------------------------------------------------------
+
+    @property
+    def K(self):
+        """Access the full-order stiffness matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'K_global', None)
+        return getattr(self._solver_ref, 'K', {}).get(self.domain)
+
+    @property
+    def M(self):
+        """Access the full-order mass matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'M_global', None)
+        return getattr(self._solver_ref, 'M', {}).get(self.domain)
+
+    @property
+    def B(self):
+        """Access the full-order port excitation matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'B_global', None)
+        return getattr(self._solver_ref, 'B', {}).get(self.domain)
 
     # ------------------------------------------------------------------
     # Explicit reduce / concatenate
@@ -177,6 +224,7 @@ class FOMResult(PlotMixin):
 
         mor = ModelOrderReduction(self._solver_ref)
         mor.reduce(tol=tol, max_rank=max_rank)
+        self._rom_cache = mor
         return mor
 
     def concatenate(self):
@@ -204,14 +252,50 @@ class FOMResult(PlotMixin):
 
         Delegates to the underlying FrequencyDomainSolver.
         """
-        if self._solver_ref is not None and hasattr(self._solver_ref, 'get_eigenvalues'):
-            return self._solver_ref.get_eigenvalues(**kwargs)
+        if self._solver_ref is not None and hasattr(self._solver_ref, 'calculate_resonant_modes'):
+            res = self._solver_ref.calculate_resonant_modes(**kwargs)
+            if isinstance(res, dict):
+                return {k: v[0] for k, v in res.items()}
+            return res[0]
         raise RuntimeError("Eigenvalues not available for this FOMResult.")
 
     def get_resonant_frequencies(self, **kwargs):
         if self._solver_ref is not None and hasattr(self._solver_ref, 'get_resonant_frequencies'):
             return self._solver_ref.get_resonant_frequencies(**kwargs)
         raise RuntimeError("Resonant frequencies not available for this FOMResult.")
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Standardized API for retrieving eigenvalues and eigenvectors.
+        """
+        if self._solver_ref is not None and hasattr(self._solver_ref, 'calculate_resonant_modes'):
+            # Delegate to solver, but filter for this domain if not global
+            domain = self.domain if self.domain != 'global' else None
+            res = self._solver_ref.calculate_resonant_modes(domain=domain, **kwargs)
+            
+            # Hierarchical save if possible
+            if _auto_save:
+                self._auto_save_eigenmodes(res, **kwargs)
+            
+            return res
+        raise RuntimeError("Eigenmodes not available for this FOMResult.")
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        """Helper to save eigenmodes to the mirrored project structure."""
+        if self._solver_ref is None or not hasattr(self._solver_ref, '_project_path'):
+            return
+        
+        project_path = Path(self._solver_ref._project_path)
+        # Mirror: fds/fom -> fds/fom/eigenmodes, fds/foms/solid -> fds/foms/solid/eigenmodes
+        sub_path = "fom" if self.domain == 'global' else f"foms/{self.domain}"
+        save_path = project_path / "fds" / sub_path / "eigenmodes"
+        
+        try:
+            # We need FrequencyDomainSolver to have save_eigenmodes (from mixin)
+            if hasattr(self._solver_ref, 'save_eigenmodes'):
+                self._solver_ref.save_eigenmodes(save_path, domain=(self.domain if self.domain != 'global' else None), **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes to {save_path}: {e}")
 
     # ------------------------------------------------------------------
     # Persistence
@@ -221,53 +305,173 @@ class FOMResult(PlotMixin):
         """
         Save FOM results to disk.
         
-        Saves matrices (K, M, B) and snapshots/frequencies to HDF5 files
-        as defined in the simulation result structure.
+        Saves matrices (K, M, B) to matrices/ folder, and S/Z parameters, 
+        snapshots, and eigenmodes to their respective subfolders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save matrices (K, M, B)
-        # These are usually stored in FrequencyDomainSolver but referenced in results
-        # if store_snapshots was True.
-        with h5py.File(path / "matrices.h5", "w") as f:
-            if self._solver_ref is not None:
-                H5Serializer.save_dataset(f, "K", self._solver_ref.K.get(self.domain))
-                H5Serializer.save_dataset(f, "M", self._solver_ref.M.get(self.domain))
-                H5Serializer.save_dataset(f, "B", self._solver_ref.B.get(self.domain))
+        # Subfolders
+        s_path = path / "s"
+        z_path = path / "z"
+        snap_path = path / "snapshots"
+        eig_path = path / "eigenmodes"
+        for p in [s_path, z_path, snap_path, eig_path]:
+            p.mkdir(parents=True, exist_ok=True)
 
-        # 2. Save snapshots and frequencies
-        with h5py.File(path / "snapshots.h5", "w") as f:
-            H5Serializer.save_dataset(f, "frequencies", self.frequencies)
-            H5Serializer.save_dataset(f, "Z_matrix", self._Z_matrix)
-            H5Serializer.save_dataset(f, "S_matrix", self._S_matrix)
+        # 1. Save matrices (K, M, B) separately
+        mat_path = path / "matrices"
+        mat_path.mkdir(parents=True, exist_ok=True)
+        
+        if self._solver_ref is not None:
+            if self.domain == 'global':
+                K = getattr(self._solver_ref, 'K_global', None)
+                M = getattr(self._solver_ref, 'M_global', None)
+                B = getattr(self._solver_ref, 'B_global', None)
+            else:
+                K = getattr(self._solver_ref, 'K', {}).get(self.domain)
+                M = getattr(self._solver_ref, 'M', {}).get(self.domain)
+                B = getattr(self._solver_ref, 'B', {}).get(self.domain)
+
+            if K is not None:
+                with h5py.File(mat_path / "K.h5", "a") as f:
+                    H5Serializer.save_dataset(f, "data", K)
+            if M is not None:
+                with h5py.File(mat_path / "M.h5", "a") as f:
+                    H5Serializer.save_dataset(f, "data", M)
+            if B is not None:
+                with h5py.File(mat_path / "B.h5", "a") as f:
+                    H5Serializer.save_dataset(f, "data", B)
+
+        # 2. Save S and Z results
+        if self._Z_matrix is not None:
+            z_file = f"z_{self.domain}.h5" if self.domain else "z.h5"
+            with h5py.File(z_path / z_file, "a") as f:
+                H5Serializer.save_dataset(f, "data", self._Z_matrix)
+        if self._S_matrix is not None:
+            s_file = f"s_{self.domain}.h5" if self.domain else "s.h5"
+            with h5py.File(s_path / s_file, "a") as f:
+                H5Serializer.save_dataset(f, "data", self._S_matrix)
+
+        # 3. Save snapshots and frequencies
+        snap_file = f"snapshots_{self.domain}.h5" if self.domain else "snapshots.h5"
+        with h5py.File(snap_path / snap_file, "a") as f:
+            if self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
             if self._residual_data:
                 H5Serializer.save_dataset(f, "residual_data", self._residual_data)
-        
-        # 3. Save metadata
+            
+            # Save field snapshots if available in solver reference
+            if self._solver_ref is not None and self.domain in getattr(self._solver_ref, 'snapshots', {}):
+                H5Serializer.save_dataset(f, "field_snapshots", self._solver_ref.snapshots[self.domain])
+
+        # 4. Save eigenmodes if available
+        if self._solver_ref is not None and hasattr(self._solver_ref, '_resonant_mode_cache'):
+            # Search for relevant cache entries
+            domain_key = self.domain if self.domain else 'global'
+            relevant_cache = {k: v for k, v in self._solver_ref._resonant_mode_cache.items() if k.startswith(domain_key)}
+            if relevant_cache:
+                eig_file = f"eigenmodes_{self.domain}.h5" if self.domain else "eigenmodes.h5"
+                with h5py.File(eig_path / eig_file, "a") as f:
+                    for k, (eigs, vecs) in relevant_cache.items():
+                        group = f.create_group(k)
+                        H5Serializer.save_dataset(group, "eigenvalues", eigs)
+                        H5Serializer.save_dataset(group, "eigenvectors", vecs)
+
+        # 5. Save metadata
         metadata = {
             "domain": self.domain,
             "n_ports": self.n_ports,
             "ports": self.ports,
             "n_modes_per_port": self._n_modes_per_port,
-            "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat()
         }
-        with open(path / "metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        ProjectManager.save_json(path, metadata)
 
     @classmethod
-    def load(cls, path: Union[str, Path], _solver_ref=None) -> FOMResult:
-        """Load FOM results from disk."""
+    def load(cls, path: Union[str, Path], _solver_ref=None) -> 'FOMResult':
+        """Load FOM result from disk."""
         path = Path(path)
-        
         with open(path / "metadata.json", "r") as f:
             metadata = json.load(f)
+
+        domain = metadata["domain"]
         
-        with h5py.File(path / "snapshots.h5", "r") as f:
-            frequencies = H5Serializer.load_dataset(f["frequencies"])
-            Z_matrix = H5Serializer.load_dataset(f["Z_matrix"]) if "Z_matrix" in f else None
-            S_matrix = H5Serializer.load_dataset(f["S_matrix"]) if "S_matrix" in f else None
-            residual_data = H5Serializer.load_dataset(f["residual_data"]) if "residual_data" in f else None
+        # 1. Load frequencies from snapshots or legacy
+        frequencies = None
+        snap_path = path / "snapshots" / (f"snapshots_{domain}.h5" if domain else "snapshots.h5")
+        if not snap_path.exists():
+            snap_path = path / (f"snapshots_{domain}.h5" if domain else "snapshots.h5")
+            
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as f:
+                frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
+
+        # 2. Load Z and S
+        Z_matrix = None
+        S_matrix = None
+        
+        z_path = path / "z" / (f"z_{domain}.h5" if domain else "z.h5")
+        if not z_path.exists(): z_path = path / (f"z_{domain}.h5" if domain else "z.h5")
+        if z_path.exists():
+            with h5py.File(z_path, "r") as f:
+                Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                
+        s_path = path / "s" / (f"s_{domain}.h5" if domain else "s.h5")
+        if not s_path.exists(): s_path = path / (f"s_{domain}.h5" if domain else "s.h5")
+        if s_path.exists():
+            with h5py.File(s_path, "r") as f:
+                S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+
+        # 3. Load snapshots and residuals
+        residual_data = None
+        
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as f:
+                frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
+                residual_data = H5Serializer.load_dataset(f["residual_data"]) if "residual_data" in f else None
+                field_snapshots = H5Serializer.load_dataset(f["field_snapshots"]) if "field_snapshots" in f else None
+                
+                # Support legacy loading if matrices were inside snapshots.h5
+                if Z_matrix is None and "Z_matrix" in f:
+                    Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
+                if S_matrix is None and "S_matrix" in f:
+                    S_matrix = H5Serializer.load_dataset(f["S_matrix"])
+
+        # Restore results into _solver_ref if available
+        if _solver_ref is not None:
+            if not hasattr(_solver_ref, '_residuals') or _solver_ref._residuals is None:
+                _solver_ref._residuals = {}
+            if Z_matrix is not None: _solver_ref._Z_global_coupled = Z_matrix
+            if S_matrix is not None: _solver_ref._S_global_coupled = S_matrix
+            if frequencies is not None: _solver_ref.frequencies = frequencies
+            if residual_data is not None: _solver_ref._residuals['global'] = residual_data
+            if field_snapshots is not None and domain:
+                _solver_ref.snapshots[domain] = field_snapshots
+
+        # Restore matrices into _solver_ref if available
+        if _solver_ref is not None:
+            domain = metadata["domain"]
+            mat_path = path / "matrices"
+            if mat_path.exists():
+                for mname in ["K", "M", "B"]:
+                    mfile = mat_path / f"{mname}.h5"
+                    if mfile.exists():
+                        with h5py.File(mfile, "r") as f:
+                            data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
+                            if domain == 'global':
+                                setattr(_solver_ref, f"{mname}_global", data)
+                            else:
+                                getattr(_solver_ref, mname)[domain] = data
+            elif (path / "matrices.h5").exists():
+                with h5py.File(path / "matrices.h5", "r") as f:
+                    for mname in ["K", "M", "B"]:
+                        if mname in f:
+                            data = H5Serializer.load_sparse_csr(f[mname]) if mname in ["K", "M"] else H5Serializer.load_dataset(f[mname])
+                            if domain == 'global':
+                                setattr(_solver_ref, f"{mname}_global", data)
+                            else:
+                                getattr(_solver_ref, mname)[domain] = data
 
         # Build Z/S dicts if matrices are loaded
         res = cls(
@@ -432,8 +636,8 @@ class FOMCollection(PlotMixin):
                 ax[0].set_title(title)
             else:
                 ax.set_title(title)
-        if show:
-            plt.show()
+        # if show:
+        #     plt.show()
         return fig, ax
 
     # ------------------------------------------------------------------
@@ -483,6 +687,41 @@ class FOMCollection(PlotMixin):
         return self._concat_cache
 
     # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Rerun simulation for all domains in this collection.
+        
+        Delegates to the underlying FrequencyDomainSolver.
+        """
+        if self._fds_ref is None:
+            raise RuntimeError("Cannot solve: no solver reference available.")
+        return self._fds_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                  config=config, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Logical Matrix Access (Aggregated)
+    # ------------------------------------------------------------------
+
+    @property
+    def K(self) -> Dict[str, np.ndarray]:
+        """Access per-domain stiffness matrices as a dictionary."""
+        return {fom.domain: fom.K for fom in self._foms}
+
+    @property
+    def M(self) -> Dict[str, np.ndarray]:
+        """Access per-domain mass matrices as a dictionary."""
+        return {fom.domain: fom.M for fom in self._foms}
+
+    @property
+    def B(self) -> Dict[str, np.ndarray]:
+        """Access per-domain port excitation matrices as a dictionary."""
+        return {fom.domain: fom.B for fom in self._foms}
+
+    # ------------------------------------------------------------------
     # Reduce and Concatenate
     # ------------------------------------------------------------------
 
@@ -511,7 +750,8 @@ class FOMCollection(PlotMixin):
         mor = ModelOrderReduction(fds)
         mor.reduce(tol=tol, max_rank=max_rank)
 
-        return ROMCollection(_fds_ref=self._fds_ref, _mor_ref=mor)
+        self._roms_cache = ROMCollection(_fds_ref=self._fds_ref, _mor_ref=mor)
+        return self._roms_cache
 
     def concatenate(self):
         """
@@ -626,6 +866,7 @@ class FOMCollection(PlotMixin):
         concat.define_connections(connections)
         concat.couple()
 
+        self._concat_cache = concat
         return concat
 
     # ------------------------------------------------------------------
@@ -637,26 +878,66 @@ class FOMCollection(PlotMixin):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         
-        # Save per-solid results in a consolidated way as per simulation_result_structure.md
-        # Matrices for all solids go into foms/matrices.h5 with grouping
-        
-        with h5py.File(path / "matrices.h5", "w") as fm, \
-             h5py.File(path / "snapshots.h5", "w") as fs:
-            
-            H5Serializer.save_dataset(fs, "frequencies", self.frequencies)
+        # Subfolders
+        s_path = path / "s"
+        z_path = path / "z"
+        snap_path = path / "snapshots"
+        eig_path = path / "eigenmodes"
+        for p in [s_path, z_path, snap_path, eig_path]:
+            p.mkdir(parents=True, exist_ok=True)
 
+        # 1. Save matrices in dedicated files inside a matrices/ folder (prefixed by domain)
+        mat_path = path / "matrices"
+        mat_path.mkdir(parents=True, exist_ok=True)
+        
+        for fom in self._foms:
+            if fom._solver_ref is not None:
+                domain = fom.domain
+                if domain in getattr(fom._solver_ref, 'K', {}):
+                    with h5py.File(mat_path / f"K_{domain}.h5", "a") as fk:
+                        H5Serializer.save_dataset(fk, "data", fom._solver_ref.K.get(domain))
+                    with h5py.File(mat_path / f"M_{domain}.h5", "a") as fm:
+                        H5Serializer.save_dataset(fm, "data", fom._solver_ref.M.get(domain))
+                    with h5py.File(mat_path / f"B_{domain}.h5", "a") as fb:
+                        H5Serializer.save_dataset(fb, "data", fom._solver_ref.B.get(domain))
+
+        # 2. Save S and Z results
+        for fom in self._foms:
+            domain = fom.domain
+            if fom._Z_matrix is not None:
+                with h5py.File(z_path / f"z_{domain}.h5", "a") as fz:
+                    H5Serializer.save_dataset(fz, "data", fom._Z_matrix)
+            if fom._S_matrix is not None:
+                with h5py.File(s_path / f"s_{domain}.h5", "a") as fs:
+                    H5Serializer.save_dataset(fs, "data", fom._S_matrix)
+
+        # 3. Save frequencies, residual data, and field snapshots
+        for fom in self._foms:
+            domain = fom.domain
+            snap_file = f"snapshots_{domain}.h5"
+            with h5py.File(snap_path / snap_file, "a") as fsnap:
+                if self.frequencies is not None:
+                    H5Serializer.save_dataset(fsnap, "frequencies", self.frequencies)
+                if fom._residual_data:
+                    H5Serializer.save_dataset(fsnap, "residual_data", fom._residual_data)
+                
+                # Save field snapshots if available in solver reference
+                if fom._solver_ref is not None and domain in getattr(fom._solver_ref, 'snapshots', {}):
+                    H5Serializer.save_dataset(fsnap, "field_snapshots", fom._solver_ref.snapshots[domain])
+
+        # 4. Save eigenmodes if available in solver reference
+        if self._fds_ref is not None and hasattr(self._fds_ref, '_resonant_mode_cache'):
             for fom in self._foms:
                 domain = fom.domain
-                # Save matrices to matrices.h5
-                if fom._solver_ref is not None:
-                    H5Serializer.save_dataset(fm, f"{domain}/K", fom._solver_ref.K.get(domain))
-                    H5Serializer.save_dataset(fm, f"{domain}/M", fom._solver_ref.M.get(domain))
-                    H5Serializer.save_dataset(fm, f"{domain}/B", fom._solver_ref.B.get(domain))
-                
-                # Save results to snapshots.h5 (as snapshots/Z/S)
-                H5Serializer.save_dataset(fs, f"{domain}/Z_matrix", fom._Z_matrix)
-                H5Serializer.save_dataset(fs, f"{domain}/S_matrix", fom._S_matrix)
-        
+                relevant_cache = {k: v for k, v in self._fds_ref._resonant_mode_cache.items() if k.startswith(domain)}
+                if relevant_cache:
+                    eig_file = f"eigenmodes_{domain}.h5"
+                    with h5py.File(eig_path / eig_file, "a") as f:
+                        for k, (eigs, vecs) in relevant_cache.items():
+                            group = f.require_group(k)
+                            H5Serializer.save_dataset(group, "eigenvalues", eigs)
+                            H5Serializer.save_dataset(group, "eigenvectors", vecs)
+
         # Metadata
         metadata = {
             "n_solids": len(self._foms),
@@ -670,8 +951,11 @@ class FOMCollection(PlotMixin):
             ],
             "timestamp": datetime.now().isoformat()
         }
-        with open(path / "metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        ProjectManager.save_json(path, metadata)
+
+        # Save cached concatenation if available
+        if self._concat_cache is not None:
+            self._concat_cache.save(path / "concat")
 
     @classmethod
     def load(cls, path: Union[str, Path], _fds_ref=None) -> FOMCollection:
@@ -681,31 +965,159 @@ class FOMCollection(PlotMixin):
             metadata = json.load(f)
         
         fom_list = []
-        with h5py.File(path / "snapshots.h5", "r") as fs:
-            frequencies = H5Serializer.load_dataset(fs["frequencies"])
-            for solid_meta in metadata["solids"]:
-                domain = solid_meta["domain"]
-                Z_matrix = H5Serializer.load_dataset(fs[f"{domain}/Z_matrix"]) if f"{domain}/Z_matrix" in fs else None
-                S_matrix = H5Serializer.load_dataset(fs[f"{domain}/S_matrix"]) if f"{domain}/S_matrix" in fs else None
-                
-                fom = FOMResult(
-                    domain=domain,
-                    frequencies=frequencies,
-                    Z_matrix=Z_matrix,
-                    S_matrix=S_matrix,
-                    Z_dict=None,
-                    S_dict=None,
-                    n_ports=solid_meta["n_ports"],
-                    ports=solid_meta["ports"],
-                    n_modes_per_port=solid_meta.get("n_modes_per_port", 1),
-                    _solver_ref=_fds_ref
-                )
-                fom_list.append(fom)
         
+        # 1. Load frequencies
+        frequencies = None
+        for d_meta in metadata.get("solids", []):
+            d = d_meta["domain"]
+            snap_path = path / "snapshots" / f"snapshots_{d}.h5"
+            if not snap_path.exists(): snap_path = path / f"snapshots_{d}.h5"
+            
+            if snap_path.exists():
+                with h5py.File(snap_path, "r") as fs:
+                    frequencies = H5Serializer.load_dataset(fs["frequencies"]) if "frequencies" in fs else None
+                    if frequencies is not None: break
+        
+        if frequencies is None and (path / "snapshots" / "snapshots.h5").exists():
+            with h5py.File(path / "snapshots" / "snapshots.h5", "r") as fs:
+                frequencies = H5Serializer.load_dataset(fs["frequencies"]) if "frequencies" in fs else None
+        elif frequencies is None and (path / "snapshots.h5").exists():
+            with h5py.File(path / "snapshots.h5", "r") as fs:
+                frequencies = H5Serializer.load_dataset(fs["frequencies"]) if "frequencies" in fs else None
+
+        # 2. Load matrices into _fds_ref if available
+        if _fds_ref is not None:
+            mat_path = path / "matrices"
+            if mat_path.exists():
+                for d_meta in metadata.get("solids", []):
+                    domain = d_meta["domain"]
+                    for mname in ["K", "M", "B"]:
+                        mfile = mat_path / f"{mname}_{domain}.h5"
+                        if mfile.exists():
+                            with h5py.File(mfile, "r") as f:
+                                data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
+                                if mname == "K": _fds_ref.K[domain] = data
+                                elif mname == "M": _fds_ref.M[domain] = data
+                                else: _fds_ref.B[domain] = data
+                        else:
+                            mfile_leg = mat_path / f"{mname}.h5"
+                            if mfile_leg.exists():
+                                with h5py.File(mfile_leg, "r") as f:
+                                    if domain in f:
+                                        data = H5Serializer.load_sparse_csr(f[domain]) if mname in ["K", "M"] else H5Serializer.load_dataset(f[domain])
+                                        if mname == "K": _fds_ref.K[domain] = data
+                                        elif mname == "M": _fds_ref.M[domain] = data
+                                        else: _fds_ref.B[domain] = data
+            elif (path / "matrices.h5").exists():
+                with h5py.File(path / "matrices.h5", "r") as fm:
+                    for d_meta in metadata.get("solids", []):
+                        domain = d_meta["domain"]
+                        if domain in fm:
+                            if "K" in fm[domain]: _fds_ref.K[domain] = H5Serializer.load_sparse_csr(fm[f"{domain}/K"])
+                            if "M" in fm[domain]: _fds_ref.M[domain] = H5Serializer.load_sparse_csr(fm[f"{domain}/M"])
+                            if "B" in fm[domain]: _fds_ref.B[domain] = H5Serializer.load_dataset(fm[f"{domain}/B"])
+
+        # 3. Iterate through domains to build FOMResult objects
+        for solid_meta in metadata["solids"]:
+            domain = solid_meta["domain"]
+            Z_matrix = None
+            S_matrix = None
+            residual_data = None
+            field_snapshots = None
+            
+            # Load Z
+            z_path = path / "z" / f"z_{domain}.h5"
+            if not z_path.exists(): z_path = path / f"z_{domain}.h5"
+            if z_path.exists():
+                with h5py.File(z_path, "r") as fz:
+                    Z_matrix = H5Serializer.load_dataset(fz["data"])
+            elif (path / "z.h5").exists():
+                with h5py.File(path / "z.h5", "r") as fz:
+                    if domain in fz: Z_matrix = H5Serializer.load_dataset(fz[domain])
+
+            # Load S
+            s_path = path / "s" / f"s_{domain}.h5"
+            if not s_path.exists(): s_path = path / f"s_{domain}.h5"
+            if s_path.exists():
+                with h5py.File(s_path, "r") as fsr:
+                    S_matrix = H5Serializer.load_dataset(fsr["data"])
+            elif (path / "s.h5").exists():
+                with h5py.File(path / "s.h5", "r") as fsr:
+                    if domain in fsr: S_matrix = H5Serializer.load_dataset(fsr[domain])
+            
+            # Load snapshots and residuals
+            snap_path = path / "snapshots" / f"snapshots_{domain}.h5"
+            if not snap_path.exists(): snap_path = path / f"snapshots_{domain}.h5"
+            if snap_path.exists():
+                with h5py.File(snap_path, "r") as fs:
+                    residual_data = H5Serializer.load_dataset(fs["residual_data"]) if "residual_data" in fs else None
+                    field_snapshots = H5Serializer.load_dataset(fs["field_snapshots"]) if "field_snapshots" in fs else None
+
+            # Load eigenmodes into _fds_ref
+            if _fds_ref is not None and hasattr(_fds_ref, '_resonant_mode_cache'):
+                eig_path = path / "eigenmodes" / f"eigenmodes_{domain}.h5"
+                if eig_path.exists():
+                    with h5py.File(eig_path, "r") as f:
+                        for k in f.keys():
+                            group = f[k]
+                            eigs = H5Serializer.load_dataset(group["eigenvalues"])
+                            vecs = H5Serializer.load_dataset(group["eigenvectors"])
+                            _fds_ref._resonant_mode_cache[k] = (eigs, vecs)
+
+            fom = FOMResult(
+                domain=domain,
+                frequencies=frequencies,
+                Z_matrix=Z_matrix,
+                S_matrix=S_matrix,
+                Z_dict=None,
+                S_dict=None,
+                n_ports=solid_meta["n_ports"],
+                ports=solid_meta["ports"],
+                n_modes_per_port=solid_meta.get("n_modes_per_port", 1),
+                residual_data=residual_data,
+                _solver_ref=_fds_ref
+            )
+            
+            # Update solver state
+            if _fds_ref is not None:
+                if not hasattr(_fds_ref, '_residuals') or _fds_ref._residuals is None:
+                    _fds_ref._residuals = {}
+                if residual_data is not None: _fds_ref._residuals[domain] = residual_data
+                if field_snapshots is not None: _fds_ref.snapshots[domain] = field_snapshots
+                if Z_matrix is not None: _fds_ref._Z_per_domain[domain] = fom.Z_dict
+                if S_matrix is not None: _fds_ref._S_per_domain[domain] = fom.S_dict
+                if frequencies is not None: _fds_ref.frequencies = frequencies
+
+            fom_list.append(fom)
+            
         return cls(fom_list, _fds_ref=_fds_ref)
 
     def __repr__(self) -> str:
         return (f"FOMCollection([{', '.join(f.domain for f in self._foms)}])")
+
+    def get_eigenmodes(self, **kwargs):
+        """
+        Compute or retrieve eigenmodes for all domains in the collection.
+        """
+        if self._fds_ref is not None and hasattr(self._fds_ref, 'calculate_resonant_modes'):
+            res = self._fds_ref.calculate_resonant_modes(domain=None, **kwargs)
+            
+            # Hierarchical save
+            self._auto_save_eigenmodes(res, **kwargs)
+            
+            return res
+        raise RuntimeError("Eigenmodes not available for this FOMCollection.")
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self._fds_ref is None or not hasattr(self._fds_ref, '_project_path'):
+            return
+        
+        save_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "eigenmodes"
+        try:
+            if hasattr(self._fds_ref, 'save_eigenmodes'):
+                self._fds_ref.save_eigenmodes(save_path, domain=None, **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes for collection: {e}")
 
 
 # =============================================================================
@@ -735,6 +1147,9 @@ class ROMCollection(PlotMixin):
             raise ValueError("ROMCollection requires a ModelOrderReduction reference.")
         self._fds_ref = _fds_ref
         self._mor_ref = _mor_ref
+        
+        # Initialize concatenation cache from MOR if available
+        self._concat_cache = getattr(_mor_ref, '_concatenated', None)
 
     # ------------------------------------------------------------------
     # Sequence interface (delegates to MOR domains)
@@ -794,6 +1209,22 @@ class ROMCollection(PlotMixin):
         return self._concat_cache
 
     # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Solve all reduced models in this collection.
+        
+        Delegates to the underlying ModelOrderReduction object.
+        """
+        if self._mor_ref is None:
+            raise RuntimeError("Cannot solve: no MOR reference available.")
+        return self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                  config=config, **kwargs)
+
+    # ------------------------------------------------------------------
     # Concatenate
     # ------------------------------------------------------------------
 
@@ -811,7 +1242,9 @@ class ROMCollection(PlotMixin):
                 "ROMCollection has no reference to ModelOrderReduction. "
                 "Access via fds.foms.reduce() to get a properly wired collection."
             )
-        return self._mor_ref.concatenate()
+        res = self._mor_ref.concatenate()
+        self._concat_cache = res
+        return res
 
     @property
     def mor(self):
@@ -828,6 +1261,32 @@ class ROMCollection(PlotMixin):
     def __repr__(self) -> str:
         domains = ', '.join(self._mor_ref.domains)
         return f"ROMCollection([{domains}])"
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Standardized API for retrieving eigenvalues and eigenvectors for all FOMs.
+        """
+        if self._mor_ref is not None and hasattr(self._mor_ref, 'get_eigenmodes'):
+            res = self._mor_ref.get_eigenmodes(**kwargs)
+            
+            # Hierarchical save
+            if _auto_save:
+                self._auto_save_eigenmodes(res, **kwargs)
+                
+            return res
+        raise RuntimeError("Eigenmodes not available for this ROMCollection.")
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self._fds_ref is None or not hasattr(self._fds_ref, '_project_path'):
+            return
+        
+        # Mirror: fds/foms/roms -> eigenmode/foms/roms
+        save_path = Path(self._fds_ref._project_path) / "eigenmode" / "foms" / "roms"
+        try:
+            if hasattr(self._mor_ref, 'save_eigenmodes'):
+                self._mor_ref.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes for ROMCollection: {e}")
 
     # ------------------------------------------------------------------
     # Persistence

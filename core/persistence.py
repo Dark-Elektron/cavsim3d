@@ -17,6 +17,16 @@ import scipy.sparse as sp
 import pickle
 from datetime import datetime
 
+# Import OCC modules as early as possible to avoid DLL conflicts with NGSolve on Windows
+# Some OCC modules share DLLs that NGSolve also bundles (e.g. TKSTEP, TKIGES)
+try:
+    import OCC.Core.STEPControl
+    import OCC.Core.IGESControl
+    import OCC.Core.BRepAlgoAPI
+    import OCC.Core.BOPAlgo
+except ImportError:
+    pass
+
 # Import NGSolve only if available (needed for mesh/fes persistence)
 try:
     import ngsolve as ngs
@@ -24,6 +34,18 @@ except ImportError:
     ngs = None
 
 T = TypeVar('T')
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for NumPy types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 
 class H5Serializer:
     """Helper for HDF5 serialization of numpy and scipy objects."""
@@ -56,6 +78,8 @@ class H5Serializer:
 
         if isinstance(data, (np.ndarray, list)):
             data_np = np.asarray(data)
+            if name in group:
+                del group[name]
             if np.iscomplexobj(data_np):
                 group.create_dataset(name, data=cls.to_complex_h5(data_np))
             else:
@@ -65,6 +89,8 @@ class H5Serializer:
             cls.save_sparse_csr(group, name, data)
         
         elif isinstance(data, dict):
+            if name in group:
+                del group[name]
             subgroup = group.create_group(name)
             for k, v in data.items():
                 cls.save_dataset(subgroup, k, v)
@@ -104,6 +130,8 @@ class H5Serializer:
         if not sp.isspmatrix_csr(mtx):
             mtx = mtx.tocsr()
         
+        if name in group:
+            del group[name]
         subgroup = group.create_group(name)
         cls.save_dataset(subgroup, 'data', mtx.data)
         subgroup.create_dataset('indices', data=mtx.indices)
@@ -163,11 +191,23 @@ class ProjectManager:
         return project_path
 
     @staticmethod
+    def save_json(path: Path | str, data: Dict[str, Any], filename: str = "metadata.json"):
+        """Save dictionary to JSON with NumPy support."""
+        path = Path(path)
+        if path.is_file():
+            # If path points to a file, use its directory or its own path
+            target_path = path
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            target_path = path / filename
+            
+        with open(target_path, "w") as f:
+            json.dump(data, f, indent=4, cls=NumpyEncoder)
+
+    @staticmethod
     def save_config(path: Path, config: Dict[str, Any]):
         """Save project configuration to JSON."""
-        with open(path / "config.json", "w") as f:
-            # Handle non-serializable objects (Convert to str)
-            json.dump(config, f, indent=2, default=str)
+        ProjectManager.save_json(path, config, filename="config.json")
 
     @staticmethod
     def load_config(path: Path) -> Dict[str, Any]:

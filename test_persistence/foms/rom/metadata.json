@@ -1,0 +1,12 @@
+{
+    "domains": [
+        "cell_1"
+    ],
+    "n_domains": 1,
+    "is_reduced": true,
+    "r": {},
+    "n_ports_total": 2,
+    "n_ports_external": 2,
+    "n_modes_per_port": 1,
+    "timestamp": "2026-03-14T23:22:13.349049"
+}

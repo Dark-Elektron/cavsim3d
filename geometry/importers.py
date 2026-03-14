@@ -562,7 +562,7 @@ class STEPImporter(BaseGeometry):
             self._auto_name_split_geometry()
 
         # Step 3: Set boundary condition
-        self.bc = 'wall'
+        self.bc = 'default'
         self._bc_explicitly_set = True
 
     def finalize(self, maxh: Optional[float] = None) -> 'STEPImporter':
@@ -957,7 +957,7 @@ class STEPImporter(BaseGeometry):
         )
 
         # Step 3: Set boundary condition
-        self.bc = 'wall'
+        self.bc = 'default'
         self._bc_explicitly_set = True
 
         self._record('name_solids', sort_axis=sort_axis, port_axis=port_axis,
@@ -981,12 +981,12 @@ class STEPImporter(BaseGeometry):
             solids = list(self.geo.solids)
             for solid in solids:
                 for face in solid.faces:
-                    face.name = 'wall'
+                    face.name = 'default'
         except AttributeError:
             # Single OCC shape without .solids
             try:
                 for face in self.geo.faces:
-                    face.name = 'wall'
+                    face.name = 'default'
             except AttributeError:
                 pass
 

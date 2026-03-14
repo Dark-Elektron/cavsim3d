@@ -1,0 +1,59 @@
+{
+    "project_name": "TestSolveRerunKeyError",
+    "order": 2,
+    "bc": "left|right|top|bottom",
+    "use_wave_impedance": true,
+    "is_compound": false,
+    "n_domains": 1,
+    "domains": [
+        "vacuum"
+    ],
+    "n_ports": 2,
+    "ports": [
+        "port1",
+        "port2"
+    ],
+    "external_ports": [
+        "port1",
+        "port2"
+    ],
+    "internal_ports": [],
+    "n_modes_per_port": 1,
+    "global_matrices_assembled": true,
+    "per_domain_matrices_assembled": true,
+    "current_global_method": "coupled",
+    "has_results": true,
+    "solver_history": [
+        {
+            "op": "solve",
+            "fmin": 1.0,
+            "fmax": 2.0,
+            "nsamples": 2,
+            "solver_type": "iterative",
+            "global_method": "coupled",
+            "per_domain": false,
+            "timestamp": "2026-03-18T18:36:05.880514"
+        },
+        {
+            "op": "solve",
+            "fmin": 1.0,
+            "fmax": 2.0,
+            "nsamples": 2,
+            "solver_type": "iterative",
+            "global_method": "coupled",
+            "per_domain": false,
+            "timestamp": "2026-03-18T18:36:06.648792"
+        },
+        {
+            "op": "solve",
+            "fmin": 1.0,
+            "fmax": 2.0,
+            "nsamples": 2,
+            "solver_type": "iterative",
+            "global_method": "coupled",
+            "per_domain": false,
+            "timestamp": "2026-03-18T18:36:07.098198"
+        }
+    ],
+    "timestamp": "2026-03-18T18:36:07.098198"
+}

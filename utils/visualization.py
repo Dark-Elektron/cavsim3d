@@ -331,206 +331,69 @@ class DataExtractor:
         try:
             source_type = DataExtractor.get_source_type(source)
 
-            # For analytical sources, prefer all_eigenfrequencies with boundary_type
+            # For analytical sources
             if source_type == 'analytical':
                 if hasattr(source, 'all_eigenfrequencies'):
                     import inspect
                     sig = inspect.signature(source.all_eigenfrequencies)
                     params = sig.parameters
-
-                    kwargs = {
-                        'n_modes': n_modes or 100,
-                        'return_format': 'array'
-                    }
+                    kwargs = {'n_modes': n_modes or 100, 'return_format': 'array'}
                     if 'boundary_type' in params:
                         kwargs['boundary_type'] = boundary_type
-
                     freqs = source.all_eigenfrequencies(**kwargs)
-                    if freqs is not None and n_modes is not None:
-                        freqs = freqs[:n_modes]
-                    return freqs
-
-                # Fallback to resonant_frequencies (legacy)
+                    return freqs[:n_modes] if freqs is not None and n_modes else freqs
                 elif hasattr(source, 'resonant_frequencies'):
                     freqs = source.resonant_frequencies(n_modes or 100)
-                    if n_modes is not None and freqs is not None:
-                        freqs = freqs[:n_modes]
-                    return freqs
+                    return freqs[:n_modes] if freqs is not None and n_modes else freqs
 
-            # For solver sources, try get_resonant_frequencies
+            # For solver sources, try get_resonant_frequencies first
             if hasattr(source, 'get_resonant_frequencies'):
                 import inspect
                 sig = inspect.signature(source.get_resonant_frequencies)
                 params = list(sig.parameters.keys())
-
                 kwargs = {}
-                if 'n_modes' in params:
-                    kwargs['n_modes'] = n_modes
-                if 'domain' in params:
-                    kwargs['domain'] = domain
-                if 'filter_static' in params:
-                    kwargs['filter_static'] = filter_static
-                if 'min_eigenvalue' in params:
-                    kwargs['min_eigenvalue'] = min_eigenvalue
-
+                if 'n_modes' in params: kwargs['n_modes'] = n_modes
+                if 'domain' in params: kwargs['domain'] = domain
+                if 'filter_static' in params: kwargs['filter_static'] = filter_static
+                if 'min_eigenvalue' in params: kwargs['min_eigenvalue'] = min_eigenvalue
                 freqs = source.get_resonant_frequencies(**kwargs)
+                return freqs[:n_modes] if freqs is not None and n_modes else freqs
 
-                if freqs is not None and n_modes is not None:
-                    freqs = freqs[:n_modes]
-
-                return freqs
-
-            # Fall back to eigenvalues
-            if hasattr(source, 'get_eigenvalues'):
+            # Fall back to calculate_resonant_modes or eigenvalues
+            if hasattr(source, 'calculate_resonant_modes') or hasattr(source, 'get_eigenvalues'):
                 import inspect
-                sig = inspect.signature(source.get_eigenvalues)
+                if hasattr(source, 'calculate_resonant_modes'):
+                    sig = inspect.signature(source.calculate_resonant_modes)
+                    func = source.calculate_resonant_modes
+                else:
+                    sig = inspect.signature(source.get_eigenvalues)
+                    func = source.get_eigenvalues
+
                 params = list(sig.parameters.keys())
-
                 kwargs = {}
-                if 'domain' in params:
-                    kwargs['domain'] = domain
-                if 'filter_static' in params:
-                    kwargs['filter_static'] = filter_static
-                if 'min_eigenvalue' in params:
-                    kwargs['min_eigenvalue'] = min_eigenvalue
-                if 'n_modes' in params:
-                    kwargs['n_modes'] = n_modes
+                if 'domain' in params: kwargs['domain'] = domain
+                if 'filter_static' in params: kwargs['filter_static'] = filter_static
+                if 'min_eigenvalue' in params: kwargs['min_eigenvalue'] = min_eigenvalue
+                if 'n_modes' in params: kwargs['n_modes'] = n_modes
 
-                eigs = source.get_eigenvalues(**kwargs)
-
-                if isinstance(eigs, dict):
-                    if 'global' in eigs:
-                        eigs = eigs['global']
-                    else:
-                        eigs = np.concatenate(list(eigs.values()))
+                res = func(**kwargs)
+                if isinstance(res, tuple):
+                    eigs = res[0]
+                elif isinstance(res, dict):
+                    eigs = res.get('global', np.concatenate([v[0] for v in res.values()]))
+                else:
+                    eigs = res
 
                 if eigs is not None and len(eigs) > 0:
                     eigs_pos = eigs[eigs > 0]
                     freqs = np.sqrt(eigs_pos) / (2 * np.pi)
                     freqs = np.sort(freqs)
-                    if n_modes is not None:
-                        freqs = freqs[:n_modes]
-                    return freqs
+                    return freqs[:n_modes] if n_modes else freqs
 
             return None
 
         except Exception as e:
-            print(f"Warning: Could not extract resonant frequencies from "
-                  f"{type(source).__name__}: {e}")
-            return None
-
-    @staticmethod
-    def extract_resonant_frequencies(
-        source: Any,
-        n_modes: int = None,
-        domain: str = None,
-        filter_static: bool = True,
-        min_eigenvalue: float = 1.0
-    ) -> Optional[np.ndarray]:
-        """
-        Extract resonant frequencies from source.
-
-        Parameters
-        ----------
-        source : solver, analytical, or object with get_resonant_frequencies
-        n_modes : int, optional
-            Number of modes to return
-        domain : str, optional
-            Specific domain or 'global'
-        filter_static : bool
-            If True (default), remove static modes from numerical sources
-        min_eigenvalue : float
-            Threshold for static mode filtering
-
-        Returns
-        -------
-        frequencies : ndarray or None
-            Resonant frequencies in Hz
-        """
-        try:
-            if hasattr(source, 'all_eigenfrequencies'):
-                import inspect
-                sig = inspect.signature(source.all_eigenfrequencies)
-                params = sig.parameters
-
-                kwargs = {
-                    'n_modes': n_modes or 100,
-                    'return_format': 'array'
-                }
-
-                freqs = source.all_eigenfrequencies(**kwargs)
-                if freqs is not None and n_modes is not None:
-                    freqs = freqs[:n_modes]
-                return freqs
-
-            # Try get_resonant_frequencies first
-            if hasattr(source, 'get_resonant_frequencies'):
-                import inspect
-                sig = inspect.signature(source.get_resonant_frequencies)
-                params = list(sig.parameters.keys())
-
-                kwargs = {}
-                if 'n_modes' in params:
-                    kwargs['n_modes'] = n_modes
-                if 'domain' in params:
-                    kwargs['domain'] = domain
-                if 'filter_static' in params:
-                    kwargs['filter_static'] = filter_static
-                if 'min_eigenvalue' in params:
-                    kwargs['min_eigenvalue'] = min_eigenvalue
-
-                freqs = source.get_resonant_frequencies(**kwargs)
-
-                # Ensure we return at most n_modes
-                if freqs is not None and n_modes is not None:
-                    freqs = freqs[:n_modes]
-
-                return freqs
-
-            # Try resonant_frequencies (analytical)
-            if hasattr(source, 'resonant_frequencies'):
-                freqs = source.resonant_frequencies(n_modes or 100)
-                if n_modes is not None:
-                    freqs = freqs[:n_modes]
-                return freqs
-
-            # Fall back to eigenvalues
-            if hasattr(source, 'get_eigenvalues'):
-                import inspect
-                sig = inspect.signature(source.get_eigenvalues)
-                params = list(sig.parameters.keys())
-
-                kwargs = {}
-                if 'domain' in params:
-                    kwargs['domain'] = domain
-                if 'filter_static' in params:
-                    kwargs['filter_static'] = filter_static
-                if 'min_eigenvalue' in params:
-                    kwargs['min_eigenvalue'] = min_eigenvalue
-                if 'n_modes' in params:
-                    kwargs['n_modes'] = n_modes
-
-                eigs = source.get_eigenvalues(**kwargs)
-
-                if isinstance(eigs, dict):
-                    if 'global' in eigs:
-                        eigs = eigs['global']
-                    else:
-                        eigs = np.concatenate(list(eigs.values()))
-
-                if eigs is not None and len(eigs) > 0:
-                    eigs_pos = eigs[eigs > 0]
-                    freqs = np.sqrt(eigs_pos) / (2 * np.pi)
-                    freqs = np.sort(freqs)
-                    if n_modes is not None:
-                        freqs = freqs[:n_modes]
-                    return freqs
-
-            return None
-
-        except Exception as e:
-            print(f"Warning: Could not extract resonant frequencies from "
-                  f"{type(source).__name__}: {e}")
+            print(f"Warning: Could not extract resonant frequencies: {e}")
             return None
 
 

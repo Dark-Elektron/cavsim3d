@@ -13,6 +13,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
 from scipy.sparse.linalg import eigsh
+from core.persistence import H5Serializer
+from pathlib import Path
 
 
 class EigenMixinBase:
@@ -804,6 +806,53 @@ class EigenMixinBase:
                     print(f"Warning: Could not compute eigenvectors for {d}: {e}")
 
         return self._eigenvectors_cache.copy()
+
+    def get_eigenmodes(self, **kwargs) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
+        """
+        Standardized API for retrieving eigenvalues and eigenvectors.
+        
+        Returns (eigenvalues, eigenvectors).
+        """
+        kwargs.setdefault('return_eigenvalues', True)
+        return self.get_eigenvectors(**kwargs)
+
+    def save_eigenmodes(self, path: Union[str, Path], domain: str = None, **kwargs):
+        """
+        Save computed eigenmodes to disk in HDF5 format.
+        
+        Parameters
+        ----------
+        path : Path
+            Directory to save 'eigenmodes.h5' into.
+        domain : str, optional
+            Specific domain to save. If None, saves all computed domains.
+        **kwargs
+            Arguments passed to get_eigenmodes (e.g., n_modes)
+        """
+        import h5py
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        # Strip _auto_save from kwargs if present (handled by results wrappers)
+        kwargs.pop('_auto_save', None)
+        res = self.get_eigenmodes(domain=domain, **kwargs)
+        
+        # get_eigenmodes returns either (eigs, vecs) or (dict_eigs, dict_vecs)
+        if isinstance(res[0], dict):
+            eigs_dict, vecs_dict = res
+        else:
+            # Single domain result, wrap in dict
+            d_name = domain or self._get_available_eigen_domains()[0]
+            eigs_dict = {d_name: res[0]}
+            vecs_dict = {d_name: res[1]}
+        
+        with h5py.File(path / "eigenmodes.h5", "w") as f:
+            for d in vecs_dict:
+                grp = f.create_group(d)
+                H5Serializer.save_dataset(grp, "eigenvalues", eigs_dict[d])
+                H5Serializer.save_dataset(grp, "eigenvectors", vecs_dict[d])
+        
+        print(f"Eigenmodes saved to {path / 'eigenmodes.h5'}")
 
 
 # =============================================================================

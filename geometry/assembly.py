@@ -803,13 +803,13 @@ class Assembly(BaseGeometry):
                     pass
         except Exception as e:
             print(f"Warning: Error identifying faces: {e}")
-            self.bc = 'wall'
+            self.bc = 'default'
             self._bc_explicitly_set = True
             return
         
         if not port_faces:
             print("Warning: No port faces found")
-            self.bc = 'wall'
+            self.bc = 'default'
             self._bc_explicitly_set = True
             return
         
@@ -867,7 +867,7 @@ class Assembly(BaseGeometry):
         print(f"  External ports: {n_external}")
         print(f"  Interface ports: {n_interface}")
         
-        self.bc = 'wall'
+        self.bc = 'default'
         self._bc_explicitly_set = True
     
     def _name_all_faces_wall(self) -> None:
@@ -878,11 +878,11 @@ class Assembly(BaseGeometry):
         try:
             for solid in self.geo.solids:
                 for face in solid.faces:
-                    face.name = 'wall'
+                    face.name = 'default'
         except AttributeError:
             try:
                 for face in self.geo.faces:
-                    face.name = 'wall'
+                    face.name = 'default'
             except AttributeError:
                 pass
     
