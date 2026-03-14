@@ -1,0 +1,13 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.14, pytest-9.0.2, pluggy-1.5.0 -- C:\Users\Soske\anaconda3\envs\cavsim3d\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Soske\Documents\git_projects\cavsim3d
+plugins: anyio-4.10.0
+collecting ... collected 4 items
+
+tests/test_em_project.py::test_em_project_structure PASSED               [ 25%]
+tests/test_em_project.py::test_em_project_save_load PASSED               [ 50%]
+tests/test_em_project.py::test_hierarchical_eigenmode_saving PASSED      [ 75%]
+tests/test_em_project.py::test_simplified_api_workflow PASSED            [100%]
+
+============================== 4 passed in 3.45s ==============================

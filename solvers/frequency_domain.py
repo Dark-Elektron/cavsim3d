@@ -99,25 +99,40 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         super().__init__()
 
         self.geometry = geometry
-        self.mesh = geometry.mesh
-        self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
+        if geometry is not None:
+            self.mesh = geometry.mesh
+            self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
+        else:
+            self.mesh = None
+            self.bc = bc
+        
         self.order = order
         self.use_wave_impedance = use_wave_impedance
-
+        self._project_path: Optional[str] = None
         # Detect structure topology
-        self.domains = self._detect_domains()
-        self._ports = self._detect_ports()
-        self.domain_port_map = self._build_domain_port_map()
-        self.n_domains = len(self.domains)
-        self._n_ports = len(self._ports)
-        self.is_compound = self.n_domains > 1
-
-        # External ports (for compound structures, first and last only)
-        self._external_ports: List[str] = self._identify_external_ports()
-        self._internal_ports: List[str] = self._identify_internal_ports()
-
-        # Print structure info
-        self._print_structure_info()
+        if self.mesh is not None:
+            self.domains = self._detect_domains()
+            self._ports = self._detect_ports()
+            self.domain_port_map = self._build_domain_port_map()
+            self.n_domains = len(self.domains)
+            self._n_ports = len(self._ports)
+            self.is_compound = self.n_domains > 1
+    
+            # External ports (for compound structures, first and last only)
+            self._external_ports: List[str] = self._identify_external_ports()
+            self._internal_ports: List[str] = self._identify_internal_ports()
+            
+            # Print structure info
+            self._print_structure_info()
+        else:
+            self.domains = []
+            self._ports = []
+            self.domain_port_map = {}
+            self.n_domains = 0
+            self._n_ports = 0
+            self.is_compound = False
+            self._external_ports = []
+            self._internal_ports = []
 
         # Per-domain storage
         self._fes: Dict[str, HCurl] = {}
@@ -132,7 +147,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self.B_global: Optional[np.ndarray] = None
 
         # Port modes (shared across domains)
-        self.port_solver = PortEigenmodeSolver(self.mesh, order, self.bc)
+        if self.mesh is not None:
+            self.port_solver = PortEigenmodeSolver(self.mesh, order, self.bc)
+        else:
+            self.port_solver = None
+            
         self.port_modes: Dict[str, Dict[int, CoefficientFunction]] = None
         self.port_basis: Dict[str, Dict[int, np.ndarray]] = None
         self._n_modes_per_port: int = None
@@ -165,9 +184,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._project_path: Optional[Path] = None
         self._project_name: Optional[str] = None
         self._project_base_dir: Optional[Union[str, Path]] = None
+        self._project_ref = None
 
         # Solver history (CST-style operation log)
         self._solver_history: List[dict] = []
+
+        # Convergence info (iterative solver residuals)
+        self._residuals: Dict[str, dict] = {}
 
         # Validate boundary conditions
         self._validate_boundary_conditions()
@@ -179,6 +202,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         Issues warnings (not errors) for common misconfigurations so that
         the user can fix them before calling :meth:`solve`.
         """
+        if self.mesh is None:
+            return
+
         boundaries = list(self.mesh.GetBoundaries())
         ports = [b for b in boundaries if 'port' in b.lower()]
         unnamed = [b for b in boundaries if b in ('', None)]
@@ -732,6 +758,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             fmin: float,
             fmax: float,
             nsamples: int = 100,
+            order: Optional[int] = None,
+            nportmodes: Optional[int] = None,
             store_snapshots: bool = True,
             compute_s_params: bool = True,
             per_domain: bool = True,
@@ -754,6 +782,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             Maximum frequency in GHz
         nsamples : int
             Number of frequency samples
+        order : int, optional
+            Polynomial order. If provided, overrides self.order.
+        nportmodes : int, optional
+            Number of modes to compute per port. If provided, triggers
+            matrix assembly if needed or if the number of modes changed.
         store_snapshots : bool
             Store solution vectors for ROM or field visualization
         compute_s_params : bool
@@ -806,6 +839,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             )
             return self._build_results_dict(compute_s_params, per_domain, global_method)
 
+        if order is not None:
+            self.order = order
+            # If mesh exists, we might need to update FES/Solver
+            if self.mesh is not None:
+                self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
+                # Invalidate assembled matrices if order changed
+                self._per_domain_matrices_assembled = False
+                self._global_matrices_assembled = False
+
         self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
 
         # Merge iterative options with defaults
@@ -830,7 +872,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             )
 
         # Ensure required matrices are assembled
-        self._ensure_matrices_assembled(per_domain, global_method)
+        self._ensure_matrices_assembled(per_domain, global_method, nportmodes=nportmodes)
 
         # Clear previous results
         self._clear_results()
@@ -886,26 +928,33 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     def _ensure_matrices_assembled(
         self,
         per_domain: bool,
-        global_method: Optional[str]
+        global_method: Optional[str],
+        nportmodes: Optional[int] = None
     ) -> None:
         """Ensure required matrices are assembled."""
         needs_global = (global_method == 'coupled')
         needs_per_domain = per_domain
 
-        # Check if port modes exist
+        # Check if port modes exist or if we need a different number of modes
+        needs_recompute = False
+        if nportmodes is not None and nportmodes != self._n_modes_per_port:
+            needs_recompute = True
+            self.port_modes = None # Force recompute
+
         if self.port_modes is None:
             self.assemble_matrices(
+                nportmodes=nportmodes or self._n_modes_per_port or 1,
                 assemble_global=needs_global,
                 assemble_per_domain=needs_per_domain
             )
             return
 
         # Assemble missing matrices
-        if needs_global and not self._global_matrices_assembled:
+        if needs_global and (not self._global_matrices_assembled or needs_recompute):
             self._assemble_global_matrices()
             self._global_matrices_assembled = True
 
-        if needs_per_domain and not self._per_domain_matrices_assembled:
+        if needs_per_domain and (not self._per_domain_matrices_assembled or needs_recompute):
             self._assemble_per_domain_matrices()
             self._per_domain_matrices_assembled = True
 
@@ -913,55 +962,54 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # Persistence
     # =========================================================================
 
-    def save(self, project_name: str = None, base_dir: Union[str, Path] = None):
+    def save(self, path: Optional[Union[str, Path]] = None, project_name: Optional[str] = None, base_dir: Optional[Union[str, Path]] = None):
         """
-        Save the entire simulation project to disk.
-
-        Persists all solver state so that ``load()`` can reconstruct a
-        fully functional solver without re-assembling or re-solving.
-
-        Saved artefacts
-        ---------------
-        - ``config.json`` — solver parameters, domain/port topology, state flags
-        - ``mesh.pkl`` / ``fes.pkl`` — NGSolve mesh and global FE space
-        - ``port_modes/`` — port eigenmodes and basis vectors (pickle)
-        - ``matrices.h5`` — per-domain and global K, M, B matrices
-        - ``snapshots.h5`` — frequencies, solution snapshots per domain
-        - ``fom/`` — global FOM results (Z/S matrices, metadata)
-        - ``foms/`` — per-domain FOM results (compound structures)
-        - ``roms/`` — reduced-order models (if computed)
+        Save the solver state to disk.
+        
+        Parameters
+        ----------
+        path : Path, optional
+            Specific directory to save to. If provided, overrides project_name/base_dir.
+            Usually this is managed by EMProject.
+        project_name : str, optional
+            Name of the project.
+        base_dir : str or Path, optional
+            Base directory for simulations.
         """
+        import h5py
+        from core.persistence import ProjectManager, H5Serializer
         import pickle as _pkl
-        from pathlib import Path as _Path
+        from datetime import datetime
+        import json
 
-        # 0. Handle project identification
-        if project_name is None:
-            project_name = self._project_name
-        if base_dir is None:
-            base_dir = self._project_base_dir
-
-        if project_name is None:
-            raise ValueError("project_name must be provided for the first save.")
-
-        # 1. Determine project path
-        pm = ProjectManager(base_dir or "simulations")
-        if self._project_path is not None and \
-        project_name == self._project_name and \
-        (base_dir is None or base_dir == self._project_base_dir):
-            project_path = self._project_path
+        if path:
+            fds_path = Path(path)
+            fds_path.mkdir(parents=True, exist_ok=True)
+            # Try to infer project_root as parent if it looks like a subfolder
+            if fds_path.name == 'fds':
+                project_path = fds_path.parent
+            else:
+                project_path = fds_path
+            project_name = project_name or getattr(self, '_project_name', project_path.name)
+        elif getattr(self, '_project_path', None):
+            # If we are part of a project, save to 'fds' subfolder of the project root
+            project_path = Path(self._project_path)
+            fds_path = project_path / 'fds'
+            fds_path.mkdir(parents=True, exist_ok=True)
+            project_name = project_name or getattr(self, '_project_name', project_path.name)
         else:
+            project_name = project_name or getattr(self, '_project_name', None) or "untitled"
+            pm = ProjectManager(base_dir or "simulations")
             project_path = pm.prepare_project(project_name)
+            fds_path = project_path / 'fds'
+            fds_path.mkdir(parents=True, exist_ok=True)
 
-        # Link project
         self._project_name = project_name
-        self._project_base_dir = base_dir or "simulations"
         self._project_path = project_path
 
-        # ------------------------------------------------------------------
-        # 1. Config / metadata  (includes state flags)
-        # ------------------------------------------------------------------
+        # 1. Config / metadata
         config = {
-            "project_name": project_name,
+            "project_name": self._project_name,
             "order": self.order,
             "bc": self.bc,
             "use_wave_impedance": self.use_wave_impedance,
@@ -973,7 +1021,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             "external_ports": self._external_ports,
             "internal_ports": self._internal_ports,
             "n_modes_per_port": self._n_modes_per_port,
-            # State flags — so load() knows what has been done
             "global_matrices_assembled": self._global_matrices_assembled,
             "per_domain_matrices_assembled": self._per_domain_matrices_assembled,
             "current_global_method": self._current_global_method,
@@ -985,25 +1032,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             "solver_history": self._solver_history,
             "timestamp": datetime.now().isoformat(),
         }
-        pm.save_config(project_path, config)
+        
+        ProjectManager.save_json(fds_path, config, filename="config.json")
 
-        # ------------------------------------------------------------------
-        # 2. Mesh and global FES
-        # ------------------------------------------------------------------
-        pm.save_ngs_mesh(project_path, self.mesh)
-        pm.save_ngs_fes(project_path, self._fes_global)
-
-        # Per-domain FES
-        if self._fes:
-            for domain, fes in self._fes.items():
-                domain_dir = project_path / f"foms/{domain}"
-                domain_dir.mkdir(parents=True, exist_ok=True)
-                pm.save_ngs_fes(domain_dir, fes)
-
-        # ------------------------------------------------------------------
-        # 3. Port modes (own folder, pickle)
-        # ------------------------------------------------------------------
-        port_dir = project_path / "port_modes"
+        # 2. Port modes
+        port_dir = fds_path / "port_modes"
         port_dir.mkdir(parents=True, exist_ok=True)
 
         if self.port_modes is not None:
@@ -1013,7 +1046,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             with open(port_dir / "port_basis.pkl", "wb") as f:
                 _pkl.dump(self.port_basis, f)
         if hasattr(self, 'port_solver') and self.port_solver is not None:
-            # Save port solver state (cutoff frequencies, orientation factors, etc.)
             port_solver_state = {
                 'port_cutoff_frequencies': getattr(self.port_solver, 'port_cutoff_frequencies', {}),
                 'port_orientation_factors': getattr(self.port_solver, 'port_orientation_factors', {}),
@@ -1021,237 +1053,229 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             with open(port_dir / "port_solver_state.pkl", "wb") as f:
                 _pkl.dump(port_solver_state, f)
 
-        # ------------------------------------------------------------------
-        # 4. System matrices (HDF5)
-        # ------------------------------------------------------------------
-        with h5py.File(project_path / "matrices.h5", "w") as fh:
-            # Per-domain K, M, B
-            for domain in self.domains:
-                if domain in self.K:
-                    grp = fh.create_group(f"per_domain/{domain}")
-                    H5Serializer.save_sparse_csr(grp, "K", self.K[domain])
-                    H5Serializer.save_sparse_csr(grp, "M", self.M[domain])
-                    H5Serializer.save_dataset(grp, "B", self.B[domain])
-
-            # Global K, M, B
-            if self.K_global is not None:
-                grp = fh.create_group("global")
-                H5Serializer.save_sparse_csr(grp, "K", self.K_global)
-                H5Serializer.save_sparse_csr(grp, "M", self.M_global)
-                H5Serializer.save_dataset(grp, "B", self.B_global)
-
-        # ------------------------------------------------------------------
-        # 5. Frequencies and snapshots (HDF5)
-        # ------------------------------------------------------------------
-        with h5py.File(project_path / "snapshots.h5", "w") as fh:
-            if self.frequencies is not None:
-                H5Serializer.save_dataset(fh, "frequencies", self.frequencies)
-            for key, snap in self.snapshots.items():
-                H5Serializer.save_dataset(fh, f"snapshots/{key}", snap)
-
-        # ------------------------------------------------------------------
-        # 6. FOM result caches
-        # ------------------------------------------------------------------
+        # 3. FOMs & ROMs (Hierarchical Persistence)
         if self._fom_cache is not None or self._Z_global_coupled is not None:
-            self.fom.save(project_path / "fom")
+            fom_path = fds_path / "fom"
+            self.fom.save(fom_path)
+            
+            # Nested ROM for global FOM
+            if hasattr(self._fom_cache, '_rom_cache') and self._fom_cache._rom_cache is not None:
+                self._fom_cache._rom_cache.save(fom_path / "rom")
 
         if self.is_compound and (self._foms_cache is not None or self._Z_per_domain):
-            self.foms.save(project_path / "foms")
+            foms_path = fds_path / "foms"
+            self.foms.save(foms_path)
+            
+            # Nested ROMs for per-domain FOMs
+            if hasattr(self._foms_cache, '_roms_cache') and self._foms_cache._roms_cache is not None:
+                self._foms_cache._roms_cache.save(foms_path / "roms")
 
-        # ------------------------------------------------------------------
-        # 7. ROM data (if reduced-order models have been built)
-        # ------------------------------------------------------------------
-        # The ROM is reached via fom.reduce() so we check if a cached ROM exists
-        if self._fom_cache is not None and hasattr(self._fom_cache, '_rom_cache') \
-                and self._fom_cache._rom_cache is not None:
-            rom_path = project_path / "roms" / "global"
-            self._fom_cache._rom_cache.save(rom_path)
-
-        # ------------------------------------------------------------------
-        # 8. Geometry (STEP file + history for reconstruction)
-        # ------------------------------------------------------------------
-        if hasattr(self.geometry, 'save_geometry'):
-            self.geometry.save_geometry(project_path)
-
-        print(f"Project saved to {project_path}")
-        return project_path
+        print(f"FrequencyDomainSolver saved to {fds_path}")
+        return fds_path
 
     @classmethod
-    def load(cls, project_name: str, base_dir: Union[str, Path] = "simulations") -> 'FrequencyDomainSolver':
+    def load_from_path(cls, path: Union[str, Path], geometry: Optional[BaseGeometry] = None) -> 'FrequencyDomainSolver':
         """
-        Load a simulation project from disk.
-
-        Restores the full solver state saved by :meth:`save`, including
-        matrices, port modes, snapshots, and result caches.
+        Load a solver state from a specific directory.
+        
+        Parameters
+        ----------
+        path : Path
+            The directory containing the fds/ folder or solver results.
+        geometry : BaseGeometry, optional
+            The geometry associated with this solver. If None, we expect 
+            the mesh to be available in the parent directory or provided via geometry.
         """
         import pickle as _pkl
+        import h5py
+        from core.persistence import H5Serializer
+        import json
+        from pathlib import Path
 
-        pm = ProjectManager(base_dir)
-        project_path = pm.base_dir / project_name
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Solver path {path} does not exist.")
+            
+        with open(path / "config.json", "r") as f:
+            config = json.load(f)
 
-        if not project_path.exists():
-            raise FileNotFoundError(f"Project '{project_name}' not found in {pm.base_dir}")
-
-        config = pm.load_config(project_path)
-
-        # ------------------------------------------------------------------
-        # Reconstruct geometry from history (or fall back to stub)
-        # ------------------------------------------------------------------
-        mesh = pm.load_ngs_mesh(project_path)
-        fes_global = pm.load_ngs_fes(project_path)
-
-        history_file = project_path / 'geometry' / 'history.json'
-        if history_file.exists():
-            from geometry.base import BaseGeometry
-            try:
-                geo = BaseGeometry.load_geometry(project_path)
-                print(f"  Geometry reconstructed: {type(geo).__name__}")
-            except Exception as e:
-                print(f"  Warning: Could not reconstruct geometry ({e}), using stub.")
-                class ReloadedGeometry:
-                    def __init__(self, mesh, bc):
-                        self.mesh = mesh
-                        self.bc = bc
-                geo = ReloadedGeometry(mesh, config.get("bc"))
-        else:
-            # Fallback for projects saved before geometry persistence
-            class ReloadedGeometry:
-                def __init__(self, mesh, bc):
-                    self.mesh = mesh
-                    self.bc = bc
-            geo = ReloadedGeometry(mesh, config.get("bc"))
-
+        # If geometry is not provided, we might have limited functionality 
+        # but we can still load results and matrices.
         fds = cls(
-            geometry=geo,
+            geometry=geometry,
             order=config.get("order", 3),
             bc=config.get("bc"),
             use_wave_impedance=config.get("use_wave_impedance", True)
         )
-        fds._fes_global = fes_global
+        
+        # Load matrices, snapshots, etc. from 'path'
+        fds._load_internal(path, config)
+        
+        return fds
 
-        # Link project
-        fds._project_name = project_name
-        fds._project_base_dir = base_dir
-        fds._project_path = project_path
+    def _load_internal(self, path: Path, config: dict):
+        """Internal helper to load solver state from a directory."""
+        import pickle as _pkl
+        import h5py
+        from core.persistence import H5Serializer, ProjectManager
+        
+        # Restore state flags and topology
+        self.is_compound = config.get("is_compound", self.is_compound)
+        self.domains = config.get("domains", self.domains)
+        self.n_domains = config.get("n_domains", len(self.domains))
+        self._ports = config.get("ports", self._ports)
+        self._external_ports = config.get("external_ports", self._external_ports)
+        self._internal_ports = config.get("internal_ports", self._internal_ports)
+        
+        self._n_modes_per_port = config.get("n_modes_per_port", self._n_modes_per_port)
+        self._global_matrices_assembled = config.get("global_matrices_assembled", False)
+        self._per_domain_matrices_assembled = config.get("per_domain_matrices_assembled", False)
+        self._current_global_method = config.get("current_global_method", None)
+        self._solver_history = config.get('solver_history', [])
 
-        # ------------------------------------------------------------------
-        # Restore per-domain FES
-        # ------------------------------------------------------------------
-        for domain in config.get("domains", []):
-            domain_fes = pm.load_ngs_fes(project_path / f"foms/{domain}")
-            if domain_fes:
-                fds._fes[domain] = domain_fes
+        # Determine the target result folder (fom or foms) INSIDE the fds directory
+        fom_root = path / ("foms" if self.is_compound else "fom")
 
-        # ------------------------------------------------------------------
-        # Restore port modes (from port_modes/ folder)
-        # ------------------------------------------------------------------
-        port_dir = project_path / "port_modes"
-        if port_dir.exists():
-            pm_file = port_dir / "port_modes.pkl"
-            pb_file = port_dir / "port_basis.pkl"
-            ps_file = port_dir / "port_solver_state.pkl"
-
-            if pm_file.exists():
-                with open(pm_file, "rb") as f:
-                    fds.port_modes = _pkl.load(f)
-            if pb_file.exists():
-                with open(pb_file, "rb") as f:
-                    fds.port_basis = _pkl.load(f)
-            if ps_file.exists():
-                with open(ps_file, "rb") as f:
-                    port_solver_state = _pkl.load(f)
-                    if hasattr(fds, 'port_solver') and fds.port_solver is not None:
-                        for attr, val in port_solver_state.items():
-                            setattr(fds.port_solver, attr, val)
-
-        # Restore n_modes_per_port
-        fds._n_modes_per_port = config.get("n_modes_per_port", fds._n_modes_per_port)
-
-        # ------------------------------------------------------------------
-        # Restore K/M/B matrices (HDF5)
-        # ------------------------------------------------------------------
-        matrices_path = project_path / "matrices.h5"
-        if matrices_path.exists():
-            with h5py.File(matrices_path, "r") as fh:
-                # Per-domain
+        # 1. Load matrices from folders or legacy matrices.h5
+        mat_path = fom_root / "matrices"
+        if mat_path.exists():
+            # Per-domain matrices
+            if (mat_path / "K.h5").exists():
+                with h5py.File(mat_path / "K.h5", "r") as f:
+                    for domain in f:
+                        self.K[domain] = H5Serializer.load_sparse_csr(f[domain])
+            if (mat_path / "M.h5").exists():
+                with h5py.File(mat_path / "M.h5", "r") as f:
+                    for domain in f:
+                        self.M[domain] = H5Serializer.load_sparse_csr(f[domain])
+            if (mat_path / "B.h5").exists():
+                with h5py.File(mat_path / "B.h5", "r") as f:
+                    for domain in f:
+                        self.B[domain] = H5Serializer.load_dataset(f[domain])
+            
+            # Global matrices (if any)
+            global_mat_path = mat_path / "global"
+            if global_mat_path.exists():
+                if (global_mat_path / "K.h5").exists():
+                    with h5py.File(global_mat_path / "K.h5", "r") as f:
+                        self.K_global = H5Serializer.load_sparse_csr(f["data"])
+                if (global_mat_path / "M.h5").exists():
+                    with h5py.File(global_mat_path / "M.h5", "r") as f:
+                        self.M_global = H5Serializer.load_sparse_csr(f["data"])
+                if (global_mat_path / "B.h5").exists():
+                    with h5py.File(global_mat_path / "B.h5", "r") as f:
+                        self.B_global = H5Serializer.load_dataset(f["data"])
+        
+        elif (fom_root / "matrices.h5").exists():
+            with h5py.File(fom_root / "matrices.h5", "r") as fh:
                 if "per_domain" in fh:
                     for domain in fh["per_domain"]:
                         grp = fh[f"per_domain/{domain}"]
                         if "K" in grp:
-                            fds.K[domain] = H5Serializer.load_sparse_csr(grp["K"])
+                            self.K[domain] = H5Serializer.load_sparse_csr(grp["K"])
                         if "M" in grp:
-                            fds.M[domain] = H5Serializer.load_sparse_csr(grp["M"])
+                            self.M[domain] = H5Serializer.load_sparse_csr(grp["M"])
                         if "B" in grp:
-                            fds.B[domain] = H5Serializer.load_dataset(grp["B"])
+                            self.B[domain] = H5Serializer.load_dataset(grp["B"])
 
-                # Global
                 if "global" in fh:
                     grp = fh["global"]
                     if "K" in grp:
-                        fds.K_global = H5Serializer.load_sparse_csr(grp["K"])
+                        self.K_global = H5Serializer.load_sparse_csr(grp["K"])
                     if "M" in grp:
-                        fds.M_global = H5Serializer.load_sparse_csr(grp["M"])
+                        self.M_global = H5Serializer.load_sparse_csr(grp["M"])
                     if "B" in grp:
-                        fds.B_global = H5Serializer.load_dataset(grp["B"])
+                        self.B_global = H5Serializer.load_dataset(grp["B"])
 
         # ------------------------------------------------------------------
-        # Restore frequencies and snapshots (HDF5)
+        # 2. Port modes
         # ------------------------------------------------------------------
-        snap_path = project_path / "snapshots.h5"
+        port_dir = path / "port_modes"
+        if port_dir.exists() and self.mesh is not None:
+            pm_file = port_dir / "port_modes.pkl"
+            pb_file = port_dir / "port_basis.pkl"
+            ps_file = port_dir / "port_solver_state.pkl"
+
+            try:
+                if pm_file.exists():
+                    with open(pm_file, "rb") as f:
+                        self.port_modes = _pkl.load(f)
+                if pb_file.exists():
+                    with open(pb_file, "rb") as f:
+                        self.port_basis = _pkl.load(f)
+                if ps_file.exists():
+                    with open(ps_file, "rb") as f:
+                        port_solver_state = _pkl.load(f)
+                        if hasattr(self, 'port_solver') and self.port_solver is not None:
+                            for attr, val in port_solver_state.items():
+                                setattr(self.port_solver, attr, val)
+            except Exception as e:
+                # NgException (vector size mismatch) or other pickle errors
+                warnings.warn(
+                    f"Could not load port modes/basis: {e}. "
+                    f"Port modes will need to be recomputed.",
+                    UserWarning,
+                    stacklevel=2
+                )
+        elif port_dir.exists() and self.mesh is None:
+             warnings.warn(
+                "Port modes found but no mesh available to load them into. "
+                "Skipping port mode loading.",
+                UserWarning,
+                stacklevel=2
+            )
+
+        # ------------------------------------------------------------------
+        # 3. Snapshots
+        # ------------------------------------------------------------------
+        snap_path = fom_root / "snapshots.h5"
         if snap_path.exists():
             with h5py.File(snap_path, "r") as fh:
-                if "frequencies" in fh:
-                    fds.frequencies = H5Serializer.load_dataset(fh["frequencies"])
                 if "snapshots" in fh:
                     for key in fh["snapshots"]:
-                        fds.snapshots[key] = H5Serializer.load_dataset(fh[f"snapshots/{key}"])
+                        self.snapshots[key] = H5Serializer.load_dataset(fh[f"snapshots/{key}"])
 
         # ------------------------------------------------------------------
-        # Restore state flags
+        # 4. Result caches (Mirroring the hierarchy)
         # ------------------------------------------------------------------
-        fds._global_matrices_assembled = config.get("global_matrices_assembled", False)
-        fds._per_domain_matrices_assembled = config.get("per_domain_matrices_assembled", False)
-        fds._current_global_method = config.get("current_global_method", None)
+        # For single domain structures, fom_root is project/fom
+        # For compound structures, fom_root is project/foms
+        if fom_root.exists():
+            if self.is_compound:
+                from solvers.results import FOMCollection
+                try:
+                    self._foms_cache = FOMCollection.load(fom_root, _fds_ref=self)
+                    if self._foms_cache:
+                        self.frequencies = self._foms_cache.frequencies
+                    
+                    # Nested ROMs inside foms/roms
+                    roms_path = fom_root / "roms"
+                    if roms_path.exists():
+                        from rom.reduction import ModelOrderReduction
+                        from solvers.results import ROMCollection
+                        mor_loaded = ModelOrderReduction.load(roms_path, solver=self)
+                        self._foms_cache._roms_cache = ROMCollection(_fds_ref=self, _mor_ref=mor_loaded)
+                except Exception as e:
+                    import traceback
+                    warnings.warn(f"Could not load FOM collection from {fom_root}: {e}")
+                    # Traceback can be helpful for debugging complex loading issues
+                    # traceback.print_exc() 
+            else:
+                from solvers.results import FOMResult
+                try:
+                    self._fom_cache = FOMResult.load(fom_root, _solver_ref=self)
+                    self._Z_global_coupled = self._fom_cache._Z_matrix
+                    self._S_global_coupled = self._fom_cache._S_matrix
+                    
+                    # Nested ROM inside fom/rom
+                    rom_path = fom_root / "rom"
+                    if rom_path.exists():
+                        from rom.reduction import ModelOrderReduction
+                        self._fom_cache._rom_cache = ModelOrderReduction.load(rom_path, solver=self)
+                except Exception as e:
+                    print(f"Warning: Could not load FOM result: {e}")
 
-        # ------------------------------------------------------------------
-        # Restore FOM result caches
-        # ------------------------------------------------------------------
-        fom_path = project_path / "fom"
-        if fom_path.exists():
-            from solvers.results import FOMResult
-            fds._fom_cache = FOMResult.load(fom_path, _solver_ref=fds)
-            fds._Z_global_coupled = fds._fom_cache._Z_matrix
-            fds._S_global_coupled = fds._fom_cache._S_matrix
-
-        foms_path = project_path / "foms"
-        if foms_path.exists():
-            from solvers.results import FOMCollection
-            try:
-                fds._foms_cache = FOMCollection.load(foms_path, _fds_ref=fds)
-            except Exception as e:
-                print(f"Warning: Could not load per-domain results: {e}")
-
-        # ------------------------------------------------------------------
-        # Restore ROMs (if saved)
-        # ------------------------------------------------------------------
-        rom_global_path = project_path / "roms" / "global"
-        if rom_global_path.exists():
-            from rom.reduction import ModelOrderReduction
-            try:
-                rom = ModelOrderReduction.load(rom_global_path, solver=fds)
-                # Attach as cached .rom on fom
-                if fds._fom_cache is not None:
-                    fds._fom_cache._rom_cache = rom
-            except Exception as e:
-                print(f"Warning: Could not load ROM: {e}")
-
-        # ------------------------------------------------------------------
-        # Restore solver history
-        # ------------------------------------------------------------------
-        fds._solver_history = config.get('solver_history', [])
-
-        print(f"Project loaded from {project_path}")
-        return fds
+        print(f"FrequencyDomainSolver state loaded from {path}")
 
     def _clear_results(self) -> None:
         """Clear previous solve results."""
@@ -1796,8 +1820,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             Frequency range in GHz
         nsamples : int
             Number of frequency samples
-        store_snapshots : bool
-            Whether to store solution snapshots
         methods : list of str, optional
             Methods to compare. Default: ['coupled', 'cascade', 'concatenate']
 

@@ -14,7 +14,7 @@ from rom.structures import ReducedStructure
 from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
 from ngsolve.webgui import Draw
 from core.constants import mu0
-from core.persistence import H5Serializer
+from core.persistence import H5Serializer, ProjectManager
 import h5py
 import json
 from pathlib import Path
@@ -428,6 +428,36 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return freqs
 
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Compute or retrieve eigenmodes for the reduced structure(s).
+        """
+        res = super().get_eigenmodes(**kwargs)
+        
+        # Hierarchical save
+        if _auto_save:
+            self._auto_save_eigenmodes(res, **kwargs)
+        
+        return res
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self.solver is None or not hasattr(self.solver, '_project_path'):
+            return
+        
+        # Determine path based on single vs multi domain
+        project_path = Path(self.solver._project_path)
+        if self.n_domains == 1:
+            # fds/fom/rom -> fds/fom/rom/eigenmode
+            save_path = project_path / "fds" / "fom" / "rom" / "eigenmode"
+        else:
+            # fds/foms/roms -> fds/foms/roms/eigenmode
+            save_path = project_path / "fds" / "foms" / "roms" / "eigenmode"
+            
+        try:
+            self.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            print(f"Warning: Could not auto-save eigenmodes for ModelOrderReduction: {e}")
+
     # =========================================================================
     # Model Reduction
     # =========================================================================
@@ -562,6 +592,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             self._W_r_global = self._W[domain]
             self._r_global = self._r[domain]
 
+        # Automatic save after reduction
+        if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
+            self.solver._project_ref.save()
+
         return self
 
     # =========================================================================
@@ -616,29 +650,44 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """
         Save ModelOrderReduction data to disk.
         
-        Saves reduced matrices (A_r, B_r) and projection matrix (W)
-        to HDF5 files.
+        Saves reduced matrices (A_r, B_r, W, Q_L_inv) to separate files in matrices/
+        and S/Z parameters to s.h5/z.h5.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save reduced and projection matrices
-        with h5py.File(path / "matrices.h5", "w") as f:
+        # 1. Save reduced and projection matrices to modular files
+        mat_path = path / "matrices"
+        mat_path.mkdir(parents=True, exist_ok=True)
+        
+        with h5py.File(mat_path / "A_r.h5", "a") as fa, \
+             h5py.File(mat_path / "B_r.h5", "a") as fb, \
+             h5py.File(mat_path / "W.h5", "a") as fw, \
+             h5py.File(mat_path / "Q_L_inv.h5", "a") as fq:
             for domain in self.domains:
-                group = f.create_group(domain)
-                H5Serializer.save_dataset(group, "A_r", self._A_r.get(domain))
-                H5Serializer.save_dataset(group, "B_r", self._B_r.get(domain))
-                H5Serializer.save_dataset(group, "W", self._W.get(domain))
-                H5Serializer.save_dataset(group, "Q_L_inv", self._Q_L_inv.get(domain))
+                if domain in self._A_r:
+                    H5Serializer.save_dataset(fa, domain, self._A_r.get(domain))
+                    H5Serializer.save_dataset(fb, domain, self._B_r.get(domain))
+                    H5Serializer.save_dataset(fw, domain, self._W.get(domain))
+                    H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
 
-        # 2. Save snapshots and frequencies if available
-        with h5py.File(path / "snapshots.h5", "w") as f:
+        # 2. Save S and Z results separately
+        if self._Z_matrix is not None:
+            with h5py.File(path / "z.h5", "a") as f:
+                H5Serializer.save_dataset(f, "data", self._Z_matrix)
+        if self._S_matrix is not None:
+            with h5py.File(path / "s.h5", "a") as f:
+                H5Serializer.save_dataset(f, "data", self._S_matrix)
+
+        # 3. Save snapshots and frequencies to snapshots.h5
+        with h5py.File(path / "snapshots.h5", "a") as f:
             if hasattr(self, 'frequencies') and self.frequencies is not None:
                 H5Serializer.save_dataset(f, "frequencies", self.frequencies)
             if self._x_r_snapshots:
-                H5Serializer.save_dataset(f, "x_r_snapshots", self._x_r_snapshots)
+                for domain, snaps in self._x_r_snapshots.items():
+                    H5Serializer.save_dataset(f, f"x_r_snapshots/{domain}", snaps)
         
-        # 3. Save metadata
+        # 4. Save metadata
         metadata = {
             "domains": self.domains,
             "n_domains": self.n_domains,
@@ -649,8 +698,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             "n_modes_per_port": self._n_modes_per_port,
             "timestamp": datetime.now().isoformat()
         }
-        with open(path / "metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        ProjectManager.save_json(path, metadata)
+        
+        # 5. Save cached concatenation if available
+        if self._concatenated is not None:
+            self._concatenated.save(path / "concat")
 
     @classmethod
     def load(cls, path: Union[str, Path], solver=None) -> ModelOrderReduction:
@@ -672,6 +724,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._n_ports_total = metadata["n_ports_total"]
         rom._n_ports_external = metadata["n_ports_external"]
         rom._n_modes_per_port = metadata["n_modes_per_port"]
+        
+        # Initialize result dicts for PlotMixin
+        rom._S_dict = None
+        rom._Z_dict = None
         
         # We also need port lists and mappings which are usually in solver
         # If solver is None, some functionality might be limited
@@ -698,19 +754,78 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._Q_L_inv = {}
         rom._singular_values = {}
 
-        with h5py.File(path / "matrices.h5", "r") as f:
-            for domain in rom.domains:
-                group = f[domain]
-                rom._A_r[domain] = H5Serializer.load_dataset(group["A_r"])
-                rom._B_r[domain] = H5Serializer.load_dataset(group["B_r"])
-                rom._W[domain] = H5Serializer.load_dataset(group["W"])
-                rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
+        # 1. Load matrices from modular files or legacy matrices.h5
+        mat_path = path / "matrices"
+        if mat_path.exists():
+            with h5py.File(mat_path / "A_r.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        rom._A_r[domain] = H5Serializer.load_dataset(f[domain])
+            with h5py.File(mat_path / "B_r.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        rom._B_r[domain] = H5Serializer.load_dataset(f[domain])
+            with h5py.File(mat_path / "W.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        rom._W[domain] = H5Serializer.load_dataset(f[domain])
+            with h5py.File(mat_path / "Q_L_inv.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        rom._Q_L_inv[domain] = H5Serializer.load_dataset(f[domain])
+        elif (path / "matrices.h5").exists():
+            with h5py.File(path / "matrices.h5", "r") as f:
+                for domain in rom.domains:
+                    if domain in f:
+                        group = f[domain]
+                        rom._A_r[domain] = H5Serializer.load_dataset(group["A_r"])
+                        rom._B_r[domain] = H5Serializer.load_dataset(group["B_r"])
+                        rom._W[domain] = H5Serializer.load_dataset(group["W"])
+                        rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
 
-        with h5py.File(path / "snapshots.h5", "r") as f:
-            if "frequencies" in f:
-                rom.frequencies = H5Serializer.load_dataset(f["frequencies"])
-            if "x_r_snapshots" in f:
-                rom._x_r_snapshots = H5Serializer.load_dataset(f["x_r_snapshots"])
+        # 2. Load S/Z results from dedicated files
+        rom._Z_matrix = None
+        if (path / "z.h5").exists():
+            with h5py.File(path / "z.h5", "r") as f:
+                rom._Z_matrix = H5Serializer.load_dataset(f["data"])
+        
+        rom._S_matrix = None
+        if (path / "s.h5").exists():
+            with h5py.File(path / "s.h5", "r") as f:
+                rom._S_matrix = H5Serializer.load_dataset(f["data"])
+
+        # 3. Load snapshots and frequencies
+        rom.frequencies = None
+        rom._x_r_snapshots = {}
+        if (path / "snapshots.h5").exists():
+            with h5py.File(path / "snapshots.h5", "r") as f:
+                if "frequencies" in f:
+                    rom.frequencies = H5Serializer.load_dataset(f["frequencies"])
+                if "x_r_snapshots" in f:
+                    group = f["x_r_snapshots"]
+                    # Support both grouped and flat legacy storage
+                    if isinstance(group, h5py.Group):
+                        for domain in rom.domains:
+                            if domain in group:
+                                rom._x_r_snapshots[domain] = H5Serializer.load_dataset(group[domain])
+                    else:
+                        rom._x_r_snapshots = H5Serializer.load_dataset(group)
+                
+                # Support legacy loading of Z/S
+                if rom._Z_matrix is None and "Z_matrix" in f:
+                    rom._Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
+                if rom._S_matrix is None and "S_matrix" in f:
+                    rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
+
+        # 4. Load concatenated system if it exists
+        concat_path = path / "concat"
+        rom._concatenated = None
+        if concat_path.exists():
+            from solvers.concatenation import ConcatenatedSystem
+            try:
+                rom._concatenated = ConcatenatedSystem.load(concat_path, solver_ref=solver)
+            except Exception as e:
+                print(f"Warning: Could not load concatenated system from {concat_path}: {e}")
 
         return rom
 
@@ -803,6 +918,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         self._compute_s_from_z()
         self._invalidate_cache()
+
+        # Automatic save after simulation
+        if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
+            self.solver._project_ref.save()
 
         return {
             'frequencies': self.frequencies,
