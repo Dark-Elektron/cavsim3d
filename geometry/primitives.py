@@ -1,6 +1,7 @@
 # primitives.py (with analytical support and tagging)
 """Primitive geometries with tagging and analytical solution support."""
 
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 import numpy as np
 
@@ -56,6 +57,7 @@ class RectangularWaveguide(BaseGeometry):
 
         self.build()
         self.generate_mesh(maxh=maxh)
+        self._record('__init__', a=a, L=L, b=b, maxh=maxh, compute_method=compute_method)
 
     def build(self) -> None:
         """Build rectangular waveguide geometry."""
@@ -131,6 +133,40 @@ class RectangularWaveguide(BaseGeometry):
         modes.sort(key=lambda x: x['cutoff_frequency'])
         return modes[:n_modes]
 
+    @classmethod
+    def _rebuild_from_history(
+        cls,
+        history: List[dict],
+        project_path: Path,
+        source_file: Optional[Path] = None,
+    ) -> 'RectangularWaveguide':
+        """Reconstruct from operation history."""
+        # Find initialization parameters
+        params = {}
+        for entry in history:
+            if entry['op'] == '__init__':
+                params = entry
+                break
+        
+        # Fallback to reasonable defaults if not found
+        a = params.get('a', 0.1)
+        L = params.get('L', 0.2)
+        b = params.get('b')
+        maxh = params.get('maxh', 0.05)
+        meth = params.get('compute_method', 'numeric')
+        
+        obj = cls(a=a, L=L, b=b, maxh=maxh, compute_method=meth)
+        
+        # Re-apply other operations sequentially
+        for entry in history:
+            op = entry['op']
+            if op == '__init__':
+                continue
+            elif op == 'generate_mesh':
+                obj.generate_mesh(maxh=entry.get('maxh'), curve_order=entry.get('curve_order', 3))
+            # etc...
+            
+        return obj
 
 class CircularWaveguide(BaseGeometry):
     """Circular waveguide with optional analytical solution."""

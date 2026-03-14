@@ -320,6 +320,14 @@ class BaseGeometry(ABC, TaggableMixin):
         # Use the project-local copy stored in geometry/
         source_file = geo_dir / source_filename if source_filename else None
 
+        # Try to import the module stored in history to register the subclass
+        if 'module' in meta:
+            try:
+                import importlib
+                importlib.import_module(meta['module'])
+            except (ImportError, KeyError):
+                pass
+
         # Dispatch to the correct subclass
         subclass = cls._get_subclass(geo_type)
         if subclass is None:
@@ -341,7 +349,18 @@ class BaseGeometry(ABC, TaggableMixin):
     @classmethod
     def _get_subclass(cls, type_name: str) -> Optional[type]:
         """Find a BaseGeometry subclass by name (searches all subclasses)."""
+        # Lazy import to ensure all standard subclasses are registered if not already
+        try:
+            from . import primitives
+            from . import importers
+        except (ImportError, ValueError):
+            pass
+
         def _search(klass):
+            # Check the class itself
+            if klass.__name__ == type_name:
+                return klass
+            # Search subclasses
             for sub in klass.__subclasses__():
                 if sub.__name__ == type_name:
                     return sub
@@ -349,6 +368,7 @@ class BaseGeometry(ABC, TaggableMixin):
                 if found:
                     return found
             return None
+            
         return _search(cls)
 
     @classmethod
@@ -442,8 +462,8 @@ class BaseGeometry(ABC, TaggableMixin):
     def _delete_project_results(project_path: Path) -> None:
         """Delete all simulation results from a project directory."""
         result_paths = [
-            'matrices.h5', 'snapshots.h5',
-            'fom', 'foms', 'roms', 'port_modes',
+            'matrices.h5', 'snapshots.h5', 'fds',
+            'fom', 'foms', 'roms', 'port_modes', 'eigenmode'
         ]
         for name in result_paths:
             p = Path(project_path) / name
