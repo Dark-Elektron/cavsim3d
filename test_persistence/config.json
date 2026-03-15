@@ -1,0 +1,28 @@
+{
+    "project_name": "TestProj",
+    "order": 3,
+    "bc": "left|right|top|bottom",
+    "use_wave_impedance": true,
+    "is_compound": true,
+    "n_domains": 1,
+    "domains": [
+        "cell_1"
+    ],
+    "n_ports": 2,
+    "ports": [
+        "port1",
+        "port2"
+    ],
+    "external_ports": [
+        "port1",
+        "port2"
+    ],
+    "internal_ports": [],
+    "n_modes_per_port": null,
+    "global_matrices_assembled": false,
+    "per_domain_matrices_assembled": false,
+    "current_global_method": null,
+    "has_results": true,
+    "solver_history": [],
+    "timestamp": "2026-03-14T23:22:13.287924"
+}

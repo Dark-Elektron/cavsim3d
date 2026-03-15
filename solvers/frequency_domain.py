@@ -20,7 +20,7 @@ from ngsolve.webgui import Draw
 # Iterative: preconditioner MUST be registered before assembly
 from ngsolve import Preconditioner as NGPreconditioner
 from ngsolve import InnerProduct as NGInnerProduct
-from ngsolve.krylovspace import GMRes
+from ngsolve.krylovspace import GMRes, CG
 
 from core.constants import mu0, eps0, c0, Z0
 from solvers.base import BaseEMSolver, ParameterConverter
@@ -99,42 +99,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         super().__init__()
 
         self.geometry = geometry
-        if geometry is not None:
-            self.mesh = geometry.mesh
-            self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
-        else:
-            self.mesh = None
-            self.bc = bc
-        
+        self._mesh: Optional[Mesh] = None
         self.order = order
+        self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
         self.use_wave_impedance = use_wave_impedance
-        self._project_path: Optional[str] = None
-        # Detect structure topology
-        if self.mesh is not None:
-            self.domains = self._detect_domains()
-            self._ports = self._detect_ports()
-            self.domain_port_map = self._build_domain_port_map()
-            self.n_domains = len(self.domains)
-            self._n_ports = len(self._ports)
-            self.is_compound = self.n_domains > 1
-    
-            # External ports (for compound structures, first and last only)
-            self._external_ports: List[str] = self._identify_external_ports()
-            self._internal_ports: List[str] = self._identify_internal_ports()
-            
-            # Print structure info
-            self._print_structure_info()
-        else:
-            self.domains = []
-            self._ports = []
-            self.domain_port_map = {}
-            self.n_domains = 0
-            self._n_ports = 0
-            self.is_compound = False
-            self._external_ports = []
-            self._internal_ports = []
-
-        # Per-domain storage
+        
+        # Per-domain storage (MUST be initialized before setting mesh)
         self._fes: Dict[str, HCurl] = {}
         self.M: Dict[str, sp.csr_matrix] = {}
         self.K: Dict[str, sp.csr_matrix] = {}
@@ -146,9 +116,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self.K_global: Optional[sp.csr_matrix] = None
         self.B_global: Optional[np.ndarray] = None
 
+        # Snapshots storage
+        self.snapshots: Dict[str, np.ndarray] = {}
+
+        # Trigger structural detection and FES reconstruction via property setter
+        if geometry is not None:
+            self.mesh = geometry.mesh
+        else:
+            self.mesh = None
+
+        self._project_path: Optional[str] = None
+        
         # Port modes (shared across domains)
         if self.mesh is not None:
-            self.port_solver = PortEigenmodeSolver(self.mesh, order, self.bc)
+            self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
         else:
             self.port_solver = None
             
@@ -168,9 +149,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Track which method was used for current results
         self._current_global_method: Optional[str] = None
-
-        # Snapshots storage
-        self.snapshots: Dict[str, np.ndarray] = {}
 
         # Assembly state flags
         self._global_matrices_assembled: bool = False
@@ -192,8 +170,76 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Convergence info (iterative solver residuals)
         self._residuals: Dict[str, dict] = {}
 
+        # Reset resonant mode cache
+        self._resonant_mode_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
         # Validate boundary conditions
         self._validate_boundary_conditions()
+
+    @property
+    def mesh(self) -> Optional[Mesh]:
+        """NGSolve Mesh object."""
+        return self._mesh
+
+    @mesh.setter
+    def mesh(self, value: Optional[Mesh]):
+        """
+        Set mesh and automatically (re)detect domains, ports, and (re)construct FES.
+        """
+        self._mesh = value
+        
+        if value is not None:
+            # Update detection
+            self.domains = self._detect_domains()
+            self._ports = self._detect_ports()
+            self.domain_port_map = self._build_domain_port_map()
+            self.n_domains = len(self.domains)
+            self._n_ports = len(self._ports)
+            self.is_compound = self.n_domains > 1
+    
+            # External ports (for compound structures, first and last only)
+            self._external_ports: List[str] = self._identify_external_ports()
+            self._internal_ports: List[str] = self._identify_internal_ports()
+            
+            # Reconstruct FES for all domains (essential for field plotting after load)
+            self._reconstruct_fes()
+            
+            # Print structure info
+            self._print_structure_info()
+        else:
+            self.domains = []
+            self._ports = []
+            self.domain_port_map = {}
+            self.n_domains = 0
+            self._n_ports = 0
+            self.is_compound = False
+            self._external_ports = []
+            self._internal_ports = []
+            self._fes = {}
+
+    def _reconstruct_fes(self) -> None:
+        """
+        Reconstruct the Finite Element Space (FES) for each domain.
+        
+        This is called automatically when the mesh is set, ensuring that
+        per-domain snapshots can be visualized even after a project reload.
+        """
+        if self._mesh is None:
+            self._fes = {}
+            return
+
+        for domain in self.domains:
+            try:
+                # Create FES for this domain
+                fes = HCurl(
+                    self._mesh,
+                    order=self.order,
+                    dirichlet=self.bc,
+                    definedon=self._mesh.Materials(domain)
+                )
+                self._fes[domain] = fes
+            except Exception as e:
+                warnings.warn(f"Could not reconstruct FES for domain '{domain}': {e}")
 
     def _validate_boundary_conditions(self) -> None:
         """
@@ -569,6 +615,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(port))
             with TaskManager():
                 m_bnd_form.Assemble()
+
             M_bnd = sp.csr_matrix(m_bnd_form.mat.CSR())
 
             # Port sign convention
@@ -701,7 +748,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Count iterations via callback
         iter_count = [0]
-        def _count_iter(sol_vec):
+        # def _count_iter(sol_vec):
+        def _count_iter(sol_vec, it=3):
             iter_count[0] += 1
 
         # GMRes is a function: GMRes(A, b, pre=...) → solution vector
@@ -714,11 +762,23 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             sol.data = x0 # might be confusion but solution modifies the initial guess sol internally and returns it
 
         with TaskManager():
-            sol = GMRes(
-                A=a_form.mat,
-                b=f_vec,
-                x=sol,
+            # sol = GMRes(
+            #     A=a_form.mat,
+            #     b=f_vec,
+            #     x=sol,
+            #     pre=precond.mat,
+            #     # freedofs=fes.FreeDofs(),  # only necessary f no preconditioner
+            #     maxsteps=opts['maxsteps'],
+            #     tol=opts['tol'],
+            #     printrates=opts['printrates'],
+            #     callback=_count_iter,
+            # )
+            sol = CG(
+                mat=a_form.mat,
+                rhs=f_vec,
+                sol=sol,
                 pre=precond.mat,
+                initialize=False,
                 # freedofs=fes.FreeDofs(),  # only necessary f no preconditioner
                 maxsteps=opts['maxsteps'],
                 tol=opts['tol'],
@@ -1226,14 +1286,24 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             )
 
         # ------------------------------------------------------------------
-        # 3. Snapshots
+        # 3. Snapshots (Legacy and Per-Domain)
         # ------------------------------------------------------------------
+        # Legacy aggregated snapshots
         snap_path = fom_root / "snapshots.h5"
         if snap_path.exists():
             with h5py.File(snap_path, "r") as fh:
                 if "snapshots" in fh:
                     for key in fh["snapshots"]:
                         self.snapshots[key] = H5Serializer.load_dataset(fh[f"snapshots/{key}"])
+        
+        # Per-domain snapshots (loaded via FOMCollection.load/FOMResult.load usually,
+        # but we ensure they are covered here if missed or for direct access)
+        for domain in self.domains:
+            d_snap_path = fom_root / f"snapshots_{domain}.h5"
+            if d_snap_path.exists():
+                with h5py.File(d_snap_path, "r") as fh:
+                    if "field_snapshots" in fh:
+                        self.snapshots[domain] = H5Serializer.load_dataset(fh["field_snapshots"])
 
         # ------------------------------------------------------------------
         # 4. Result caches (Mirroring the hierarchy)
@@ -1429,7 +1499,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 # SOLVE: All excitations at this frequency
                 # Factorization is done once, each solve reuses it
                 # ============================================================
-                x_all = np.zeros((fes.ndof, n_excitations), dtype=complex)
+                x_all = np.zeros((fes.ndof, n_excitations))
 
                 for col in range(n_excitations):
                     # Scale pre-assembled RHS by omega
@@ -1541,7 +1611,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # ============================================================
         print(f"  Pre-assembling {n_excitations} RHS vectors...")
         
-        template_vec = fes.CreateVector()
+        template_vec = LinearForm(fes)
+        with TaskManager():
+            template_vec.Assemble()
+        template_vec = template_vec.vec
         rhs_base_vectors = []
         
         for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
@@ -1549,6 +1622,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             f += InnerProduct(
                 self.port_modes[port_m][mode_m], v.Trace()
             ) * ds(port_m)
+            
             with TaskManager():
                 f.Assemble()
             
@@ -1590,9 +1664,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             a_form += (1 / mu0) * curl(u) * curl(v) * dx
             a_form += -omega ** 2 * eps0 * u * v * dx
 
-            with TaskManager():
-                a_form.Assemble()
-
             # Prepare solver
             if st == 'direct':
                 with TaskManager():
@@ -1603,8 +1674,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             else:
                 precond = NGPreconditioner(a_form, iter_opts['precond'])
 
+            with TaskManager():
+                a_form.Assemble() # only assemble a_form after attaching a preconditioner
+
             # Solve for all excitations
-            x_all = np.zeros((fes.ndof, n_excitations), dtype=complex)
+            x_all = np.zeros((fes.ndof, n_excitations))
 
             for col in range(n_excitations):
                 rhs_scaled.data = omega * rhs_base_vectors[col]
@@ -2570,17 +2644,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     @staticmethod
     def _filter_eigenvalues(
         eigenvalues: np.ndarray,
+        eigenvectors: Optional[np.ndarray] = None,
         filter_static: bool = True,
         min_eigenvalue: float = None,
         n_modes: int = None
-    ) -> np.ndarray:
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
-        Filter and sort eigenvalues.
+        Filter and sort eigenvalues (and optionally eigenvectors).
 
         Parameters
         ----------
         eigenvalues : ndarray
             Raw eigenvalues
+        eigenvectors : ndarray, optional
+            Raw eigenvectors. Shape (ndof, k)
         filter_static : bool
             If True, remove static modes (eigenvalues <= min_eigenvalue)
         min_eigenvalue : float, optional
@@ -2590,35 +2667,43 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         Returns
         -------
-        filtered_eigenvalues : ndarray
-            Sorted, filtered eigenvalues
+        filtered : ndarray or tuple
+            Filtered eigenvalues, or (eigenvalues, eigenvectors) if eigenvectors provided
         """
         if min_eigenvalue is None:
             min_eigenvalue = FrequencyDomainSolver.DEFAULT_MIN_EIGENVALUE
 
         # Sort eigenvalues
-        eigs_sorted = np.sort(np.real(eigenvalues))
+        idx_sorted = np.argsort(np.real(eigenvalues))
+        eigs_sorted = np.real(eigenvalues[idx_sorted])
 
         # Filter static modes
         if filter_static:
-            eigs_sorted = eigs_sorted[eigs_sorted > min_eigenvalue]
+            mask = eigs_sorted > min_eigenvalue
+            idx_sorted = idx_sorted[mask]
+            eigs_sorted = eigs_sorted[mask]
 
         # Limit to n_modes
         if n_modes is not None and len(eigs_sorted) > n_modes:
+            idx_sorted = idx_sorted[:n_modes]
             eigs_sorted = eigs_sorted[:n_modes]
 
+        if eigenvectors is not None:
+            vecs_filtered = eigenvectors[:, idx_sorted]
+            return eigs_sorted, vecs_filtered
+        
         return eigs_sorted
 
-    def get_eigenvalues(
+    def calculate_resonant_modes(
         self,
         domain: str = None,
         filter_static: bool = True,
         min_eigenvalue: float = None,
         n_modes: int = None,
         sigma: float = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
         """
-        Compute eigenvalues from generalized eigenvalue problem K x = λ M x.
+        Compute eigenvalues and eigenvectors from generalized eigenvalue problem K x = λ M x.
 
         Parameters
         ----------
@@ -2636,9 +2721,24 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         Returns
         -------
-        eigenvalues : ndarray or dict
-            Eigenvalues (ω² values), sorted and filtered
+        modes : tuple or dict
+            Tuple of (eigenvalues, eigenvectors) if domain is specified.
+            Dict mapping domain names to (eigenvalues, eigenvectors) if domain is None.
         """
+        # Single-domain optimization: if only one domain, 'global' and domain are identical
+        if domain is None and self.n_domains == 1:
+            res = self.calculate_resonant_modes(domain=self.domains[0], filter_static=filter_static,
+                                               min_eigenvalue=min_eigenvalue, n_modes=n_modes, sigma=sigma)
+            return {self.domains[0]: res, 'global': res}
+        
+        if domain == 'global' and self.n_domains == 1:
+            domain = self.domains[0]
+
+        # Check cache first
+        cache_key = f"{domain}_{filter_static}_{min_eigenvalue}_{n_modes}_{sigma}"
+        if domain is not None and cache_key in self._resonant_mode_cache:
+            return self._resonant_mode_cache[cache_key]
+
         # Check if matrices are available
         has_per_domain = bool(self.M)
         has_global = self.M_global is not None
@@ -2646,15 +2746,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if not has_per_domain and not has_global:
             raise ValueError("Matrices not assembled. Call assemble_matrices() first.")
 
-        def compute_eigs(M_mat, K_mat, fes, label: str) -> np.ndarray:
-            """Compute eigenvalues for a single domain/global system."""
+        def compute_eigs(M_mat, K_mat, fes, label: str) -> Tuple[np.ndarray, np.ndarray]:
+            """Compute eigenvalues and eigenvectors for a single domain/global system."""
             # Get free DOFs (not constrained by Dirichlet BC)
             freedofs = fes.FreeDofs()
             free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]])
 
             if len(free_idx) == 0:
                 print(f"Warning: No free DOFs for {label}")
-                return np.array([])
+                return np.array([]), np.array([])
 
             # Extract submatrices for free DOFs
             if sp.issparse(M_mat):
@@ -2673,31 +2773,29 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # Determine shift for shift-invert
             shift = sigma
             if shift is None:
-                # Default shift: target middle of typical frequency range
-                # For GHz range: ω ~ 2π * 1e9, so ω² ~ 4e19
-                # But we'll use a more moderate default
-                shift = 1e18  # Target around 1 GHz
+                # Default shift: target around 1 GHz
+                shift = 1e18
 
             try:
                 # Try sparse eigenvalue solver with shift-invert
                 from scipy.sparse.linalg import eigsh
 
                 # Ensure matrices are in CSR format for efficiency
-                if sp.issparse(M_free):
-                    M_csr = sp.csr_matrix(M_free)
-                    K_csr = sp.csr_matrix(K_free)
-                else:
-                    M_csr = sp.csr_matrix(M_free)
-                    K_csr = sp.csr_matrix(K_free)
+                M_csr = sp.csr_matrix(M_free) if sp.issparse(M_free) else sp.csr_matrix(M_free)
+                K_csr = sp.csr_matrix(K_free) if sp.issparse(K_free) else sp.csr_matrix(K_free)
 
                 # Shift-invert mode: solve (K - σM)^{-1} M x = θ x
-                # where λ = σ + 1/θ
-                eigenvalues, _ = eigsh(
+                eigenvalues, eigenvectors_free = eigsh(
                     K_csr, k=k, M=M_csr,
                     sigma=shift, which='LM',
                     return_eigenvectors=True
                 )
-                return eigenvalues
+                
+                # Expand eigenvectors to full DOF count
+                eigenvectors = np.zeros((fes.ndof, len(eigenvalues)))
+                eigenvectors[free_idx, :] = eigenvectors_free
+                
+                return eigenvalues, eigenvectors
 
             except Exception as e1:
                 print(f"Note: Sparse eigsh failed for {label}: {e1}")
@@ -2709,34 +2807,23 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     K_dense = K_free.toarray() if sp.issparse(K_free) else np.array(K_free)
 
                     # Use scipy.linalg.eigh for generalized symmetric eigenvalue problem
-                    eigenvalues = sl.eigh(K_dense, M_dense, eigvals_only=True)
-                    return eigenvalues
+                    eigenvalues, eigenvectors_free = sl.eigh(K_dense, M_dense)
+                    
+                    # Expand eigenvectors
+                    eigenvectors = np.zeros((fes.ndof, len(eigenvalues)))
+                    eigenvectors[free_idx, :] = eigenvectors_free
+                    
+                    return eigenvalues, eigenvectors
 
                 except Exception as e2:
                     print(f"Warning: Dense eigh also failed for {label}: {e2}")
-                    print(f"         Trying regularized approach...")
+                    return np.array([]), np.array([])
 
-                    try:
-                        # Regularize M if needed
-                        M_dense = M_free.toarray() if sp.issparse(M_free) else np.array(M_free)
-                        K_dense = K_free.toarray() if sp.issparse(K_free) else np.array(K_free)
-
-                        # Add small regularization to M
-                        eps = 1e-10 * np.max(np.abs(M_dense.diagonal()))
-                        M_reg = M_dense + eps * np.eye(M_dense.shape[0])
-
-                        eigenvalues = sl.eigh(K_dense, M_reg, eigvals_only=True)
-                        return eigenvalues
-
-                    except Exception as e3:
-                        print(f"Error: All eigenvalue methods failed for {label}: {e3}")
-                        return np.array([])
-
-        def process_eigs(raw_eigs: np.ndarray) -> np.ndarray:
-            """Apply filtering to raw eigenvalues."""
+        def process_modes(raw_eigs: np.ndarray, raw_vecs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            """Apply filtering to raw eigenvalues and eigenvectors."""
             if len(raw_eigs) == 0:
-                return raw_eigs
-            return self._filter_eigenvalues(raw_eigs, filter_static, min_eigenvalue, n_modes)
+                return raw_eigs, raw_vecs
+            return self._filter_eigenvalues(raw_eigs, raw_vecs, filter_static, min_eigenvalue, n_modes)
 
         # Handle specific domain request
         if domain is not None:
@@ -2744,29 +2831,41 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 if not has_global:
                     raise ValueError("Global matrices not assembled. "
                                     "Call assemble_matrices(assemble_global=True)")
-                raw_eigs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
-                return process_eigs(raw_eigs)
+                raw_eigs, raw_vecs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
             elif domain in self.M:
-                raw_eigs = compute_eigs(self.M[domain], self.K[domain], self._fes[domain], domain)
-                return process_eigs(raw_eigs)
+                raw_eigs, raw_vecs = compute_eigs(self.M[domain], self.K[domain], self._fes[domain], domain)
             else:
                 raise KeyError(f"Domain '{domain}' not found. Available: {list(self.M.keys())}")
+            
+            res = process_modes(raw_eigs, raw_vecs)
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         # Return all available
         results = {}
 
-        # Per-domain eigenvalues
+        # Per-domain resonant modes
         for d in self.domains:
             if d in self.M and d in self._fes:
-                raw_eigs = compute_eigs(self.M[d], self.K[d], self._fes[d], d)
-                results[d] = process_eigs(raw_eigs)
+                raw_eigs, raw_vecs = compute_eigs(self.M[d], self.K[d], self._fes[d], d)
+                results[d] = process_modes(raw_eigs, raw_vecs)
 
-        # Global eigenvalues
+        # Global resonant modes
         if has_global and self._fes_global is not None:
-            raw_eigs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
-            results['global'] = process_eigs(raw_eigs)
+            raw_eigs, raw_vecs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
+            results['global'] = process_modes(raw_eigs, raw_vecs)
 
         return results
+
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
 
     def get_resonant_frequencies(
             self,
@@ -2819,7 +2918,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         else:
             sigma = None
 
-        eigs = self.get_eigenvalues(
+        modes = self.calculate_resonant_modes(
             domain=domain,
             filter_static=filter_static,
             min_eigenvalue=min_eigenvalue,
@@ -2827,14 +2926,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             sigma=sigma
         )
 
-        if isinstance(eigs, dict):
+        if isinstance(modes, dict):
             # If dict, prefer global, else combine all
-            if 'global' in eigs:
-                all_eigs = eigs['global']
+            if 'global' in modes:
+                all_eigs = modes['global'][0]
             else:
-                all_eigs = np.concatenate(list(eigs.values()))
+                all_eigs = np.concatenate([v[0] for v in modes.values()])
         else:
-            all_eigs = eigs
+            all_eigs = modes[0]
 
         # Convert to frequencies
         eigs_pos = all_eigs[all_eigs > 0]
@@ -3366,6 +3465,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     f"Snapshots for domain '{domain}' not available. "
                     f"Available: {list(self.snapshots.keys())}"
                 )
+            print(list(self._fes.keys()))
             return (
                 domain,
                 self._fes[domain],

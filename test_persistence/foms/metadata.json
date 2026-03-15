@@ -1,0 +1,12 @@
+{
+    "n_solids": 1,
+    "solids": [
+        {
+            "domain": "cell_1",
+            "n_ports": 0,
+            "ports": [],
+            "n_modes_per_port": 1
+        }
+    ],
+    "timestamp": "2026-03-14T23:22:13.292796"
+}

@@ -114,6 +114,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self._r_global: Optional[int] = None
         self._concatenated: Optional['ConcatenatedSystem'] = None
 
+        # Caches
+        self._resonant_mode_cache = {}
+
         # Snapshot storage for field reconstruction
         self._x_r_snapshots: Optional[Dict[str, np.ndarray]] = None
 
@@ -261,106 +264,112 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return eigs_sorted
 
-    def get_eigenvalues(
-        self,
-        domain: str = None,
-        source: str = 'auto',
-        filter_static: bool = True,
-        min_eigenvalue: float = None,
-        n_modes: int = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    def calculate_resonant_modes(
+            self,
+            domain: str = None,
+            source: str = 'auto',
+            filter_static: bool = True,
+            min_eigenvalue: float = None,
+            n_modes: int = None
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
         """
-        Compute eigenvalues of reduced system matrix A_r.
-
-        For the system (A_r - ω²I)x = ωB_r u, eigenvalues of A_r give ω².
-
-        **Default behavior**: Returns global (concatenated) eigenvalues for
-        multi-domain structures, with static modes filtered out.
-
-        Parameters
-        ----------
-        domain : str, optional
-            Specific domain name, or 'global' for concatenated system.
-            If None, uses 'source' parameter to determine behavior.
-        source : str
-            Only used when domain is None:
-            - 'auto': Returns global if available, else single domain (default)
-            - 'global': Returns only global eigenvalues
-            - 'per_domain': Returns dict of per-domain eigenvalues
-            - 'all': Returns dict with both global and per-domain
-        filter_static : bool
-            If True (default), remove static modes (eigenvalues <= min_eigenvalue)
-        min_eigenvalue : float, optional
-            Threshold for static mode filtering. Default: 1.0 (ω² > 1)
-        n_modes : int, optional
-            Return only first n_modes eigenvalues (after filtering)
-
-        Returns
-        -------
-        eigenvalues : ndarray or dict
-            Eigenvalues (ω² values), sorted and filtered
+        Compute eigenvalues and eigenvectors for the reduced system.
         """
         if not self._is_reduced:
             raise ValueError("Must call reduce() first")
 
-        def process_eigs(raw_eigs: np.ndarray) -> np.ndarray:
-            return self._filter_eigenvalues(raw_eigs, filter_static, min_eigenvalue, n_modes)
+        # Check cache
+        cache_params = {
+            'domain': domain,
+            'source': source,
+            'filter_static': filter_static,
+            'min_eigenvalue': min_eigenvalue,
+            'n_modes': n_modes
+        }
+        cache_key = tuple(sorted(cache_params.items()))
+        if cache_key in self._resonant_mode_cache:
+            return self._resonant_mode_cache[cache_key]
+
+        def process_modes(raw_eigs: np.ndarray, raw_vecs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            # Use FrequencyDomainSolver's filter helper
+            from solvers.frequency_domain import FrequencyDomainSolver
+            return FrequencyDomainSolver._filter_eigenvalues(raw_eigs, raw_vecs, filter_static, min_eigenvalue, n_modes)
+
+        def get_raw_modes(A):
+             eigs, vecs = np.linalg.eigh(A)
+             return eigs, vecs
 
         # Specific domain requested
         if domain is not None:
             if domain == 'global':
-                raw_eigs = self._get_global_eigenvalues_raw()
+                raw_eigs, raw_vecs = get_raw_modes(self._get_global_matrix_raw())
             elif domain in self._A_r:
-                raw_eigs = np.linalg.eigvalsh(self._A_r[domain])
+                raw_eigs, raw_vecs = get_raw_modes(self._A_r[domain])
             else:
                 raise KeyError(f"Domain '{domain}' not found. "
                                f"Available: {list(self._A_r.keys())} + ['global']")
-            return process_eigs(raw_eigs)
+            res = process_modes(raw_eigs, raw_vecs)
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         # Auto-detect based on source parameter
-        if source == 'auto':
-            raw_eigs = self._get_global_eigenvalues_raw()
-            return process_eigs(raw_eigs)
-
-        elif source == 'global':
-            raw_eigs = self._get_global_eigenvalues_raw()
-            return process_eigs(raw_eigs)
+        if source == 'auto' or source == 'global':
+            raw_eigs, raw_vecs = get_raw_modes(self._get_global_matrix_raw())
+            res = process_modes(raw_eigs, raw_vecs)
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         elif source == 'per_domain':
-            return {
-                d: process_eigs(np.linalg.eigvalsh(self._A_r[d]))
+            res = {
+                d: process_modes(*get_raw_modes(self._A_r[d]))
                 for d in self.domains
             }
+            self._resonant_mode_cache[cache_key] = res
+            return res
 
         elif source == 'all':
             results = {
-                d: process_eigs(np.linalg.eigvalsh(self._A_r[d]))
+                d: process_modes(*get_raw_modes(self._A_r[d]))
                 for d in self.domains
             }
             try:
-                results['global'] = process_eigs(self._get_global_eigenvalues_raw())
-            except ValueError:
+                results['global'] = process_modes(*get_raw_modes(self._get_global_matrix_raw()))
+            except (ValueError, RuntimeError):
                 pass
+            self._resonant_mode_cache[cache_key] = results
             return results
 
         else:
             raise ValueError(f"Invalid source: {source}. "
                              "Use 'auto', 'global', 'per_domain', or 'all'")
 
-    def _get_global_eigenvalues_raw(self) -> np.ndarray:
-        """Get raw eigenvalues from the global (concatenated) system."""
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
+
+    def _get_global_matrix_raw(self, auto_concatenate: bool = False) -> np.ndarray:
+        """Get raw global (concatenated) matrix."""
         if self._A_r_global is not None:
-            return np.linalg.eigvalsh(self._A_r_global)
+            return self._A_r_global
 
         if self._concatenated is not None and self._concatenated.A_coupled is not None:
-            return np.linalg.eigvalsh(self._concatenated.A_coupled)
+            return self._concatenated.A_coupled
 
         if self.n_domains == 1:
-            return np.linalg.eigvalsh(self._A_r[self.domains[0]])
+            return self._A_r[self.domains[0]]
 
-        print("Auto-concatenating to compute global eigenvalues...")
+        if not auto_concatenate:
+            raise RuntimeError("Global matrix not available. Call concatenate() first.")
+
+        print("Auto-concatenating to get global matrix...")
         self.concatenate()
-        return np.linalg.eigvalsh(self._A_r_global)
+        return self._A_r_global
 
     def get_resonant_frequencies(
             self,
@@ -405,7 +414,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         else:
             min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
 
-        eigs = self.get_eigenvalues(
+        modes = self.calculate_resonant_modes(
             domain=domain,
             source=source,
             filter_static=filter_static,
@@ -413,10 +422,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             n_modes=None  # Don't limit here, do it after freq conversion
         )
 
-        if isinstance(eigs, dict):
-            all_eigs = np.concatenate(list(eigs.values()))
+        if isinstance(modes, dict):
+            all_eigs = np.concatenate([v[0] for v in modes.values()])
         else:
-            all_eigs = eigs
+            all_eigs = modes[0]
 
         # Eigenvalues are already filtered, but ensure positive for sqrt
         eigs_pos = all_eigs[all_eigs > 0]
@@ -432,7 +441,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """
         Compute or retrieve eigenmodes for the reduced structure(s).
         """
-        res = super().get_eigenmodes(**kwargs)
+        res = self.calculate_resonant_modes(**kwargs)
         
         # Hierarchical save
         if _auto_save:
@@ -447,11 +456,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         # Determine path based on single vs multi domain
         project_path = Path(self.solver._project_path)
         if self.n_domains == 1:
-            # fds/fom/rom -> fds/fom/rom/eigenmode
-            save_path = project_path / "fds" / "fom" / "rom" / "eigenmode"
+            # fds/fom/rom -> fds/fom/rom/eigenmodes
+            save_path = project_path / "fds" / "fom" / "rom" / "eigenmodes"
         else:
-            # fds/foms/roms -> fds/foms/roms/eigenmode
-            save_path = project_path / "fds" / "foms" / "roms" / "eigenmode"
+            # fds/foms/roms -> fds/foms/roms/eigenmodes
+            save_path = project_path / "fds" / "foms" / "roms" / "eigenmodes"
             
         try:
             self.save_eigenmodes(save_path, **kwargs)
@@ -651,10 +660,18 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         Save ModelOrderReduction data to disk.
         
         Saves reduced matrices (A_r, B_r, W, Q_L_inv) to separate files in matrices/
-        and S/Z parameters to s.h5/z.h5.
+        and S/Z parameters, snapshots, and eigenmodes to their respective folders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
+
+        # Subfolders
+        s_path_dir = path / "s"
+        z_path_dir = path / "z"
+        snap_path_dir = path / "snapshots"
+        eig_path_dir = path / "eigenmodes"
+        for p in [s_path_dir, z_path_dir, snap_path_dir, eig_path_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
         # 1. Save reduced and projection matrices to modular files
         mat_path = path / "matrices"
@@ -666,28 +683,67 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
              h5py.File(mat_path / "Q_L_inv.h5", "a") as fq:
             for domain in self.domains:
                 if domain in self._A_r:
+                    # Save with domain suffix for modularity
                     H5Serializer.save_dataset(fa, domain, self._A_r.get(domain))
                     H5Serializer.save_dataset(fb, domain, self._B_r.get(domain))
                     H5Serializer.save_dataset(fw, domain, self._W.get(domain))
                     H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
+                    
+                    # Also save individual files for user-friendly access
+                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W), ("Q_L_inv", self._Q_L_inv)]:
+                         with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
+                             H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
-        # 2. Save S and Z results separately
+        # 2. Save S and Z results
         if self._Z_matrix is not None:
-            with h5py.File(path / "z.h5", "a") as f:
+             z_file = "z.h5" 
+             if self.n_domains == 1: z_file = f"z_{self.domains[0]}.h5"
+             with h5py.File(z_path_dir / z_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._Z_matrix)
         if self._S_matrix is not None:
-            with h5py.File(path / "s.h5", "a") as f:
+             s_file = "s.h5"
+             if self.n_domains == 1: s_file = f"s_{self.domains[0]}.h5"
+             with h5py.File(s_path_dir / s_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._S_matrix)
 
-        # 3. Save snapshots and frequencies to snapshots.h5
-        with h5py.File(path / "snapshots.h5", "a") as f:
-            if hasattr(self, 'frequencies') and self.frequencies is not None:
-                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
-            if self._x_r_snapshots:
-                for domain, snaps in self._x_r_snapshots.items():
-                    H5Serializer.save_dataset(f, f"x_r_snapshots/{domain}", snaps)
+        # 3. Save snapshots and frequencies
+        snap_file = "snapshots.h5"
+        if self.n_domains == 1: snap_file = f"snapshots_{self.domains[0]}.h5"
         
-        # 4. Save metadata
+        with h5py.File(snap_path_dir / snap_file, "a") as f:
+            if self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if self._x_r_snapshots is not None:
+                group = f.require_group("x_r_snapshots")
+                for domain, snapshots_data in self._x_r_snapshots.items():
+                    H5Serializer.save_dataset(group, domain, snapshots_data)
+
+        # 4. Save eigenmodes ONLY if already computed (passive)
+        cache = getattr(self, '_resonant_mode_cache', {})
+        if cache:
+            # Find a 'source=all' or 'source=auto' result if possible
+            modes = None
+            for key, val in self._resonant_mode_cache.items():
+                if isinstance(val, dict):
+                    modes = val
+                    break
+            if modes is None:
+                # Just use whatever is there if it's a single tuple
+                pass 
+                
+            if modes:
+                try:
+                    eig_file = "eigenmodes.h5"
+                    if self.n_domains == 1: eig_file = f"eigenmodes_{self.domains[0]}.h5"
+                    with h5py.File(eig_path_dir / eig_file, "a") as f:
+                        for domain, (eigs, vecs) in modes.items():
+                            group = f.require_group(domain)
+                            H5Serializer.save_dataset(group, "eigenvalues", eigs)
+                            H5Serializer.save_dataset(group, "eigenvectors", vecs)
+                except Exception as e:
+                    print(f"Note: Could not save reduced eigenmodes: {e}")
+        
+        # 5. Save metadata
         metadata = {
             "domains": self.domains,
             "n_domains": self.n_domains,
@@ -725,6 +781,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._n_ports_external = metadata["n_ports_external"]
         rom._n_modes_per_port = metadata["n_modes_per_port"]
         
+        # Initialize caches
+        rom._resonant_mode_cache = {}
+        
         # Initialize result dicts for PlotMixin
         rom._S_dict = None
         rom._Z_dict = None
@@ -757,22 +816,20 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         # 1. Load matrices from modular files or legacy matrices.h5
         mat_path = path / "matrices"
         if mat_path.exists():
-            with h5py.File(mat_path / "A_r.h5", "r") as f:
-                for domain in rom.domains:
-                    if domain in f:
-                        rom._A_r[domain] = H5Serializer.load_dataset(f[domain])
-            with h5py.File(mat_path / "B_r.h5", "r") as f:
-                for domain in rom.domains:
-                    if domain in f:
-                        rom._B_r[domain] = H5Serializer.load_dataset(f[domain])
-            with h5py.File(mat_path / "W.h5", "r") as f:
-                for domain in rom.domains:
-                    if domain in f:
-                        rom._W[domain] = H5Serializer.load_dataset(f[domain])
-            with h5py.File(mat_path / "Q_L_inv.h5", "r") as f:
-                for domain in rom.domains:
-                    if domain in f:
-                        rom._Q_L_inv[domain] = H5Serializer.load_dataset(f[domain])
+             for mname in ["A_r", "B_r", "W", "Q_L_inv"]:
+                 target_dict = getattr(rom, f"_{mname}")
+                 mfile_agg = mat_path / f"{mname}.h5"
+                 
+                 # Try individual files first, then fallback to aggregated
+                 for domain in rom.domains:
+                     mfile_indiv = mat_path / f"{mname}_{domain}.h5"
+                     if mfile_indiv.exists():
+                         with h5py.File(mfile_indiv, "r") as f:
+                             target_dict[domain] = H5Serializer.load_dataset(f["data"])
+                     elif mfile_agg.exists():
+                         with h5py.File(mfile_agg, "r") as f:
+                             if domain in f:
+                                 target_dict[domain] = H5Serializer.load_dataset(f[domain])
         elif (path / "matrices.h5").exists():
             with h5py.File(path / "matrices.h5", "r") as f:
                 for domain in rom.domains:
@@ -783,39 +840,58 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                         rom._W[domain] = H5Serializer.load_dataset(group["W"])
                         rom._Q_L_inv[domain] = H5Serializer.load_dataset(group["Q_L_inv"])
 
-        # 2. Load S/Z results from dedicated files
+        # 2. Load S/Z results
         rom._Z_matrix = None
-        if (path / "z.h5").exists():
-            with h5py.File(path / "z.h5", "r") as f:
-                rom._Z_matrix = H5Serializer.load_dataset(f["data"])
-        
         rom._S_matrix = None
-        if (path / "s.h5").exists():
-            with h5py.File(path / "s.h5", "r") as f:
-                rom._S_matrix = H5Serializer.load_dataset(f["data"])
+        
+        z_files = ["z.h5"]
+        if rom.n_domains == 1: z_files.insert(0, f"z_{rom.domains[0]}.h5")
+        for zf in z_files:
+            zp = path / "z" / zf
+            if not zp.exists(): zp = path / zf
+            if zp.exists():
+                with h5py.File(zp, "r") as f:
+                    rom._Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                    if rom._Z_matrix is not None: break
+        
+        s_files = ["s.h5"]
+        if rom.n_domains == 1: s_files.insert(0, f"s_{rom.domains[0]}.h5")
+        for sf in s_files:
+            sp = path / "s" / sf
+            if not sp.exists(): sp = path / sf
+            if sp.exists():
+                with h5py.File(sp, "r") as f:
+                    rom._S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                    if rom._S_matrix is not None: break
 
         # 3. Load snapshots and frequencies
         rom.frequencies = None
         rom._x_r_snapshots = {}
-        if (path / "snapshots.h5").exists():
-            with h5py.File(path / "snapshots.h5", "r") as f:
-                if "frequencies" in f:
-                    rom.frequencies = H5Serializer.load_dataset(f["frequencies"])
-                if "x_r_snapshots" in f:
-                    group = f["x_r_snapshots"]
-                    # Support both grouped and flat legacy storage
-                    if isinstance(group, h5py.Group):
-                        for domain in rom.domains:
-                            if domain in group:
-                                rom._x_r_snapshots[domain] = H5Serializer.load_dataset(group[domain])
-                    else:
-                        rom._x_r_snapshots = H5Serializer.load_dataset(group)
-                
-                # Support legacy loading of Z/S
-                if rom._Z_matrix is None and "Z_matrix" in f:
-                    rom._Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
-                if rom._S_matrix is None and "S_matrix" in f:
-                    rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
+        snap_files = ["snapshots.h5"]
+        if rom.n_domains == 1: snap_files.insert(0, f"snapshots_{rom.domains[0]}.h5")
+        
+        for snap_f in snap_files:
+            snapp = path / "snapshots" / snap_f
+            if not snapp.exists(): snapp = path / snap_f
+            if snapp.exists():
+                with h5py.File(snapp, "r") as f:
+                    if rom.frequencies is None:
+                        rom.frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
+                    
+                    if "x_r_snapshots" in f:
+                        group = f["x_r_snapshots"]
+                        if isinstance(group, h5py.Group):
+                            for domain in rom.domains:
+                                if domain in group:
+                                    rom._x_r_snapshots[domain] = H5Serializer.load_dataset(group[domain])
+                        else:
+                            rom._x_r_snapshots = H5Serializer.load_dataset(group)
+                    
+                    # Support legacy loading of Z/S
+                    if rom._Z_matrix is None and "Z_matrix" in f:
+                        rom._Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
+                    if rom._S_matrix is None and "S_matrix" in f:
+                        rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
 
         # 4. Load concatenated system if it exists
         concat_path = path / "concat"

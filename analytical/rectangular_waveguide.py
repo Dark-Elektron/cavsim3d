@@ -5,8 +5,10 @@ from typing import Dict, Union, List, Tuple, Optional
 from core.constants import c0, mu0, eps0, Z0
 import itertools
 
+from utils.plot_mixin import PlotMixin
 
-class RWGAnalytical:
+
+class RWGAnalytical(PlotMixin):
     """
     Analytical Z and S parameters for rectangular waveguide.
 
@@ -16,21 +18,46 @@ class RWGAnalytical:
     ----------
     a : float
         Width (broad dimension) [m]
-    b : float
-        Height [m]
     L : float
         Length [m]
+    b : float, optional
+        Height [m] (default: a/2)
+    freq_range : tuple of float, optional
+        Frequency range (f_min, f_max) in Hz for auto-sampling.
+        If None, defaults to (0.5·fc, 2.5·fc) based on the TE10 cutoff.
+    n_samples : int
+        Number of frequency samples (default: 1000).
     """
 
-    def __init__(self, a: float, L: float, b: float = None):
+    def __init__(
+        self,
+        a: float,
+        L: float,
+        b: float = None,
+        freq_range: Optional[Tuple[float, float]] = None,
+        n_samples: int = 1000,
+    ):
         self.a = a
         self.b = b if b is not None else a / 2
         self.L = L
 
         # Cutoff quantities for TE10 mode
-        self.kc = np.pi / self.a  # Cutoff wavenumber
-        self.wc = self.kc * c0    # Cutoff angular frequency
+        self.kc = np.pi / self.a   # Cutoff wavenumber
+        self.wc = self.kc * c0     # Cutoff angular frequency
         self.fc = c0 / (2 * self.a)  # Cutoff frequency [Hz]
+
+        # Frequency grid config
+        self._freq_range = freq_range  # (f_min, f_max) Hz, or None → physics default
+        self._n_samples  = n_samples
+
+        # Cache — populated lazily on first plot call (or manually via compute())
+        self._frequencies: Optional[np.ndarray] = None
+        self._S_dict: Optional[Dict[str, np.ndarray]] = None
+        self._Z_dict: Optional[Dict[str, np.ndarray]] = None
+
+    # =========================================================================
+    # Core electromagnetic quantities
+    # =========================================================================
 
     def wave_impedance(self, freq: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -51,10 +78,7 @@ class RWGAnalytical:
         freq = np.atleast_1d(freq).astype(complex)
         omega = 2 * np.pi * freq
         s = 1j * omega
-
-        ZTE = s * Z0 / np.sqrt(s**2 + self.wc**2)
-
-        return ZTE
+        return s * Z0 / np.sqrt(s**2 + self.wc**2)
 
     def propagation_constant(self, freq: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -74,16 +98,9 @@ class RWGAnalytical:
         """
         freq = np.atleast_1d(freq).astype(complex)
         omega = 2 * np.pi * freq
-        ZTE = self.wave_impedance(freq)
+        return omega * mu0 / self.wave_impedance(freq)
 
-        kz = omega * mu0 / ZTE
-
-        return kz
-
-    def z_parameters(
-        self,
-        freq: Union[float, np.ndarray]
-    ) -> Dict[str, np.ndarray]:
+    def z_parameters(self, freq: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
         """
         Compute Z-parameters for waveguide section.
 
@@ -98,14 +115,11 @@ class RWGAnalytical:
         Returns
         -------
         Z : dict
-            Dictionary with 'Z11', 'Z21', 'Z12', 'Z22' arrays
+            Dictionary with 'Z11', 'Z21', 'Z12', 'Z22', 'frequencies'
         """
         freq = np.atleast_1d(freq).astype(complex)
-
         ZTE = self.wave_impedance(freq)
-        kz = self.propagation_constant(freq)
-
-        kzL = kz * self.L
+        kzL = self.propagation_constant(freq) * self.L
 
         Z11 = -1j * ZTE / np.tan(kzL)
         Z21 = -1j * ZTE / np.sin(kzL)
@@ -130,7 +144,7 @@ class RWGAnalytical:
         ----------
         freq : float or ndarray
             Frequency [Hz]
-        Z0_ref : float, ndarray, or 'ZTE'
+        Z0_ref : float, ndarray, or str
             Reference impedance for S-parameter conversion.
             - 'ZTE': Use frequency-dependent wave impedance (matched case)
             - float: Use fixed reference impedance
@@ -139,24 +153,21 @@ class RWGAnalytical:
         Returns
         -------
         S : dict
-            Dictionary with 'S11', 'S21', 'S12', 'S22' arrays
+            Dictionary with 'S11', 'S21', 'S12', 'S22', 'frequencies'
         """
         freq = np.atleast_1d(freq).astype(complex)
         n_freq = len(freq)
 
-        # Get Z-parameters
         Z = self.z_parameters(freq)
         ZTE = self.wave_impedance(freq)
 
-        # Determine reference impedance
         if isinstance(Z0_ref, str) and Z0_ref.upper() == 'ZTE':
-            Z0_array = ZTE  # Use wave impedance (frequency-dependent)
+            Z0_array = ZTE
         elif np.isscalar(Z0_ref):
             Z0_array = np.full(n_freq, Z0_ref, dtype=complex)
         else:
             Z0_array = np.atleast_1d(Z0_ref).astype(complex)
 
-        # Compute S-parameters at each frequency
         S11 = np.zeros(n_freq, dtype=complex)
         S21 = np.zeros(n_freq, dtype=complex)
 
@@ -165,7 +176,6 @@ class RWGAnalytical:
                 [Z['Z11'][i], Z['Z12'][i]],
                 [Z['Z21'][i], Z['Z22'][i]]
             ])
-
             S_mat = self._z_to_s_matrix(Z_mat, Z0_array[i])
             S11[i] = S_mat[0, 0]
             S21[i] = S_mat[1, 0]
@@ -178,15 +188,8 @@ class RWGAnalytical:
             'frequencies': freq.real
         }
 
-    def s_parameters_matched(
-        self,
-        freq: Union[float, np.ndarray]
-    ) -> Dict[str, np.ndarray]:
-        """
-        Compute S-parameters with matched (wave impedance) reference.
-
-        This gives S11 = 0 for a lossless matched line.
-        """
+    def s_parameters_matched(self, freq: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
+        """Compute S-parameters with matched (wave impedance) reference. S11 = 0."""
         return self.s_parameters(freq, Z0_ref='ZTE')
 
     def s_parameters_with_reference(
@@ -194,9 +197,7 @@ class RWGAnalytical:
         freq: Union[float, np.ndarray],
         Z0_ref: float = Z0
     ) -> Dict[str, np.ndarray]:
-        """
-        Compute S-parameters with fixed reference impedance.
-        """
+        """Compute S-parameters with fixed reference impedance."""
         return self.s_parameters(freq, Z0_ref=Z0_ref)
 
     @staticmethod
@@ -204,33 +205,28 @@ class RWGAnalytical:
         """Convert 2x2 Z-parameter matrix to S-parameter matrix."""
         n = Z.shape[0]
         I = np.eye(n, dtype=complex)
-
         Zn = Z - Z0 * I
         Zd = Z + Z0 * I
-
-        S = Zn @ np.linalg.inv(Zd)
-        return S
+        return Zn @ np.linalg.inv(Zd)
 
     def abcd_parameters(self, freq: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
         """Compute ABCD (transmission) parameters."""
         freq = np.atleast_1d(freq).astype(complex)
-
         ZTE = self.wave_impedance(freq)
-        kz = self.propagation_constant(freq)
-        kzL = kz * self.L
+        kzL = self.propagation_constant(freq) * self.L
 
         A = np.cos(kzL)
-        B = 1j * ZTE * np.sin(kzL)
-        C = 1j * np.sin(kzL) / ZTE
-        D = A.copy()
-
         return {
             'A': A,
-            'B': B,
-            'C': C,
-            'D': D,
+            'B': 1j * ZTE * np.sin(kzL),
+            'C': 1j * np.sin(kzL) / ZTE,
+            'D': A.copy(),
             'frequencies': freq.real
         }
+
+    # =========================================================================
+    # Resonant / cutoff quantities
+    # =========================================================================
 
     def resonant_frequencies(self, n_modes: int = 10) -> np.ndarray:
         """
@@ -249,17 +245,14 @@ class RWGAnalytical:
             Resonant frequencies [Hz]
         """
         freqs = []
-
         for p in range(1, n_modes + 1):
             kz = p * np.pi / self.L
             k = np.sqrt(self.kc**2 + kz**2)
-            f = c0 * k / (2 * np.pi)
-            freqs.append(f)
-
+            freqs.append(c0 * k / (2 * np.pi))
         return np.array(freqs)
 
     # =========================================================================
-    # Port/Waveguide Eigenmode Methods (2D cross-section modes)
+    # Port / waveguide eigenmode methods (2D cross-section)
     # =========================================================================
 
     def cutoff_wavenumber(self, m: int, n: int) -> float:
@@ -267,37 +260,12 @@ class RWGAnalytical:
         Compute cutoff wavenumber for TE_mn or TM_mn mode.
 
         kc_mn = sqrt((m*pi/a)^2 + (n*pi/b)^2)
-
-        Parameters
-        ----------
-        m, n : int
-            Mode indices
-
-        Returns
-        -------
-        kc : float
-            Cutoff wavenumber [rad/m]
         """
         return np.sqrt((m * np.pi / self.a)**2 + (n * np.pi / self.b)**2)
 
     def cutoff_frequency(self, m: int, n: int) -> float:
-        """
-        Compute cutoff frequency for TE_mn or TM_mn mode.
-
-        fc_mn = c0 * kc_mn / (2*pi)
-
-        Parameters
-        ----------
-        m, n : int
-            Mode indices
-
-        Returns
-        -------
-        fc : float
-            Cutoff frequency [Hz]
-        """
-        kc = self.cutoff_wavenumber(m, n)
-        return c0 * kc / (2 * np.pi)
+        """Compute cutoff frequency for TE_mn or TM_mn mode [Hz]."""
+        return c0 * self.cutoff_wavenumber(m, n) / (2 * np.pi)
 
     def port_eigenmodes(
         self,
@@ -308,14 +276,9 @@ class RWGAnalytical:
         """
         Compute all waveguide port eigenmodes (2D cross-section modes).
 
-        This computes the cutoff frequencies/wavenumbers for all valid TE and TM
-        modes of the rectangular waveguide cross-section, sorted by cutoff frequency.
-
         Mode validity rules:
-        - TE_mn: Valid if m >= 0, n >= 0, and (m,n) != (0,0)
-                 At least one of m or n must be > 0
-        - TM_mn: Valid if m >= 1 and n >= 1
-                 Both indices must be positive
+        - TE_mn: m >= 0, n >= 0, (m,n) != (0,0)
+        - TM_mn: m >= 1 and n >= 1
 
         Parameters
         ----------
@@ -324,9 +287,7 @@ class RWGAnalytical:
         max_index : int
             Maximum index to search (for m, n)
         return_format : str
-            'list': Return list of mode dictionaries sorted by fc
-            'dict': Return {mode_label: info_dict}
-            'array': Return array of cutoff frequencies
+            'list', 'dict', or 'array'
 
         Returns
         -------
@@ -339,51 +300,41 @@ class RWGAnalytical:
 
         for m in range(max_index + 1):
             for n in range(max_index + 1):
-                # Skip (0,0) - no valid mode
                 if m == 0 and n == 0:
                     continue
 
                 kc = self.cutoff_wavenumber(m, n)
                 fc = c0 * kc / (2 * np.pi)
 
-                # TE modes: valid for any (m,n) != (0,0)
                 modes.append({
                     'label': f'TE{m}{n}',
                     'type': 'TE',
-                    'm': m,
-                    'n': n,
+                    'm': m, 'n': n,
                     'kc': kc,
                     'fc_Hz': fc,
                     'fc_GHz': fc / 1e9,
                     'lambda_c': c0 / fc if fc > 0 else np.inf
                 })
 
-                # TM modes: valid only for m >= 1 and n >= 1
                 if m >= 1 and n >= 1:
                     modes.append({
                         'label': f'TM{m}{n}',
                         'type': 'TM',
-                        'm': m,
-                        'n': n,
+                        'm': m, 'n': n,
                         'kc': kc,
                         'fc_Hz': fc,
                         'fc_GHz': fc / 1e9,
                         'lambda_c': c0 / fc if fc > 0 else np.inf
                     })
 
-        # Sort by cutoff frequency, then by mode type (TE before TM), then by indices
         modes.sort(key=lambda x: (x['fc_Hz'], 0 if x['type'] == 'TE' else 1, x['m'], x['n']))
-
-        # Limit to requested number
         modes = modes[:n_modes]
 
         if return_format == 'array':
             return np.array([m['fc_Hz'] for m in modes])
-
         elif return_format == 'dict':
             return {m['label']: m for m in modes}
-
-        else:  # 'list'
+        else:
             return modes
 
     def port_eigenmodes_by_type(
@@ -391,24 +342,8 @@ class RWGAnalytical:
         n_modes: int = 10,
         max_index: int = 10
     ) -> Dict[str, List[Dict]]:
-        """
-        Compute port eigenmodes grouped by type (TE and TM).
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of modes per type to return
-        max_index : int
-            Maximum index to search
-
-        Returns
-        -------
-        modes : dict
-            {'TE': [list of TE modes], 'TM': [list of TM modes]}
-            Each list is sorted by cutoff frequency
-        """
-        te_modes = []
-        tm_modes = []
+        """Compute port eigenmodes grouped by type (TE and TM)."""
+        te_modes, tm_modes = [], []
 
         for m in range(max_index + 1):
             for n in range(max_index + 1):
@@ -417,37 +352,23 @@ class RWGAnalytical:
 
                 kc = self.cutoff_wavenumber(m, n)
                 fc = c0 * kc / (2 * np.pi)
-
-                mode_info = {
-                    'm': m,
-                    'n': n,
-                    'kc': kc,
-                    'fc_Hz': fc,
-                    'fc_GHz': fc / 1e9,
+                base = {
+                    'm': m, 'n': n, 'kc': kc,
+                    'fc_Hz': fc, 'fc_GHz': fc / 1e9,
                     'lambda_c': c0 / fc if fc > 0 else np.inf
                 }
 
-                # TE mode
-                te_mode = mode_info.copy()
-                te_mode['label'] = f'TE{m}{n}'
-                te_mode['type'] = 'TE'
-                te_modes.append(te_mode)
+                te = {**base, 'label': f'TE{m}{n}', 'type': 'TE'}
+                te_modes.append(te)
 
-                # TM mode (only if m >= 1 and n >= 1)
                 if m >= 1 and n >= 1:
-                    tm_mode = mode_info.copy()
-                    tm_mode['label'] = f'TM{m}{n}'
-                    tm_mode['type'] = 'TM'
-                    tm_modes.append(tm_mode)
+                    tm = {**base, 'label': f'TM{m}{n}', 'type': 'TM'}
+                    tm_modes.append(tm)
 
-        # Sort by cutoff frequency
         te_modes.sort(key=lambda x: (x['fc_Hz'], x['m'], x['n']))
         tm_modes.sort(key=lambda x: (x['fc_Hz'], x['m'], x['n']))
 
-        return {
-            'TE': te_modes[:n_modes],
-            'TM': tm_modes[:n_modes]
-        }
+        return {'TE': te_modes[:n_modes], 'TM': tm_modes[:n_modes]}
 
     def get_port_mode_wave_impedance(
         self,
@@ -459,39 +380,20 @@ class RWGAnalytical:
         """
         Compute wave impedance for a specific port mode at given frequency.
 
-        TE modes: Z_TE = ω * μ0 / β = s * Z0 / sqrt(s^2 + ωc^2)
-        TM modes: Z_TM = β / (ω * ε0) = Z0 * sqrt(s^2 + ωc^2) / s
-
-        Parameters
-        ----------
-        m, n : int
-            Mode indices
-        mode_type : str
-            'TE' or 'TM'
-        freq : float or ndarray
-            Frequency [Hz]
-
-        Returns
-        -------
-        Z : ndarray
-            Wave impedance (complex)
+        TE: Z_TE = s * Z0 / sqrt(s^2 + ωc^2)
+        TM: Z_TM = Z0 * sqrt(s^2 + ωc^2) / s
         """
         freq = np.atleast_1d(freq).astype(complex)
-
-        kc = self.cutoff_wavenumber(m, n)
-        wc = kc * c0
-
+        wc = self.cutoff_wavenumber(m, n) * c0
         s = 1j * 2 * np.pi * freq
         sqrt_term = np.sqrt(s**2 + wc**2)
 
         if mode_type.upper() == 'TE':
-            Z = s * Z0 / sqrt_term
+            return s * Z0 / sqrt_term
         elif mode_type.upper() == 'TM':
-            Z = Z0 * sqrt_term / s
+            return Z0 * sqrt_term / s
         else:
             raise ValueError(f"Unknown mode type: {mode_type}")
-
-        return Z
 
     def get_port_mode_propagation_constant(
         self,
@@ -502,57 +404,19 @@ class RWGAnalytical:
         """
         Compute propagation constant for a specific port mode.
 
-        β = sqrt(k0^2 - kc^2) = sqrt((ω/c)^2 - kc^2)
-
-        In s-domain: β = sqrt(s^2 + ωc^2) / c0
-
-        Parameters
-        ----------
-        m, n : int
-            Mode indices
-        freq : float or ndarray
-            Frequency [Hz]
-
-        Returns
-        -------
-        beta : ndarray
-            Propagation constant (complex)
-            - Real and positive above cutoff (propagating)
-            - Imaginary below cutoff (evanescent)
+        β = sqrt((ω/c)^2 - kc^2)  [real above cutoff, imaginary below]
         """
         freq = np.atleast_1d(freq).astype(complex)
-
-        kc = self.cutoff_wavenumber(m, n)
-        wc = kc * c0
-
+        wc = self.cutoff_wavenumber(m, n) * c0
         s = 1j * 2 * np.pi * freq
-        beta = np.sqrt(s**2 + wc**2) / c0
+        return np.sqrt(s**2 + wc**2) / c0
 
-        return beta
-
-    def print_port_eigenmodes(
-        self,
-        n_modes: int = 20,
-        max_index: int = 10
-    ) -> None:
-        """
-        Print a formatted table of port eigenmodes.
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of modes to display
-        max_index : int
-            Maximum index to search
-        """
-        modes = self.port_eigenmodes(
-            n_modes=n_modes,
-            max_index=max_index,
-            return_format='list'
-        )
+    def print_port_eigenmodes(self, n_modes: int = 20, max_index: int = 10) -> None:
+        """Print a formatted table of port eigenmodes."""
+        modes = self.port_eigenmodes(n_modes=n_modes, max_index=max_index)
 
         print("\n" + "=" * 80)
-        print(f"Rectangular Waveguide Port Eigenmodes")
+        print("Rectangular Waveguide Port Eigenmodes")
         print(f"Cross-section: a = {self.a*1e3:.2f} mm, b = {self.b*1e3:.2f} mm")
         print("=" * 80)
         print(f"{'Rank':<6} {'Mode':<10} {'Type':<6} {'(m,n)':<10} "
@@ -560,33 +424,27 @@ class RWGAnalytical:
         print("-" * 80)
 
         for i, mode in enumerate(modes, 1):
-            lambda_c_mm = mode['lambda_c'] * 1e3 if mode['lambda_c'] < np.inf else np.inf
+            lc_mm = mode['lambda_c'] * 1e3 if mode['lambda_c'] < np.inf else np.inf
             print(f"{i:<6} {mode['label']:<10} {mode['type']:<6} "
                   f"({mode['m']},{mode['n']}){'':>5} "
-                  f"{mode['fc_GHz']:<12.4f} {mode['kc']:<14.4f} "
-                  f"{lambda_c_mm:<12.2f}")
+                  f"{mode['fc_GHz']:<12.4f} {mode['kc']:<14.4f} {lc_mm:<12.2f}")
 
         print("=" * 80)
 
-        # Also print degenerate mode groups
-        print("\nDegenerate mode groups (same cutoff frequency):")
-        print("-" * 40)
-
-        # Group modes by cutoff frequency
         from collections import defaultdict
         groups = defaultdict(list)
         for mode in modes:
-            fc_rounded = round(mode['fc_GHz'], 6)
-            groups[fc_rounded].append(mode['label'])
+            groups[round(mode['fc_GHz'], 6)].append(mode['label'])
 
-        for fc, mode_labels in sorted(groups.items()):
-            if len(mode_labels) > 1:
-                print(f"  fc = {fc:.4f} GHz: {', '.join(mode_labels)}")
-
+        print("\nDegenerate mode groups (same cutoff frequency):")
+        print("-" * 40)
+        for fc, labels in sorted(groups.items()):
+            if len(labels) > 1:
+                print(f"  fc = {fc:.4f} GHz: {', '.join(labels)}")
         print("=" * 80)
 
     # =========================================================================
-    # Cavity Eigenfrequency Methods (3D resonant modes)
+    # Cavity eigenfrequency methods (3D resonant modes)
     # =========================================================================
 
     def eigenfrequencies(
@@ -603,73 +461,43 @@ class RWGAnalytical:
             Number of modes per type
         mode_types : list of str, optional
             Mode types to compute. Default: ['TE10p']
+            Options: 'TE10p', 'TE01p', 'TE11p', 'TM11p', 'TE20p', 'TE02p'
 
         Returns
         -------
         freqs : dict
-            Dictionary mapping mode labels to frequencies [Hz]
+            {mode_label: frequency_Hz}
         """
         if mode_types is None:
             mode_types = ['TE10p']
 
         results = {}
+        _families = {
+            'TE10p': (self.kc,                                             'TE10', 1),
+            'TE01p': (np.pi / self.b,                                      'TE01', 1),
+            'TE11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TE11', 0),
+            'TM11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TM11', 1),
+            'TE20p': (2 * np.pi / self.a,                                  'TE20', 0),
+            'TE02p': (2 * np.pi / self.b,                                  'TE02', 0),
+        }
 
         for mode_type in mode_types:
-            if mode_type == 'TE10p':
-                for p in range(1, n_modes + 1):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(self.kc**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TE10{p}'] = f
-
-            elif mode_type == 'TE01p':
-                kc_01 = np.pi / self.b
-                for p in range(1, n_modes + 1):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(kc_01**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TE01{p}'] = f
-
-            elif mode_type == 'TE11p':
-                kc_11 = np.sqrt((np.pi / self.a)**2 + (np.pi / self.b)**2)
-                for p in range(0, n_modes):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(kc_11**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TE11{p}'] = f
-
-            elif mode_type == 'TM11p':
-                kc_11 = np.sqrt((np.pi / self.a)**2 + (np.pi / self.b)**2)
-                for p in range(1, n_modes + 1):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(kc_11**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TM11{p}'] = f
-
-            elif mode_type == 'TE20p':
-                kc_20 = 2 * np.pi / self.a
-                for p in range(0, n_modes):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(kc_20**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TE20{p}'] = f
-
-            elif mode_type == 'TE02p':
-                kc_02 = 2 * np.pi / self.b
-                for p in range(0, n_modes):
-                    kz = p * np.pi / self.L
-                    k = np.sqrt(kc_02**2 + kz**2)
-                    f = c0 * k / (2 * np.pi)
-                    results[f'TE02{p}'] = f
+            if mode_type not in _families:
+                continue
+            kc_fam, prefix, p_start = _families[mode_type]
+            for p in range(p_start, p_start + n_modes):
+                kz = p * np.pi / self.L
+                k = np.sqrt(kc_fam**2 + kz**2)
+                results[f'{prefix}{p}'] = c0 * k / (2 * np.pi)
 
         return results
 
     def all_eigenfrequencies(
-            self,
-            n_modes: int = 20,
-            max_index: int = 10,
-            return_format: str = 'dict',
-            boundary_type: str = 'PEC'
+        self,
+        n_modes: int = 20,
+        max_index: int = 10,
+        return_format: str = 'dict',
+        boundary_type: str = 'PEC'
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
         """
         Compute all physical eigenfrequencies of the rectangular cavity.
@@ -681,85 +509,60 @@ class RWGAnalytical:
         max_index : int
             Maximum index to search (for m, n, p)
         return_format : str
-            'dict': Return {mode_label: frequency} dict
-            'list': Return [(frequency, k, mode_string, indices)] list
-            'array': Return sorted frequency array
+            'dict', 'list', or 'array'
         boundary_type : str
-            'PEC': Perfect Electric Conductor walls (standard)
-            'PMC': Perfect Magnetic Conductor walls
+            'PEC' (standard) or 'PMC'
 
         Returns
         -------
         Depending on return_format
         """
-        # Pre-calculate squared constants
         pi_over_a_sq = (np.pi / self.a) ** 2
         pi_over_b_sq = (np.pi / self.b) ** 2
         pi_over_L_sq = (np.pi / self.L) ** 2
 
-        # Store unique eigenvalues with their mode indices
         eigenvalue_modes = {}
 
         for m, n, p in itertools.product(range(max_index + 1), repeat=3):
-            # Filter: Physical modes must have valid transverse indices
             if m == 0 and n == 0:
                 continue
 
-            # Calculate eigenvalue k^2
-            k_squared = (m ** 2 * pi_over_a_sq +
-                         n ** 2 * pi_over_b_sq +
-                         p ** 2 * pi_over_L_sq)
+            k_squared = (m**2 * pi_over_a_sq +
+                         n**2 * pi_over_b_sq +
+                         p**2 * pi_over_L_sq)
 
-            # Skip zero frequency (k=0)
             if k_squared == 0:
                 continue
 
             mode_types = []
 
             if boundary_type.upper() == 'PMC':
-                # PMC boundary conditions (dual of PEC)
-                # TE modes: m or n > 0, p >= 0 (p=0 IS allowed)
                 if m > 0 or n > 0:
                     mode_types.append('TE')
-
-                # TM modes: m >= 1, n >= 1, p >= 0 (p=0 allowed for PMC)
-                # But TM with p=0 gives trivial solution, so still need p >= 1
-                # Actually for PMC: TM modes need p >= 1 still
                 if m >= 1 and n >= 1 and p >= 1:
                     mode_types.append('TM')
-
-            else:  # PEC (standard)
-                # TE modes: m or n > 0, p >= 1 for proper cavity mode
-                # (p=0 gives a cutoff mode, not a resonance)
+            else:  # PEC
                 if (m > 0 or n > 0) and p >= 0:
                     mode_types.append('TE')
-
-                # TM modes: m >= 1, n >= 1, p >= 1
                 if m >= 1 and n >= 1 and p >= 1:
                     mode_types.append('TM')
 
             if not mode_types:
                 continue
 
-            k_squared_rounded = round(k_squared, 10)
-
-            if k_squared_rounded not in eigenvalue_modes:
-                eigenvalue_modes[k_squared_rounded] = []
-
+            k_sq_r = round(k_squared, 10)
+            if k_sq_r not in eigenvalue_modes:
+                eigenvalue_modes[k_sq_r] = []
             for mode_type in mode_types:
-                eigenvalue_modes[k_squared_rounded].append((m, n, p, mode_type))
+                eigenvalue_modes[k_sq_r].append((m, n, p, mode_type))
 
-        # Sort by eigenvalue
         sorted_eigenvalues = sorted(eigenvalue_modes.keys())
 
-        # Build result based on format
         if return_format == 'array':
-            frequencies = []
-            for k_sq in sorted_eigenvalues[:n_modes]:
-                k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
-                frequencies.append(f)
-            return np.array(frequencies)
+            return np.array([
+                c0 * np.sqrt(k_sq) / (2 * np.pi)
+                for k_sq in sorted_eigenvalues[:n_modes]
+            ])
 
         elif return_format == 'list':
             result_list = []
@@ -769,14 +572,11 @@ class RWGAnalytical:
                 k = np.sqrt(k_sq)
                 f = c0 * k / (2 * np.pi)
                 modes = eigenvalue_modes[k_sq]
-
-                mode_strs = []
-                for m, n, p, mode_type in sorted(modes):
-                    mode_strs.append(f"{mode_type}{m}{n}{p}")
-                mode_string = ", ".join(mode_strs)
-
+                mode_string = ", ".join(
+                    f"{mt}{m}{n}{p}"
+                    for m, n, p, mt in sorted(modes)
+                )
                 result_list.append((f, k, mode_string, modes))
-
             return result_list[:n_modes]
 
         else:  # 'dict'
@@ -787,53 +587,24 @@ class RWGAnalytical:
                     break
                 k = np.sqrt(k_sq)
                 f = c0 * k / (2 * np.pi)
-                modes = eigenvalue_modes[k_sq]
-
-                for m, n, p, mode_type in modes:
-                    label = f"{mode_type}{m}{n}{p}"
+                for m, n, p, mt in eigenvalue_modes[k_sq]:
+                    label = f"{mt}{m}{n}{p}"
                     if label not in result_dict:
                         result_dict[label] = f
                         count += 1
                         if count >= n_modes:
                             break
-
             return result_dict
 
-    def get_mode_info(
-        self,
-        m: int,
-        n: int,
-        p: int,
-        mode_type: str = 'TE'
-    ) -> Dict:
-        """
-        Get detailed information about a specific cavity mode.
-
-        Parameters
-        ----------
-        m, n, p : int
-            Mode indices
-        mode_type : str
-            'TE' or 'TM'
-
-        Returns
-        -------
-        info : dict
-            Mode information including frequency, wavenumbers, etc.
-        """
+    def get_mode_info(self, m: int, n: int, p: int, mode_type: str = 'TE') -> Dict:
+        """Get detailed information about a specific cavity mode."""
         kx = m * np.pi / self.a
         ky = n * np.pi / self.b
         kz = p * np.pi / self.L
-
-        kc = np.sqrt(kx**2 + ky**2)  # Cutoff wavenumber
-        k = np.sqrt(kx**2 + ky**2 + kz**2)  # Total wavenumber
-
-        f = c0 * k / (2 * np.pi)  # Resonant frequency
-        fc = c0 * kc / (2 * np.pi)  # Cutoff frequency
-
-        # Wavelengths
-        lambda_0 = c0 / f if f > 0 else np.inf
-        lambda_c = c0 / fc if fc > 0 else np.inf
+        kc = np.sqrt(kx**2 + ky**2)
+        k  = np.sqrt(kx**2 + ky**2 + kz**2)
+        f  = c0 * k / (2 * np.pi)
+        fc = c0 * kc / (2 * np.pi)
 
         return {
             'mode_type': mode_type,
@@ -843,39 +614,17 @@ class RWGAnalytical:
             'frequency_GHz': f / 1e9,
             'cutoff_frequency_Hz': fc,
             'cutoff_frequency_GHz': fc / 1e9,
-            'k': k,
-            'kc': kc,
-            'kx': kx,
-            'ky': ky,
-            'kz': kz,
-            'wavelength_m': lambda_0,
-            'cutoff_wavelength_m': lambda_c,
+            'k': k, 'kc': kc,
+            'kx': kx, 'ky': ky, 'kz': kz,
+            'wavelength_m': c0 / f if f > 0 else np.inf,
+            'cutoff_wavelength_m': c0 / fc if fc > 0 else np.inf,
         }
 
-    def get_port_mode_info(
-        self,
-        m: int,
-        n: int,
-        mode_type: str = 'TE'
-    ) -> Dict:
-        """
-        Get detailed information about a specific port (2D) mode.
-
-        Parameters
-        ----------
-        m, n : int
-            Mode indices
-        mode_type : str
-            'TE' or 'TM'
-
-        Returns
-        -------
-        info : dict
-            Mode information including cutoff frequency, wavenumber, etc.
-        """
+    def get_port_mode_info(self, m: int, n: int, mode_type: str = 'TE') -> Dict:
+        """Get detailed information about a specific port (2D) mode."""
         kc = self.cutoff_wavenumber(m, n)
         fc = c0 * kc / (2 * np.pi)
-        lambda_c = c0 / fc if fc > 0 else np.inf
+        lc = c0 / fc if fc > 0 else np.inf
 
         return {
             'mode_type': mode_type,
@@ -884,42 +633,128 @@ class RWGAnalytical:
             'kc': kc,
             'fc_Hz': fc,
             'fc_GHz': fc / 1e9,
-            'lambda_c_m': lambda_c,
-            'lambda_c_mm': lambda_c * 1e3,
+            'lambda_c_m': lc,
+            'lambda_c_mm': lc * 1e3,
         }
 
-    def print_eigenfrequencies(
-        self,
-        n_modes: int = 20,
-        max_index: int = 10
-    ) -> None:
-        """
-        Print a formatted table of cavity eigenfrequencies.
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of modes to display
-        max_index : int
-            Maximum index to search
-        """
-        results = self.all_eigenfrequencies(
-            n_modes=n_modes,
-            max_index=max_index,
-            return_format='list'
-        )
-
+    def print_eigenfrequencies(self, n_modes: int = 20, max_index: int = 10) -> None:
+        """Print a formatted table of cavity eigenfrequencies."""
+        results = self.all_eigenfrequencies(n_modes=n_modes, max_index=max_index,
+                                            return_format='list')
         print("\n" + "=" * 90)
-        print(f"Rectangular Cavity Eigenfrequencies")
+        print("Rectangular Cavity Eigenfrequencies")
         print(f"Dimensions: a={self.a*1e3:.1f}mm, b={self.b*1e3:.1f}mm, L={self.L*1e3:.1f}mm")
         print("=" * 90)
         print(f"{'Rank':<6} {'Frequency [GHz]':<18} {'k [rad/m]':<15} {'Modes'}")
         print("-" * 90)
-
-        for i, (f, k, mode_string, modes) in enumerate(results, 1):
+        for i, (f, k, mode_string, _) in enumerate(results, 1):
             print(f"{i:<6} {f/1e9:<18.6f} {k:<15.4f} {mode_string}")
-
         print("=" * 90)
+
+    # =========================================================================
+    # PlotMixin interface — lazy compute + required properties
+    # =========================================================================
+
+    def _default_freq_range(self) -> Tuple[float, float]:
+        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff."""
+        return (0.5 * self.fc, 2.5 * self.fc)
+
+    def _ensure_computed(self, n_samples: Optional[int] = None) -> None:
+        """Compute S/Z on the stored grid if not already done."""
+        if self._S_dict is not None:
+            return
+        f_min, f_max = self._freq_range or self._default_freq_range()
+        self.compute(np.linspace(f_min, f_max, n_samples or self._n_samples))
+
+    def compute(
+        self,
+        freq: Optional[Union[float, np.ndarray]] = None,
+        n_samples: Optional[int] = None,
+        Z0_ref: Union[float, str] = 'ZTE',
+    ) -> 'RWGAnalytical':
+        """
+        Evaluate and cache S/Z on a frequency grid.
+
+        Parameters
+        ----------
+        freq : array-like, optional
+            Frequency points [Hz]. If None, uses freq_range from __init__
+            (or the physics default 0.5·fc → 2.5·fc).
+        n_samples : int, optional
+            Number of points. Overrides the instance default.
+            If freq is an array, resamples it to n_samples evenly-spaced points.
+        Z0_ref : float or str
+            Reference impedance for S-parameters (default: 'ZTE').
+
+        Returns
+        -------
+        self
+            Allows chaining: rwg.compute(freq).plot_s()
+        """
+        if freq is None:
+            f_min, f_max = self._freq_range or self._default_freq_range()
+            freq = np.linspace(f_min, f_max, n_samples or self._n_samples)
+        else:
+            freq = np.atleast_1d(freq).astype(float)
+            if n_samples is not None:
+                freq = np.linspace(freq[0], freq[-1], n_samples)
+
+        self._frequencies = freq
+
+        S = self.s_parameters(freq, Z0_ref=Z0_ref)
+        Z = self.z_parameters(freq)
+
+        # Key format matches CSTResult / PlotMixin convention: 'i(mi)j(mj)'
+        self._S_dict = {
+            '1(1)1(1)': S['S11'],
+            '2(1)1(1)': S['S21'],
+            '1(1)2(1)': S['S12'],
+            '2(1)2(1)': S['S22'],
+        }
+        self._Z_dict = {
+            '1(1)1(1)': Z['Z11'],
+            '2(1)1(1)': Z['Z21'],
+            '1(1)2(1)': Z['Z12'],
+            '2(1)2(1)': Z['Z22'],
+        }
+        return self
+
+    @property
+    def frequencies(self) -> np.ndarray:
+        """Frequency grid [Hz] set by compute(). Required by PlotMixin."""
+        if self._frequencies is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._frequencies
+
+    @property
+    def S_dict(self) -> Dict[str, np.ndarray]:
+        """S-parameters keyed as '1(1)1(1)' etc. Required by PlotMixin."""
+        if self._S_dict is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._S_dict
+
+    @property
+    def Z_dict(self) -> Dict[str, np.ndarray]:
+        """Z-parameters keyed as '1(1)1(1)' etc. Required by PlotMixin."""
+        if self._Z_dict is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._Z_dict
+
+    def get_resonant_frequencies(self) -> np.ndarray:
+        """Exposes resonant frequencies so PlotMixin.plot_eigenvalues() works."""
+        return self.resonant_frequencies()
+
+    # PlotMixin overrides — auto-compute, then delegate to super()
+
+    def plot_s(self, *args, n_samples: Optional[int] = None, **kwargs):
+        """Auto-compute if needed, then delegate to PlotMixin.plot_s()."""
+        self._ensure_computed(n_samples)
+        return super().plot_s(*args, **kwargs)
+
+    def plot_z(self, *args, n_samples: Optional[int] = None, **kwargs):
+        """Auto-compute if needed, then delegate to PlotMixin.plot_z()."""
+        self._ensure_computed(n_samples)
+        return super().plot_z(*args, **kwargs)
 
 
 # =============================================================================
@@ -955,38 +790,24 @@ def compare_eigenfrequencies(
     Returns
     -------
     matches : dict
-        Dictionary mapping FEM frequency indices to analytical mode labels
     errors : ndarray
-        Relative errors for matched modes
     unmatched : ndarray
-        FEM frequency indices that were not matched
     """
     analytical = RWGAnalytical(a=a, L=L, b=b)
-
-    # Get all eigenfrequencies
-    anal_results = analytical.all_eigenfrequencies(
-        n_modes=n_modes * 2,  # Get extra to ensure coverage
-        return_format='list'
-    )
+    anal_results = analytical.all_eigenfrequencies(n_modes=n_modes * 2, return_format='list')
 
     matches = {}
     errors = []
-    matched_fem_indices = set()
-    matched_anal_indices = set()
-
-    # Build analytical frequency list with mode info
-    anal_freqs = [(f, k, modes_str, modes) for f, k, modes_str, modes in anal_results]
+    matched_fem = set()
+    matched_anal = set()
 
     for fem_idx, fem_f in enumerate(fem_freqs):
-        best_match = None
-        best_error = tolerance
+        best_match, best_error = None, tolerance
 
-        for anal_idx, (anal_f, k, modes_str, modes) in enumerate(anal_freqs):
-            if anal_idx in matched_anal_indices:
+        for anal_idx, (anal_f, k, modes_str, modes) in enumerate(anal_results):
+            if anal_idx in matched_anal:
                 continue
-
             rel_error = abs(fem_f - anal_f) / anal_f if anal_f > 0 else np.inf
-
             if rel_error < best_error:
                 best_error = rel_error
                 best_match = (anal_idx, anal_f, modes_str, modes)
@@ -994,19 +815,14 @@ def compare_eigenfrequencies(
         if best_match is not None:
             anal_idx, anal_f, modes_str, modes = best_match
             matches[fem_idx] = {
-                'mode': modes_str,
-                'fem_freq': fem_f,
-                'anal_freq': anal_f,
-                'error': best_error,
-                'indices': modes
+                'mode': modes_str, 'fem_freq': fem_f,
+                'anal_freq': anal_f, 'error': best_error, 'indices': modes
             }
             errors.append(best_error)
-            matched_fem_indices.add(fem_idx)
-            matched_anal_indices.add(anal_idx)
+            matched_fem.add(fem_idx)
+            matched_anal.add(anal_idx)
 
-    # Find unmatched FEM frequencies
-    unmatched = np.array([i for i in range(len(fem_freqs)) if i not in matched_fem_indices])
-
+    unmatched = np.array([i for i in range(len(fem_freqs)) if i not in matched_fem])
     return matches, np.array(errors), unmatched
 
 
@@ -1036,36 +852,25 @@ def compare_port_eigenmodes(
     Returns
     -------
     matches : dict
-        Dictionary mapping FEM frequency indices to analytical mode labels
     errors : ndarray
-        Relative errors for matched modes
     unmatched : ndarray
-        FEM frequency indices that were not matched
     """
-    analytical = RWGAnalytical(a=a, L=1.0, b=b)  # L doesn't matter for port modes
-
-    # Get port eigenmodes
-    anal_modes = analytical.port_eigenmodes(
-        n_modes=n_modes * 2,
-        return_format='list'
-    )
+    analytical = RWGAnalytical(a=a, L=1.0, b=b)  # L irrelevant for port modes
+    anal_modes = analytical.port_eigenmodes(n_modes=n_modes * 2)
 
     matches = {}
     errors = []
-    matched_fem_indices = set()
-    matched_anal_indices = set()
+    matched_fem = set()
+    matched_anal = set()
 
     for fem_idx, fem_fc in enumerate(fem_cutoffs):
-        best_match = None
-        best_error = tolerance
+        best_match, best_error = None, tolerance
 
         for anal_idx, mode in enumerate(anal_modes):
-            if anal_idx in matched_anal_indices:
+            if anal_idx in matched_anal:
                 continue
-
             anal_fc = mode['fc_Hz']
             rel_error = abs(fem_fc - anal_fc) / anal_fc if anal_fc > 0 else np.inf
-
             if rel_error < best_error:
                 best_error = rel_error
                 best_match = (anal_idx, mode)
@@ -1073,20 +878,15 @@ def compare_port_eigenmodes(
         if best_match is not None:
             anal_idx, mode = best_match
             matches[fem_idx] = {
-                'mode': mode['label'],
-                'type': mode['type'],
-                'm': mode['m'],
-                'n': mode['n'],
-                'fem_fc': fem_fc,
-                'anal_fc': mode['fc_Hz'],
-                'error': best_error
+                'mode': mode['label'], 'type': mode['type'],
+                'm': mode['m'], 'n': mode['n'],
+                'fem_fc': fem_fc, 'anal_fc': mode['fc_Hz'], 'error': best_error
             }
             errors.append(best_error)
-            matched_fem_indices.add(fem_idx)
-            matched_anal_indices.add(anal_idx)
+            matched_fem.add(fem_idx)
+            matched_anal.add(anal_idx)
 
-    unmatched = np.array([i for i in range(len(fem_cutoffs)) if i not in matched_fem_indices])
-
+    unmatched = np.array([i for i in range(len(fem_cutoffs)) if i not in matched_fem])
     return matches, np.array(errors), unmatched
 
 
@@ -1097,27 +897,16 @@ def print_eigenfrequency_comparison(
     b: float = None,
     n_modes: int = 20
 ) -> None:
-    """
-    Print a formatted comparison of FEM and analytical eigenfrequencies.
-
-    Parameters
-    ----------
-    fem_freqs : ndarray
-        Eigenfrequencies from FEM solver [Hz]
-    a, L, b : float
-        Waveguide dimensions [m]
-    n_modes : int
-        Number of modes to compare
-    """
-    matches, errors, unmatched = compare_eigenfrequencies(
-        fem_freqs, a, L, b, n_modes
-    )
+    """Print a formatted comparison of FEM and analytical eigenfrequencies."""
+    matches, errors, unmatched = compare_eigenfrequencies(fem_freqs, a, L, b, n_modes)
+    b_str = f"{b*1e3:.1f}" if b is not None else f"{a*0.5e3:.1f}"
 
     print("\n" + "=" * 85)
     print("Eigenfrequency Comparison: FEM vs Analytical")
-    print(f"Dimensions: a={a*1e3:.1f}mm, b={b*1e3 if b else a*0.5e3:.1f}mm, L={L*1e3:.1f}mm")
+    print(f"Dimensions: a={a*1e3:.1f}mm, b={b_str}mm, L={L*1e3:.1f}mm")
     print("=" * 85)
-    print(f"{'Index':<6} {'FEM [GHz]':<14} {'Analytical [GHz]':<18} {'Mode(s)':<25} {'Error [%]':<10}")
+    print(f"{'Index':<6} {'FEM [GHz]':<14} {'Analytical [GHz]':<18} "
+          f"{'Mode(s)':<25} {'Error [%]':<10}")
     print("-" * 85)
 
     for idx in sorted(matches.keys()):
@@ -1145,22 +934,9 @@ def print_port_eigenmode_comparison(
     b: float = None,
     n_modes: int = 20
 ) -> None:
-    """
-    Print a formatted comparison of FEM and analytical port eigenmodes.
-
-    Parameters
-    ----------
-    fem_cutoffs : ndarray
-        Cutoff frequencies from FEM solver [Hz]
-    a, b : float
-        Waveguide cross-section dimensions [m]
-    n_modes : int
-        Number of modes to compare
-    """
+    """Print a formatted comparison of FEM and analytical port eigenmodes."""
     b_val = b if b is not None else a / 2
-    matches, errors, unmatched = compare_port_eigenmodes(
-        fem_cutoffs, a, b, n_modes
-    )
+    matches, errors, unmatched = compare_port_eigenmodes(fem_cutoffs, a, b, n_modes)
 
     print("\n" + "=" * 85)
     print("Port Eigenmode Comparison: FEM vs Analytical")

@@ -137,10 +137,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Compute DOF offsets for reconstruction
         self._compute_dof_offsets()
 
-        # Coupling results (populated by couple())
         self.A_coupled: Optional[np.ndarray] = None
         self.B_coupled: Optional[np.ndarray] = None
         self.W_coupled: Optional[np.ndarray] = None
+
+        # Caches
+        self._resonant_mode_cache = {}
 
         # Connection tracking
         self.connections: Optional[List[Conn]] = None
@@ -488,16 +490,47 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         print(f"  Internal port-modes (eliminated): {self._n_internal}")
         print(f"  Connections: {self.n_connections}")
 
-        # Automatic save after coupling
+        if hasattr(self, '_mor_ref') and self._mor_ref:
+             self._mor_ref._A_r_global = self.A_coupled
+             self._mor_ref._B_r_global = self.B_coupled
+             self._mor_ref._W_r_global = self.W_coupled
+
+        # Automatic save after state is synchronized
         if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
             if self._solver_ref._project_ref:
                 self._solver_ref._project_ref.save()
 
         return self
 
+
+    def calculate_resonant_modes(self, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute eigenvalues and eigenvectors for the coupled system."""
+        # Check cache
+        cache_key = tuple(sorted(kwargs.items()))
+        if cache_key in self._resonant_mode_cache:
+            return self._resonant_mode_cache[cache_key]
+
+        from solvers.frequency_domain import FrequencyDomainSolver
+        eigenvalues, eigenvectors = np.linalg.eigh(self.A_coupled)
+        res = FrequencyDomainSolver._filter_eigenvalues(eigenvalues, eigenvectors, **kwargs)
+        
+        # Update cache
+        self._resonant_mode_cache[cache_key] = res
+        return res
+
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
+
     def get_eigenmodes(self, _auto_save=True, **kwargs):
         """Standardized API for eigenmode computation with auto-save."""
-        res = super().get_eigenmodes(**kwargs)
+        res = self.calculate_resonant_modes(**kwargs)
         if _auto_save:
             self._auto_save_eigenmodes(res, **kwargs)
         return res
@@ -532,7 +565,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             else:
                 sub_path = "foms/roms/concat"
         
-        save_path = project_path / "fds" / sub_path / "eigenmode"
+        save_path = project_path / "fds" / sub_path / "eigenmodes"
         try:
             self.save_eigenmodes(save_path, **kwargs)
         except Exception as e:
@@ -581,10 +614,18 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         Save ConcatenatedSystem data to disk.
         
         Saves coupled matrices (A, B, W) to separate files in matrices/
-        and S/Z parameters to s.h5/z.h5.
+        and S/Z parameters, snapshots, and eigenmodes to their respective folders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
+
+        # Subfolders
+        s_path_dir = path / "s"
+        z_path_dir = path / "z"
+        snap_path_dir = path / "snapshots"
+        eig_path_dir = path / "eigenmodes"
+        for p in [s_path_dir, z_path_dir, snap_path_dir, eig_path_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
         # 1. Save coupled matrices to modular files
         mat_path = path / "matrices"
@@ -598,21 +639,38 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if self.W_coupled is not None:
                 H5Serializer.save_dataset(fw, "data", self.W_coupled)
 
-        # 2. Save S and Z results separately
+        # 2. Save S and Z results
         if self._Z_matrix is not None:
-            with h5py.File(path / "z.h5", "a") as f:
+            with h5py.File(z_path_dir / "z.h5", "a") as f:
                 H5Serializer.save_dataset(f, "data", self._Z_matrix)
         if self._S_matrix is not None:
-            with h5py.File(path / "s.h5", "a") as f:
+            with h5py.File(s_path_dir / "s.h5", "a") as f:
                 H5Serializer.save_dataset(f, "data", self._S_matrix)
 
-        # 3. Save snapshots and frequencies to snapshots.h5
-        with h5py.File(path / "snapshots.h5", "a") as f:
-            H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+        # 3. Save frequencies and snapshots
+        with h5py.File(snap_path_dir / "snapshots.h5", "a") as f:
+            if hasattr(self, 'frequencies') and self.frequencies is not None:
+                H5Serializer.save_dataset(f, "frequencies", self.frequencies)
             if self._snapshots is not None:
-                H5Serializer.save_dataset(f, "snapshots", self._snapshots)
-        
-        # 4. Save metadata
+                # Concatenated snapshots are stored as a single array
+                if "coupled_snapshots" in f: del f["coupled_snapshots"]
+                H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
+
+        # 4. Save eigenmodes ONLY if already computed (passive)
+        cache = getattr(self, '_resonant_mode_cache', {})
+        if cache:
+            # Save the first entry in cache as default
+            modes = list(self._resonant_mode_cache.values())[0]
+            try:
+                with h5py.File(eig_path_dir / "eigenmodes.h5", "a") as f:
+                    # Clean previous entries for this group if relevant? 
+                    # For coupled, we just have values/vectors at root or a group
+                    group = f.require_group("modes")
+                    H5Serializer.save_dataset(group, "eigenvalues", modes[0])
+                    H5Serializer.save_dataset(group, "eigenvectors", modes[1])
+            except Exception as e:
+                print(f"Note: Could not save concatenated eigenmodes: {e}")
+
         metadata = {
             "n_structures": self.n_structures,
             "domains": self.domains,
@@ -641,6 +699,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         cs._n_external = metadata["n_external"]
         cs._n_modes_per_port = metadata["n_modes_per_port"]
         
+        # Initialize caches
+        cs._resonant_mode_cache = {}
+        
         # Initialize result dicts for PlotMixin
         cs._S_dict = None
         cs._Z_dict = None
@@ -661,29 +722,44 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 cs.B_coupled = H5Serializer.load_dataset(f["B_coupled"])
                 cs.W_coupled = H5Serializer.load_dataset(f["W_coupled"])
 
-        # 2. Load S/Z from dedicated files
+        # 2. Load Z and S
+        cs.frequencies = None
         cs._Z_matrix = None
-        if (path / "z.h5").exists():
-            with h5py.File(path / "z.h5", "r") as f:
-                cs._Z_matrix = H5Serializer.load_dataset(f["data"])
-        
         cs._S_matrix = None
-        if (path / "s.h5").exists():
-            with h5py.File(path / "s.h5", "r") as f:
-                cs._S_matrix = H5Serializer.load_dataset(f["data"])
+        
+        z_path = path / "z" / "z.h5"
+        if not z_path.exists(): z_path = path / "z.h5"
+        if z_path.exists():
+            with h5py.File(z_path, "r") as f:
+                cs._Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+                
+        s_path = path / "s" / "s.h5"
+        if not s_path.exists(): s_path = path / "s.h5"
+        if s_path.exists():
+            with h5py.File(s_path, "r") as f:
+                cs._S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
 
         # 3. Load snapshots and frequencies
-        if (path / "snapshots.h5").exists():
-            with h5py.File(path / "snapshots.h5", "r") as f:
-                cs.frequencies = H5Serializer.load_dataset(f["frequencies"])
-                if "snapshots" in f:
-                    cs._snapshots = H5Serializer.load_dataset(f["snapshots"])
+        cs._snapshots = {}
+        snap_path = path / "snapshots" / "snapshots.h5"
+        if not snap_path.exists(): snap_path = path / "snapshots.h5"
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as f:
+                if cs.frequencies is None:
+                    cs.frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
                 
-                # Support legacy loading
-                if cs._Z_matrix is None and "Z_matrix" in f:
-                    cs._Z_matrix = H5Serializer.load_dataset(f["Z_matrix"])
-                if cs._S_matrix is None and "S_matrix" in f:
-                    cs._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
+                if "field_snapshots" in f:
+                    group = f["field_snapshots"]
+                    for domain in metadata.get("structure_domains", []):
+                        if domain in group:
+                            cs._snapshots[domain] = H5Serializer.load_dataset(group[domain])
+
+        # 4. Load eigenmodes
+        eig_path = path / "eigenmodes" / "eigenmodes.h5"
+        if eig_path.exists():
+            # We don't have a cache on CS, but we can load them if needed.
+            # For now, we mainly want them saved for the user.
+            pass
 
         return cs
 
@@ -746,7 +822,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         if compute_s_params:
             self._compute_s_from_z()
-
         self._invalidate_cache()
 
         # Automatic save after simulation

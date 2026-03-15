@@ -13,7 +13,7 @@ class PlotMixin:
         - self.frequencies   : np.ndarray (Hz)
         - self.Z_dict        : dict  e.g. {'1(1)1(1)': array, ...}
         - self.S_dict        : dict  (same keys)
-        - self.get_eigenvalues()  (optional, needed only for plot_eigenvalues)
+        - self.calculate_resonant_modes() (optional, needed only for plot_eigenvalues)
 
     Every method accepts an optional `ax` (matplotlib Axes) for overlaying plots
     and returns ``(fig, ax)``.  If `ax` is None a new figure is created.
@@ -295,7 +295,7 @@ class PlotMixin:
         """
         Plot resonant eigenfrequencies as a stem/rug plot.
 
-        Calls ``self.get_eigenvalues()`` or ``self.get_resonant_frequencies()``
+        Calls ``self.calculate_resonant_modes()`` or ``self.get_resonant_frequencies()``
         (whichever is available).
 
         Parameters
@@ -336,9 +336,18 @@ class PlotMixin:
             except Exception:
                 pass
 
-        if freqs_hz is None and hasattr(self, 'get_eigenvalues'):
+        if freqs_hz is None and (hasattr(self, 'calculate_resonant_modes') or hasattr(self, 'get_eigenvalues')):
             try:
-                eigs = self.get_eigenvalues()
+                if hasattr(self, 'calculate_resonant_modes'):
+                    res = self.calculate_resonant_modes()
+                    if isinstance(res, tuple):
+                        eigs = res[0]
+                    elif isinstance(res, dict):
+                        eigs = np.concatenate([v[0] for v in res.values()])
+                    else:
+                        eigs = res
+                else:
+                    eigs = self.get_eigenvalues()
                 if isinstance(eigs, dict):
                     eigs = np.concatenate(list(eigs.values()))
                 eigs_pos = eigs[eigs > 0]
@@ -348,7 +357,7 @@ class PlotMixin:
 
         if freqs_hz is None:
             raise RuntimeError(
-                f"{self.__class__.__name__} does not expose get_eigenvalues() "
+                f"{self.__class__.__name__} does not expose calculate_resonant_modes() "
                 "or get_resonant_frequencies()."
             )
 

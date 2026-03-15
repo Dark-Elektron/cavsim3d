@@ -242,17 +242,27 @@ class BaseEMSolver(ABC):
         pass
 
     @abstractmethod
-    def get_eigenvalues(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    def calculate_resonant_modes(self) -> Union[Tuple[np.ndarray, np.ndarray], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
         """
-        Compute eigenvalues of system matrix.
+        Compute eigenvalues and eigenvectors of system matrix.
 
         Returns
         -------
-        eigenvalues : ndarray or dict
-            Array of eigenvalues (ω² values for EM systems).
-            Dict mapping domain names to eigenvalue arrays for multi-domain systems.
+        modes : tuple or dict
+            Tuple of (eigenvalues, eigenvectors).
+            Dict mapping domain names to (eigenvalues, eigenvectors) for multi-domain systems.
         """
-        pass
+        raise NotImplementedError
+
+    def get_eigenvalues(self, **kwargs):
+        """Deprecated alias for calculate_resonant_modes."""
+        import warnings
+        warnings.warn("get_eigenvalues() is deprecated. Use calculate_resonant_modes() instead.",
+                      DeprecationWarning, stacklevel=2)
+        res = self.calculate_resonant_modes(**kwargs)
+        if isinstance(res, dict):
+            return {k: v[0] for k, v in res.items()}
+        return res[0]
 
     @abstractmethod
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:

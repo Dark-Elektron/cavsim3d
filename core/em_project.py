@@ -140,6 +140,8 @@ class EMProject:
         mapping = {
             'rectangular_waveguide': primitives.RectangularWaveguide,
             'circular_waveguide': primitives.CircularWaveguide,
+            'rwg': primitives.RectangularWaveguide,
+            'cwg': primitives.CircularWaveguide,
         }
         
         cls = mapping.get(primitive_type.lower())

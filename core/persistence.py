@@ -17,6 +17,16 @@ import scipy.sparse as sp
 import pickle
 from datetime import datetime
 
+# Import OCC modules as early as possible to avoid DLL conflicts with NGSolve on Windows
+# Some OCC modules share DLLs that NGSolve also bundles (e.g. TKSTEP, TKIGES)
+try:
+    import OCC.Core.STEPControl
+    import OCC.Core.IGESControl
+    import OCC.Core.BRepAlgoAPI
+    import OCC.Core.BOPAlgo
+except ImportError:
+    pass
+
 # Import NGSolve only if available (needed for mesh/fes persistence)
 try:
     import ngsolve as ngs

@@ -94,7 +94,7 @@ class BaseGeometry(ABC, TaggableMixin):
             if self.mesh is None:
                 raise ValueError("Mesh not generated. Call generate_mesh() first.")
             # Use NGSolve's Draw for NGSolve Mesh objects
-            NGSolveDraw(self.mesh, **kwargs)
+            Draw(self.mesh, **kwargs)
         else:
             raise ValueError(f"Invalid option '{what}'.")
 
@@ -390,9 +390,9 @@ class BaseGeometry(ABC, TaggableMixin):
     def _check_source_link(self, project_path: Path) -> None:
         """
         Compare the project's geometry copy against the linked source.
-
-        * Source changed → prompt user to update (deletes results) or keep.
-        * Source missing → prompt user to unlink (project becomes standalone).
+        
+        This check is now non-interactive by default to ensure robust loading 
+        in notebooks and automation scripts.
         """
         if self._source_link is None:
             return  # No link — standalone project
@@ -401,51 +401,28 @@ class BaseGeometry(ABC, TaggableMixin):
         geo_dir = Path(project_path) / 'geometry'
 
         if not source_path.exists():
-            print(f"\nLinked source file not found: {source_path}")
-            print("Options:")
-            print("  [U] Unlink — project becomes standalone")
-            print("  [K] Keep link — ignore for now")
-            choice = input("Select [U/K]: ").strip().upper()
-            if choice == 'U':
-                self._source_link = None
-                # Update history.json
-                self._update_link_in_history(geo_dir)
-                print("Source unlinked. Project is now standalone.")
-            else:
-                warnings.warn(
-                    f"Source file '{source_path}' not found. "
-                    f"Link preserved but geometry cannot be updated.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+            warnings.warn(
+                f"Linked source geometry file not found: {source_path}. "
+                "Using the project's saved copy instead. Link is preserved.",
+                UserWarning,
+                stacklevel=2
+            )
             return
 
         # Source exists — check for changes
-        current_hash = self._file_hash(source_path)
-        if self._source_hash is not None and current_hash != self._source_hash:
-            print(f"\nLinked source file has been modified: {source_path}")
-            print("WARNING: Updating the geometry will DELETE all existing")
-            print("         simulation results (matrices, snapshots, FOM, ROM).")
-            print("Options:")
-            print("  [U] Update — replace geometry and delete results")
-            print("  [K] Keep — use the project's saved copy")
-            choice = input("Select [U/K]: ").strip().upper()
-            if choice == 'U':
-                # Copy updated source
-                source_filename = None
-                for f in geo_dir.iterdir():
-                    if f.name.startswith('source_model'):
-                        source_filename = f.name
-                        break
-                if source_filename:
-                    shutil.copy2(str(source_path), str(geo_dir / source_filename))
-                self._source_hash = current_hash
-                self._update_link_in_history(geo_dir)
-
-                # Delete existing results
-                self._delete_project_results(project_path)
-                print("Geometry updated. Previous results deleted.")
-                print("Re-run the simulation to generate new results.")
+        try:
+            current_hash = self._file_hash(source_path)
+            if self._source_hash is not None and current_hash != self._source_hash:
+                warnings.warn(
+                    f"Linked source geometry file has been modified: {source_path}. "
+                    "However, the project is still using its internal saved copy to avoid "
+                    "accidentally deleting existing results. To update to the new geometry, "
+                    "use project.update_geometry() explicitly.",
+                    UserWarning,
+                    stacklevel=2
+                )
+        except Exception as e:
+            warnings.warn(f"Could not verify source geometry hash: {e}")
 
     def _update_link_in_history(self, geo_dir: Path) -> None:
         """Update the source_link and source_hash in history.json."""

@@ -6,11 +6,13 @@ from scipy.special import jn_zeros, jnp_zeros
 
 from core.constants import mu0, eps0, c0, Z0
 
+from utils.plot_mixin import PlotMixin
+
 # Free space impedance
 ETA0 = np.sqrt(mu0 / eps0)  # ~377 Ω
 
 
-class CWGAnalytical:
+class CWGAnalytical(PlotMixin):
     """
     Analytical Z and S parameters for circular waveguide.
 
@@ -22,6 +24,11 @@ class CWGAnalytical:
         Waveguide radius [m]
     length : float
         Waveguide length [m]
+    freq_range : tuple of float, optional
+        Frequency range (f_min, f_max) in Hz for auto-sampling.
+        If None, defaults to (0.5·fc, 2.5·fc) based on the TE11 cutoff.
+    n_samples : int
+        Number of frequency samples (default: 1000).
 
     Notes
     -----
@@ -38,7 +45,13 @@ class CWGAnalytical:
     _bessel_zeros_cache: Dict[Tuple[int, int], float] = {}
     _bessel_derivative_zeros_cache: Dict[Tuple[int, int], float] = {}
 
-    def __init__(self, radius: float, length: float):
+    def __init__(
+        self,
+        radius: float,
+        length: float,
+        freq_range: Optional[Tuple[float, float]] = None,
+        n_samples: int = 1000,
+    ):
         self.radius = radius
         self.length = length
         self.a = radius  # Alias for consistency
@@ -47,8 +60,21 @@ class CWGAnalytical:
         # Cutoff quantities for TE11 mode (fundamental)
         self.p_prime_11 = self.get_bessel_derivative_zero(1, 1)  # ≈ 1.8412
         self.kc = self.p_prime_11 / self.radius  # Cutoff wavenumber
-        self.wc = self.kc * c0  # Cutoff angular frequency
-        self.fc = c0 * self.kc / (2 * np.pi)  # Cutoff frequency [Hz]
+        self.wc = self.kc * c0                   # Cutoff angular frequency
+        self.fc = c0 * self.kc / (2 * np.pi)    # Cutoff frequency [Hz]
+
+        # Frequency grid config
+        self._freq_range = freq_range  # (f_min, f_max) Hz, or None → physics default
+        self._n_samples  = n_samples
+
+        # Cache — populated lazily on first plot call (or manually via compute())
+        self._frequencies: Optional[np.ndarray] = None
+        self._S_dict: Optional[Dict[str, np.ndarray]] = None
+        self._Z_dict: Optional[Dict[str, np.ndarray]] = None
+
+    # =========================================================================
+    # Bessel zero helpers
+    # =========================================================================
 
     @classmethod
     def get_bessel_zero(cls, n: int, m: int) -> float:
@@ -76,7 +102,6 @@ class CWGAnalytical:
 
         key = (n, m)
         if key not in cls._bessel_zeros_cache:
-            # Compute all zeros up to m for efficiency
             zeros = jn_zeros(n, m)
             for i, z in enumerate(zeros, 1):
                 cls._bessel_zeros_cache[(n, i)] = float(z)
@@ -109,7 +134,6 @@ class CWGAnalytical:
 
         key = (n, m)
         if key not in cls._bessel_derivative_zeros_cache:
-            # Compute all zeros up to m for efficiency
             zeros = jnp_zeros(n, m)
             for i, z in enumerate(zeros, 1):
                 cls._bessel_derivative_zeros_cache[(n, i)] = float(z)
@@ -165,7 +189,7 @@ class CWGAnalytical:
         return p_nm / self.radius
 
     # =========================================================================
-    # Wave Impedance (for TE11 fundamental mode by default)
+    # Wave Impedance
     # =========================================================================
 
     def wave_impedance(
@@ -362,11 +386,9 @@ class CWGAnalytical:
         freq = np.atleast_1d(freq).astype(complex)
         n_freq = len(freq)
 
-        # Get Z-parameters
         Z = self.z_parameters(freq, mode_type, n, m)
         Zw = self.wave_impedance(freq, mode_type, n, m)
 
-        # Determine reference impedance
         if isinstance(Z0_ref, str):
             wave_impedance_options = {'zw', 'zte', 'ztm', 'wave', 'matched'}
             if Z0_ref.lower() in wave_impedance_options:
@@ -382,7 +404,6 @@ class CWGAnalytical:
         else:
             Z0_array = np.atleast_1d(Z0_ref).astype(complex)
 
-        # Compute S-parameters at each frequency
         S11 = np.zeros(n_freq, dtype=complex)
         S21 = np.zeros(n_freq, dtype=complex)
 
@@ -391,7 +412,6 @@ class CWGAnalytical:
                 [Z['Z11'][i], Z['Z12'][i]],
                 [Z['Z21'][i], Z['Z22'][i]]
             ])
-
             S_mat = self._z_to_s_matrix(Z_mat, Z0_array[i])
             S11[i] = S_mat[0, 0]
             S21[i] = S_mat[1, 0]
@@ -435,9 +455,7 @@ class CWGAnalytical:
         n: int = 1,
         m: int = 1
     ) -> Dict[str, np.ndarray]:
-        """
-        Compute S-parameters with fixed reference impedance.
-        """
+        """Compute S-parameters with fixed reference impedance."""
         return self.s_parameters(freq, Z0_ref=Z0_ref, mode_type=mode_type, n=n, m=m)
 
     @staticmethod
@@ -445,10 +463,8 @@ class CWGAnalytical:
         """Convert 2x2 Z-parameter matrix to S-parameter matrix."""
         n = Z.shape[0]
         I = np.eye(n, dtype=complex)
-
         Zn = Z - Z0 * I
         Zd = Z + Z0 * I
-
         S = Zn @ np.linalg.inv(Zd)
         return S
 
@@ -531,13 +547,11 @@ class CWGAnalytical:
             Resonant frequencies [Hz]
         """
         freqs = []
-
         for p in range(1, n_modes + 1):
             kz = p * np.pi / self.length
             k = np.sqrt(self.kc**2 + kz**2)
             f = c0 * k / (2 * np.pi)
             freqs.append(f)
-
         return np.array(freqs)
 
     def eigenfrequencies(
@@ -593,26 +607,12 @@ class CWGAnalytical:
             dict: {mode_label: frequency_Hz}
             list: [(freq_Hz, k, mode_string, [(n,m,p,mode_type), ...])]
             array: ndarray of frequencies [Hz]
-
-        Examples
-        --------
-        >>> cwg = CWGAnalytical(radius=0.01, length=0.05)
-        >>> # Get all modes
-        >>> freqs = cwg.eigenfrequencies(n_modes=20)
-        >>> # Get only TE modes
-        >>> te_freqs = cwg.eigenfrequencies(n_modes=10, mode_types=['TE'])
-        >>> # Get specific families
-        >>> families = cwg.eigenfrequencies(n_modes=10, mode_types=['TE11p', 'TM01p'])
-        >>> # Get as sorted array
-        >>> freq_array = cwg.eigenfrequencies(n_modes=10, return_format='array')
         """
-        # Determine which modes to compute
         if mode_types is None or mode_types == ['all']:
             compute_all = True
             specific_families = []
         else:
             compute_all = False
-            # Check if requesting general TE/TM or specific families
             general_types = [t for t in mode_types if t in ['TE', 'TM']]
             specific_families = [t for t in mode_types if t not in ['TE', 'TM']]
 
@@ -634,13 +634,11 @@ class CWGAnalytical:
                 n_modes, n_max, m_max, p_max, include_cutoff_modes, return_format
             )
 
-        # Handle specific mode families
         if specific_families:
             return self._compute_specific_families(
                 n_modes, specific_families, p_max, include_cutoff_modes, return_format
             )
 
-        # Default: all modes
         return self._compute_general_modes(
             n_modes, n_max, m_max, p_max, include_cutoff_modes, return_format
         )
@@ -656,80 +654,40 @@ class CWGAnalytical:
         te_only: bool = False,
         tm_only: bool = False
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
-        """
-        Compute all physical eigenfrequencies by iterating over (n, m, p).
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of eigenfrequencies to return
-        n_max : int
-            Maximum azimuthal index
-        m_max : int
-            Maximum radial index
-        p_max : int
-            Maximum longitudinal index
-        include_cutoff_modes : bool
-            Include p=0 modes (at cutoff)
-        return_format : str
-            'dict', 'list', or 'array'
-        te_only : bool
-            If True, only return TE modes
-        tm_only : bool
-            If True, only return TM modes
-
-        Returns
-        -------
-        Eigenfrequencies in requested format
-        """
-        # Store unique eigenvalues with their mode info
-        # Key: k² (rounded), Value: list of (n, m, p, mode_type) tuples
+        """Compute all physical eigenfrequencies by iterating over (n, m, p)."""
         eigenvalue_modes = {}
-
         p_start = 0 if include_cutoff_modes else 1
 
         for n in range(n_max + 1):
             for m in range(1, m_max + 1):
                 for p in range(p_start, p_max + 1):
-                    # TE modes: n >= 0, m >= 1, p >= 0
                     if not tm_only:
                         try:
                             kc_te = self.cutoff_wavenumber_TE(n, m)
                             kz = p * np.pi / self.length
                             k_squared = kc_te**2 + kz**2
-
-                            # Skip zero frequency
                             if k_squared < 1e-20:
                                 continue
-
-                            k_squared_rounded = round(k_squared, 10)
-
-                            if k_squared_rounded not in eigenvalue_modes:
-                                eigenvalue_modes[k_squared_rounded] = []
-
-                            eigenvalue_modes[k_squared_rounded].append((n, m, p, 'TE'))
+                            k_sq_r = round(k_squared, 10)
+                            if k_sq_r not in eigenvalue_modes:
+                                eigenvalue_modes[k_sq_r] = []
+                            eigenvalue_modes[k_sq_r].append((n, m, p, 'TE'))
                         except Exception:
                             pass
 
-                    # TM modes: n >= 0, m >= 1, p >= 1
                     if p >= 1 and not te_only:
                         try:
                             kc_tm = self.cutoff_wavenumber_TM(n, m)
                             kz = p * np.pi / self.length
                             k_squared = kc_tm**2 + kz**2
-
-                            k_squared_rounded = round(k_squared, 10)
-
-                            if k_squared_rounded not in eigenvalue_modes:
-                                eigenvalue_modes[k_squared_rounded] = []
-
-                            eigenvalue_modes[k_squared_rounded].append((n, m, p, 'TM'))
+                            k_sq_r = round(k_squared, 10)
+                            if k_sq_r not in eigenvalue_modes:
+                                eigenvalue_modes[k_sq_r] = []
+                            eigenvalue_modes[k_sq_r].append((n, m, p, 'TM'))
                         except Exception:
                             pass
 
-        # Sort by eigenvalue
         sorted_eigenvalues = sorted(eigenvalue_modes.keys())
-
         return self._format_eigenfrequency_results(
             sorted_eigenvalues, eigenvalue_modes, n_modes, return_format
         )
@@ -742,38 +700,18 @@ class CWGAnalytical:
         include_cutoff_modes: bool,
         return_format: str
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
-        """
-        Compute eigenfrequencies for specific mode families.
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of modes to return
-        families : list of str
-            Mode family names like 'TE11p', 'TM01p', etc.
-        p_max : int
-            Maximum longitudinal index
-        include_cutoff_modes : bool
-            Include p=0 modes
-        return_format : str
-            'dict', 'list', or 'array'
-
-        Returns
-        -------
-        Eigenfrequencies in requested format
-        """
+        """Compute eigenfrequencies for specific mode families."""
         eigenvalue_modes = {}
 
         for family in families:
             modes = self._get_family_modes(family, p_max, include_cutoff_modes)
             for k_sq, mode_info in modes.items():
-                k_sq_rounded = round(k_sq, 10)
-                if k_sq_rounded not in eigenvalue_modes:
-                    eigenvalue_modes[k_sq_rounded] = []
-                eigenvalue_modes[k_sq_rounded].extend(mode_info)
+                k_sq_r = round(k_sq, 10)
+                if k_sq_r not in eigenvalue_modes:
+                    eigenvalue_modes[k_sq_r] = []
+                eigenvalue_modes[k_sq_r].extend(mode_info)
 
         sorted_eigenvalues = sorted(eigenvalue_modes.keys())
-
         return self._format_eigenfrequency_results(
             sorted_eigenvalues, eigenvalue_modes, n_modes, return_format
         )
@@ -784,31 +722,14 @@ class CWGAnalytical:
         p_max: int,
         include_cutoff_modes: bool
     ) -> Dict[float, List[Tuple]]:
-        """
-        Get modes for a specific family like 'TE11p', 'TM01p', etc.
-
-        Parameters
-        ----------
-        family : str
-            Family name (e.g., 'TE11p', 'TM01p', 'TE21p')
-        p_max : int
-            Maximum longitudinal index
-        include_cutoff_modes : bool
-            Include p=0 modes
-
-        Returns
-        -------
-        dict
-            {k_squared: [(n, m, p, mode_type), ...]}
-        """
+        """Get modes for a specific family like 'TE11p', 'TM01p', etc."""
         modes = {}
 
-        # Parse family string (e.g., 'TE11p' -> mode_type='TE', n=1, m=1)
         if len(family) < 4:
             return modes
 
-        mode_type = family[:2].upper()  # 'TE' or 'TM'
-        indices = family[2:-1]  # e.g., '11', '01', '21'
+        mode_type = family[:2].upper()
+        indices = family[2:-1]
 
         if len(indices) < 2:
             return modes
@@ -819,7 +740,6 @@ class CWGAnalytical:
         except ValueError:
             return modes
 
-        # Get cutoff wavenumber for this family
         try:
             if mode_type == 'TE':
                 kc = self.cutoff_wavenumber_TE(n, m)
@@ -828,23 +748,17 @@ class CWGAnalytical:
         except Exception:
             return modes
 
-        # Determine starting p based on mode type
-        if mode_type == 'TM':
-            p_start = 1  # TM modes require p >= 1
-        else:
-            p_start = 0 if include_cutoff_modes else 1
+        p_start = 1 if mode_type == 'TM' else (0 if include_cutoff_modes else 1)
 
         for p in range(p_start, p_max + 1):
             kz = p * np.pi / self.length
             k_sq = kc**2 + kz**2
-
             if k_sq < 1e-20:
                 continue
-
-            k_sq_rounded = round(k_sq, 10)
-            if k_sq_rounded not in modes:
-                modes[k_sq_rounded] = []
-            modes[k_sq_rounded].append((n, m, p, mode_type))
+            k_sq_r = round(k_sq, 10)
+            if k_sq_r not in modes:
+                modes[k_sq_r] = []
+            modes[k_sq_r].append((n, m, p, mode_type))
 
         return modes
 
@@ -855,32 +769,13 @@ class CWGAnalytical:
         n_modes: int,
         return_format: str
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
-        """
-        Format eigenfrequency results based on requested format.
-
-        Parameters
-        ----------
-        sorted_eigenvalues : list
-            Sorted list of k² values
-        eigenvalue_modes : dict
-            {k_squared: [(n, m, p, mode_type), ...]}
-        n_modes : int
-            Number of modes to return
-        return_format : str
-            'dict', 'list', or 'array'
-
-        Returns
-        -------
-        Formatted results
-        """
+        """Format eigenfrequency results based on requested format."""
         if return_format == 'array':
             frequencies = []
             for k_sq in sorted_eigenvalues:
                 if len(frequencies) >= n_modes:
                     break
-                k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
-                frequencies.append(f)
+                frequencies.append(c0 * np.sqrt(k_sq) / (2 * np.pi))
             return np.array(frequencies[:n_modes])
 
         elif return_format == 'list':
@@ -891,15 +786,11 @@ class CWGAnalytical:
                 k = np.sqrt(k_sq)
                 f = c0 * k / (2 * np.pi)
                 modes = eigenvalue_modes[k_sq]
-
-                # Format mode string - sort by type, then indices
-                mode_strs = []
-                for n, m, p, mode_type in sorted(modes, key=lambda x: (x[3], x[0], x[1], x[2])):
-                    mode_strs.append(f"{mode_type}{n}{m}{p}")
-                mode_string = ", ".join(mode_strs)
-
-                result_list.append((f, k, mode_string, modes))
-
+                mode_strs = [
+                    f"{mt}{n}{m}{p}"
+                    for n, m, p, mt in sorted(modes, key=lambda x: (x[3], x[0], x[1], x[2]))
+                ]
+                result_list.append((f, k, ", ".join(mode_strs), modes))
             return result_list[:n_modes]
 
         else:  # 'dict' (default)
@@ -911,16 +802,13 @@ class CWGAnalytical:
                 k = np.sqrt(k_sq)
                 f = c0 * k / (2 * np.pi)
                 modes = eigenvalue_modes[k_sq]
-
-                # Create labels for each mode at this frequency
-                for n, m, p, mode_type in sorted(modes, key=lambda x: (x[3], x[0], x[1], x[2])):
-                    label = f"{mode_type}{n}{m}{p}"
+                for n, m, p, mt in sorted(modes, key=lambda x: (x[3], x[0], x[1], x[2])):
+                    label = f"{mt}{n}{m}{p}"
                     if label not in result_dict:
                         result_dict[label] = f
                         count += 1
                         if count >= n_modes:
                             break
-
             return result_dict
 
     def all_eigenfrequencies(
@@ -931,33 +819,7 @@ class CWGAnalytical:
         p_max: int = 10,
         return_format: str = 'dict'
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
-        """
-        Compute all physical eigenfrequencies of the circular cavity.
-
-        This is an alias for eigenfrequencies() with mode_types=None (all modes).
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of eigenfrequencies to return
-        n_max : int
-            Maximum azimuthal index
-        m_max : int
-            Maximum radial index
-        p_max : int
-            Maximum longitudinal index
-        return_format : str
-            'dict': Return {mode_label: frequency} dict
-            'list': Return [(frequency, k, mode_string, indices)] list
-            'array': Return sorted frequency array
-
-        Returns
-        -------
-        Depending on return_format:
-            dict: {mode_label: frequency_Hz}
-            list: [(freq_Hz, k, mode_string, [(n,m,p), ...])]
-            array: ndarray of frequencies
-        """
+        """Compute all physical eigenfrequencies of the circular cavity."""
         return self.eigenfrequencies(
             n_modes=n_modes,
             mode_types=None,
@@ -1003,10 +865,8 @@ class CWGAnalytical:
 
         kz = p * np.pi / self.length
         k = np.sqrt(kc**2 + kz**2)
-
         f = c0 * k / (2 * np.pi)
 
-        # Wavelengths
         lambda_0 = c0 / f if f > 0 else np.inf
         lambda_c = c0 / fc if fc > 0 else np.inf
 
@@ -1033,18 +893,7 @@ class CWGAnalytical:
         p_max: int = 10,
         mode_types: Optional[List[str]] = None
     ) -> None:
-        """
-        Print a formatted table of eigenfrequencies.
-
-        Parameters
-        ----------
-        n_modes : int
-            Number of modes to display
-        n_max, m_max, p_max : int
-            Maximum indices to search
-        mode_types : list of str, optional
-            Filter by mode types (None for all modes)
-        """
+        """Print a formatted table of eigenfrequencies."""
         results = self.eigenfrequencies(
             n_modes=n_modes,
             mode_types=mode_types,
@@ -1054,11 +903,7 @@ class CWGAnalytical:
             return_format='list'
         )
 
-        # Build title based on mode types
-        if mode_types is None:
-            type_str = "All Modes"
-        else:
-            type_str = ", ".join(mode_types)
+        type_str = "All Modes" if mode_types is None else ", ".join(mode_types)
 
         print("\n" + "=" * 90)
         print(f"Circular Cavity Eigenfrequencies ({type_str})")
@@ -1077,50 +922,28 @@ class CWGAnalytical:
         n_max: int = 5,
         m_max: int = 5
     ) -> List[Dict]:
-        """
-        Get list of cutoff frequencies sorted by value.
-
-        Parameters
-        ----------
-        n_max : int
-            Maximum azimuthal index
-        m_max : int
-            Maximum radial index
-
-        Returns
-        -------
-        list of dict
-            Sorted list of mode information dictionaries
-        """
+        """Get list of cutoff frequencies sorted by value."""
         modes = []
 
-        # TE modes
         for n in range(n_max + 1):
             for m in range(1, m_max + 1):
                 try:
                     f_c = self.cutoff_frequency_TE(n, m)
                     modes.append({
-                        'type': 'TE',
-                        'n': n,
-                        'm': m,
-                        'label': f'TE{n}{m}',
-                        'frequency': f_c,
+                        'type': 'TE', 'n': n, 'm': m,
+                        'label': f'TE{n}{m}', 'frequency': f_c,
                         'kc': self.cutoff_wavenumber_TE(n, m)
                     })
                 except Exception:
                     pass
 
-        # TM modes
         for n in range(n_max + 1):
             for m in range(1, m_max + 1):
                 try:
                     f_c = self.cutoff_frequency_TM(n, m)
                     modes.append({
-                        'type': 'TM',
-                        'n': n,
-                        'm': m,
-                        'label': f'TM{n}{m}',
-                        'frequency': f_c,
+                        'type': 'TM', 'n': n, 'm': m,
+                        'label': f'TM{n}{m}', 'frequency': f_c,
                         'kc': self.cutoff_wavenumber_TM(n, m)
                     })
                 except Exception:
@@ -1130,16 +953,7 @@ class CWGAnalytical:
         return modes
 
     def print_cutoff_frequencies(self, n_max: int = 5, m_max: int = 5) -> None:
-        """
-        Print table of cutoff frequencies.
-
-        Parameters
-        ----------
-        n_max : int
-            Maximum azimuthal index
-        m_max : int
-            Maximum radial index
-        """
+        """Print table of cutoff frequencies."""
         print(f"\nCutoff frequencies for circular waveguide (radius = {self.radius*1e3:.1f} mm)")
         print("=" * 60)
 
@@ -1149,10 +963,124 @@ class CWGAnalytical:
         print("-" * 50)
         for mode in modes[:15]:
             wavelength = c0 / mode['frequency'] * 1e3  # mm
-            print(f"{mode['label']:<10} {mode['frequency']/1e9:>12.4f} {wavelength:>12.2f} {mode['kc']:>15.4f}")
+            print(f"{mode['label']:<10} {mode['frequency']/1e9:>12.4f} "
+                  f"{wavelength:>12.2f} {mode['kc']:>15.4f}")
 
         print("=" * 60)
         print(f"Note: TE11 is the fundamental mode with fc = {self.fc/1e9:.4f} GHz")
+
+    # =========================================================================
+    # PlotMixin interface — lazy compute + required properties
+    # =========================================================================
+
+    def _default_freq_range(self) -> Tuple[float, float]:
+        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff."""
+        return (0.5 * self.fc, 2.5 * self.fc)
+
+    def _ensure_computed(self, n_samples: Optional[int] = None) -> None:
+        """Compute S/Z on the stored grid if not already done."""
+        if self._S_dict is not None:
+            return
+        f_min, f_max = self._freq_range or self._default_freq_range()
+        freq = np.linspace(f_min, f_max, n_samples or self._n_samples)
+        self.compute(freq)
+
+    def compute(
+        self,
+        freq: Optional[Union[float, np.ndarray]] = None,
+        n_samples: Optional[int] = None,
+        Z0_ref: Union[float, str] = 'Zw',
+        mode_type: str = 'TE',
+        n: int = 1,
+        m: int = 1,
+    ) -> 'CWGAnalytical':
+        """
+        Evaluate and cache S/Z on a frequency grid.
+
+        Parameters
+        ----------
+        freq : array-like, optional
+            Frequency points [Hz]. If None, uses freq_range from __init__
+            (or the physics default 0.5·fc → 2.5·fc).
+        n_samples : int, optional
+            Number of points. Overrides the instance default.
+            If freq is an array, resamples it to n_samples points.
+        Z0_ref : float or str
+            Reference impedance for S-parameters (default: 'Zw').
+        mode_type : str
+            'TE' or 'TM'.
+        n, m : int
+            Mode indices (default: TE11).
+
+        Returns
+        -------
+        self
+            Allows chaining: cwg.compute(freq).plot_s()
+        """
+        if freq is None:
+            f_min, f_max = self._freq_range or self._default_freq_range()
+            freq = np.linspace(f_min, f_max, n_samples or self._n_samples)
+        else:
+            freq = np.atleast_1d(freq).astype(float)
+            if n_samples is not None:
+                freq = np.linspace(freq[0], freq[-1], n_samples)
+
+        self._frequencies = freq
+
+        S = self.s_parameters(freq, Z0_ref=Z0_ref, mode_type=mode_type, n=n, m=m)
+        Z = self.z_parameters(freq, mode_type=mode_type, n=n, m=m)
+
+        # Key format matches CSTResult / PlotMixin convention: 'i(mi)j(mj)'
+        self._S_dict = {
+            '1(1)1(1)': S['S11'],
+            '2(1)1(1)': S['S21'],
+            '1(1)2(1)': S['S12'],
+            '2(1)2(1)': S['S22'],
+        }
+        self._Z_dict = {
+            '1(1)1(1)': Z['Z11'],
+            '2(1)1(1)': Z['Z21'],
+            '1(1)2(1)': Z['Z12'],
+            '2(1)2(1)': Z['Z22'],
+        }
+        return self
+
+    @property
+    def frequencies(self) -> np.ndarray:
+        """Frequency grid [Hz] set by compute(). Required by PlotMixin."""
+        if self._frequencies is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._frequencies
+
+    @property
+    def S_dict(self) -> Dict[str, np.ndarray]:
+        """S-parameters keyed as '1(1)1(1)' etc. Required by PlotMixin."""
+        if self._S_dict is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._S_dict
+
+    @property
+    def Z_dict(self) -> Dict[str, np.ndarray]:
+        """Z-parameters keyed as '1(1)1(1)' etc. Required by PlotMixin."""
+        if self._Z_dict is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._Z_dict
+
+    def get_resonant_frequencies(self) -> np.ndarray:
+        """Exposes resonant frequencies so PlotMixin.plot_eigenvalues() works."""
+        return self.resonant_frequencies()
+
+    # PlotMixin overrides — auto-compute, then delegate to super()
+
+    def plot_s(self, *args, n_samples: Optional[int] = None, **kwargs):
+        """Auto-compute if needed, then delegate to PlotMixin.plot_s()."""
+        self._ensure_computed(n_samples)
+        return super().plot_s(*args, **kwargs)
+
+    def plot_z(self, *args, n_samples: Optional[int] = None, **kwargs):
+        """Auto-compute if needed, then delegate to PlotMixin.plot_z()."""
+        self._ensure_computed(n_samples)
+        return super().plot_z(*args, **kwargs)
 
 
 # =============================================================================
@@ -1193,7 +1121,6 @@ def compare_eigenfrequencies(
     """
     analytical = CWGAnalytical(radius=radius, length=length)
 
-    # Get all eigenfrequencies
     anal_results = analytical.eigenfrequencies(
         n_modes=n_modes * 2,
         return_format='list'
@@ -1211,9 +1138,7 @@ def compare_eigenfrequencies(
         for anal_idx, (anal_f, k, modes_str, modes) in enumerate(anal_results):
             if anal_idx in matched_anal_indices:
                 continue
-
             rel_error = abs(fem_f - anal_f) / anal_f if anal_f > 0 else np.inf
-
             if rel_error < best_error:
                 best_error = rel_error
                 best_match = (anal_idx, anal_f, modes_str, modes)
@@ -1232,7 +1157,6 @@ def compare_eigenfrequencies(
             matched_anal_indices.add(anal_idx)
 
     unmatched = np.array([i for i in range(len(fem_freqs)) if i not in matched_fem_indices])
-
     return matches, np.array(errors), unmatched
 
 
@@ -1262,7 +1186,8 @@ def print_eigenfrequency_comparison(
     print("Eigenfrequency Comparison: FEM vs Analytical (Circular Waveguide)")
     print(f"Dimensions: radius={radius*1e3:.1f}mm, L={length*1e3:.1f}mm")
     print("=" * 85)
-    print(f"{'Index':<6} {'FEM [GHz]':<14} {'Analytical [GHz]':<18} {'Mode(s)':<25} {'Error [%]':<10}")
+    print(f"{'Index':<6} {'FEM [GHz]':<14} {'Analytical [GHz]':<18} "
+          f"{'Mode(s)':<25} {'Error [%]':<10}")
     print("-" * 85)
 
     for idx in sorted(matches.keys()):
