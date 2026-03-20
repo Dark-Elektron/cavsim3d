@@ -25,7 +25,7 @@ class CWGAnalytical(PlotMixin):
     length : float
         Waveguide length [m]
     freq_range : tuple of float, optional
-        Frequency range (f_min, f_max) in Hz for auto-sampling.
+        Frequency range (f_min, f_max) in GHz for auto-sampling.
         If None, defaults to (0.5·fc, 2.5·fc) based on the TE11 cutoff.
     n_samples : int
         Number of frequency samples (default: 1000).
@@ -61,10 +61,10 @@ class CWGAnalytical(PlotMixin):
         self.p_prime_11 = self.get_bessel_derivative_zero(1, 1)  # ≈ 1.8412
         self.kc = self.p_prime_11 / self.radius  # Cutoff wavenumber
         self.wc = self.kc * c0                   # Cutoff angular frequency
-        self.fc = c0 * self.kc / (2 * np.pi)    # Cutoff frequency [Hz]
+        self.fc = c0 * self.kc / (2 * np.pi) / 1e9  # Cutoff frequency [GHz]
 
         # Frequency grid config
-        self._freq_range = freq_range  # (f_min, f_max) Hz, or None → physics default
+        self._freq_range = freq_range  # (f_min, f_max) GHz, or None → physics default
         self._n_samples  = n_samples
 
         # Cache — populated lazily on first plot call (or manually via compute())
@@ -152,7 +152,7 @@ class CWGAnalytical(PlotMixin):
 
     def cutoff_frequency_TE(self, n: int, m: int) -> float:
         """
-        Cutoff frequency for TE_nm mode [Hz].
+        Cutoff frequency for TE_nm mode [GHz].
 
         Parameters
         ----------
@@ -162,11 +162,11 @@ class CWGAnalytical(PlotMixin):
             Radial mode number (m >= 1)
         """
         p_prime_nm = self.get_bessel_derivative_zero(n, m)
-        return c0 * p_prime_nm / (2 * np.pi * self.radius)
+        return c0 * p_prime_nm / (2 * np.pi * self.radius) / 1e9
 
     def cutoff_frequency_TM(self, n: int, m: int) -> float:
         """
-        Cutoff frequency for TM_nm mode [Hz].
+        Cutoff frequency for TM_nm mode [GHz].
 
         Parameters
         ----------
@@ -176,7 +176,7 @@ class CWGAnalytical(PlotMixin):
             Radial mode number (m >= 1)
         """
         p_nm = self.get_bessel_zero(n, m)
-        return c0 * p_nm / (2 * np.pi * self.radius)
+        return c0 * p_nm / (2 * np.pi * self.radius) / 1e9
 
     def cutoff_wavenumber_TE(self, n: int, m: int) -> float:
         """Cutoff wavenumber for TE_nm mode [rad/m]."""
@@ -211,7 +211,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         mode_type : str
             'TE' or 'TM'
         n, m : int
@@ -223,7 +223,8 @@ class CWGAnalytical(PlotMixin):
             Wave impedance (complex)
         """
         freq = np.atleast_1d(freq).astype(complex)
-        omega = 2 * np.pi * freq
+        freq_hz = freq * 1e9  # Convert GHz to Hz
+        omega = 2 * np.pi * freq_hz
         s = 1j * omega
 
         if mode_type.upper() == 'TE':
@@ -268,7 +269,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         mode_type : str
             'TE' or 'TM'
         n, m : int
@@ -280,7 +281,8 @@ class CWGAnalytical(PlotMixin):
             Propagation constant (complex)
         """
         freq = np.atleast_1d(freq).astype(complex)
-        omega = 2 * np.pi * freq
+        freq_hz = freq * 1e9  # Convert GHz to Hz
+        omega = 2 * np.pi * freq_hz
         Z = self.wave_impedance(freq, mode_type, n, m)
 
         if mode_type.upper() == 'TE':
@@ -315,7 +317,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         mode_type : str
             'TE' or 'TM'
         n, m : int
@@ -367,7 +369,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         Z0_ref : float, ndarray, or str
             Reference impedance for S-parameter conversion.
             - 'Zw', 'ZTE', 'ZTM', 'wave', 'matched': Use frequency-dependent wave impedance
@@ -491,7 +493,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         mode_type : str
             'TE' or 'TM'
         n, m : int
@@ -544,13 +546,13 @@ class CWGAnalytical(PlotMixin):
         Returns
         -------
         freqs : ndarray
-            Resonant frequencies [Hz]
+            Resonant frequencies [GHz]
         """
         freqs = []
         for p in range(1, n_modes + 1):
             kz = p * np.pi / self.length
             k = np.sqrt(self.kc**2 + kz**2)
-            f = c0 * k / (2 * np.pi)
+            f = c0 * k / (2 * np.pi) / 1e9  # Convert to GHz
             freqs.append(f)
         return np.array(freqs)
 
@@ -597,16 +599,16 @@ class CWGAnalytical(PlotMixin):
             If True, include modes with p=0 (at cutoff frequency)
         return_format : str
             Output format:
-            - 'dict': Return {mode_label: frequency_Hz} dict (default)
-            - 'list': Return [(freq_Hz, k, mode_string, indices)] list
-            - 'array': Return sorted frequency array only
+            - 'dict': Return {mode_label: frequency_GHz} dict (default)
+            - 'list': Return [(freq_GHz, k, mode_string, indices)] list
+            - 'array': Return sorted frequency array only [GHz]
 
         Returns
         -------
         Depending on return_format:
-            dict: {mode_label: frequency_Hz}
-            list: [(freq_Hz, k, mode_string, [(n,m,p,mode_type), ...])]
-            array: ndarray of frequencies [Hz]
+            dict: {mode_label: frequency_GHz}
+            list: [(freq_GHz, k, mode_string, [(n,m,p,mode_type), ...])]
+            array: ndarray of frequencies [GHz]
         """
         if mode_types is None or mode_types == ['all']:
             compute_all = True
@@ -775,7 +777,7 @@ class CWGAnalytical(PlotMixin):
             for k_sq in sorted_eigenvalues:
                 if len(frequencies) >= n_modes:
                     break
-                frequencies.append(c0 * np.sqrt(k_sq) / (2 * np.pi))
+                frequencies.append(c0 * np.sqrt(k_sq) / (2 * np.pi) / 1e9)  # GHz
             return np.array(frequencies[:n_modes])
 
         elif return_format == 'list':
@@ -784,7 +786,7 @@ class CWGAnalytical(PlotMixin):
                 if len(result_list) >= n_modes:
                     break
                 k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
+                f = c0 * k / (2 * np.pi) / 1e9  # GHz
                 modes = eigenvalue_modes[k_sq]
                 mode_strs = [
                     f"{mt}{n}{m}{p}"
@@ -800,7 +802,7 @@ class CWGAnalytical(PlotMixin):
                 if count >= n_modes:
                     break
                 k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
+                f = c0 * k / (2 * np.pi) / 1e9  # GHz
                 modes = eigenvalue_modes[k_sq]
                 for n, m, p, mt in sorted(modes, key=lambda x: (x[3], x[0], x[1], x[2])):
                     label = f"{mt}{n}{m}{p}"
@@ -858,26 +860,25 @@ class CWGAnalytical(PlotMixin):
         """
         if mode_type.upper() == 'TE':
             kc = self.cutoff_wavenumber_TE(n, m)
-            fc = self.cutoff_frequency_TE(n, m)
+            fc_ghz = self.cutoff_frequency_TE(n, m)
         else:
             kc = self.cutoff_wavenumber_TM(n, m)
-            fc = self.cutoff_frequency_TM(n, m)
+            fc_ghz = self.cutoff_frequency_TM(n, m)
 
         kz = p * np.pi / self.length
         k = np.sqrt(kc**2 + kz**2)
-        f = c0 * k / (2 * np.pi)
+        f_hz = c0 * k / (2 * np.pi)
+        f_ghz = f_hz / 1e9
 
-        lambda_0 = c0 / f if f > 0 else np.inf
-        lambda_c = c0 / fc if fc > 0 else np.inf
+        lambda_0 = c0 / f_hz if f_hz > 0 else np.inf
+        lambda_c = c0 / (fc_ghz * 1e9) if fc_ghz > 0 else np.inf
 
         return {
             'mode_type': mode_type,
             'indices': (n, m, p),
             'label': f"{mode_type}{n}{m}{p}",
-            'frequency_Hz': f,
-            'frequency_GHz': f / 1e9,
-            'cutoff_frequency_Hz': fc,
-            'cutoff_frequency_GHz': fc / 1e9,
+            'frequency': f_ghz,  # GHz
+            'cutoff_frequency': fc_ghz,  # GHz
             'k': k,
             'kc': kc,
             'kz': kz,
@@ -913,7 +914,7 @@ class CWGAnalytical(PlotMixin):
         print("-" * 90)
 
         for i, (f, k, mode_string, modes) in enumerate(results, 1):
-            print(f"{i:<6} {f/1e9:<18.6f} {k:<15.4f} {mode_string}")
+            print(f"{i:<6} {f:<18.6f} {k:<15.4f} {mode_string}")
 
         print("=" * 90)
 
@@ -928,10 +929,10 @@ class CWGAnalytical(PlotMixin):
         for n in range(n_max + 1):
             for m in range(1, m_max + 1):
                 try:
-                    f_c = self.cutoff_frequency_TE(n, m)
+                    f_c_ghz = self.cutoff_frequency_TE(n, m)
                     modes.append({
                         'type': 'TE', 'n': n, 'm': m,
-                        'label': f'TE{n}{m}', 'frequency': f_c,
+                        'label': f'TE{n}{m}', 'fc': f_c_ghz,
                         'kc': self.cutoff_wavenumber_TE(n, m)
                     })
                 except Exception:
@@ -940,16 +941,16 @@ class CWGAnalytical(PlotMixin):
         for n in range(n_max + 1):
             for m in range(1, m_max + 1):
                 try:
-                    f_c = self.cutoff_frequency_TM(n, m)
+                    f_c_ghz = self.cutoff_frequency_TM(n, m)
                     modes.append({
                         'type': 'TM', 'n': n, 'm': m,
-                        'label': f'TM{n}{m}', 'frequency': f_c,
+                        'label': f'TM{n}{m}', 'fc': f_c_ghz,
                         'kc': self.cutoff_wavenumber_TM(n, m)
                     })
                 except Exception:
                     pass
 
-        modes.sort(key=lambda x: x['frequency'])
+        modes.sort(key=lambda x: x['fc'])
         return modes
 
     def print_cutoff_frequencies(self, n_max: int = 5, m_max: int = 5) -> None:
@@ -962,19 +963,19 @@ class CWGAnalytical(PlotMixin):
         print(f"{'Mode':<10} {'f_c [GHz]':>12} {'λ_c [mm]':>12} {'kc [rad/m]':>15}")
         print("-" * 50)
         for mode in modes[:15]:
-            wavelength = c0 / mode['frequency'] * 1e3  # mm
-            print(f"{mode['label']:<10} {mode['frequency']/1e9:>12.4f} "
+            wavelength = c0 / (mode['fc'] * 1e9) * 1e3  # mm
+            print(f"{mode['label']:<10} {mode['fc']:>12.4f} "
                   f"{wavelength:>12.2f} {mode['kc']:>15.4f}")
 
         print("=" * 60)
-        print(f"Note: TE11 is the fundamental mode with fc = {self.fc/1e9:.4f} GHz")
+        print(f"Note: TE11 is the fundamental mode with fc = {self.fc:.4f} GHz")
 
     # =========================================================================
     # PlotMixin interface — lazy compute + required properties
     # =========================================================================
 
     def _default_freq_range(self) -> Tuple[float, float]:
-        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff."""
+        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff [GHz]."""
         return (0.5 * self.fc, 2.5 * self.fc)
 
     def _ensure_computed(self, n_samples: Optional[int] = None) -> None:
@@ -1000,7 +1001,7 @@ class CWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : array-like, optional
-            Frequency points [Hz]. If None, uses freq_range from __init__
+            Frequency points [GHz]. If None, uses freq_range from __init__
             (or the physics default 0.5·fc → 2.5·fc).
         n_samples : int, optional
             Number of points. Overrides the instance default.
@@ -1025,8 +1026,10 @@ class CWGAnalytical(PlotMixin):
             if n_samples is not None:
                 freq = np.linspace(freq[0], freq[-1], n_samples)
 
-        self._frequencies = freq
+        # freq is in GHz, store in Hz for PlotMixin compatibility
+        self._frequencies = freq * 1e9  # Store in Hz
 
+        # Pass GHz to s_parameters and z_parameters (they handle conversion internally)
         S = self.s_parameters(freq, Z0_ref=Z0_ref, mode_type=mode_type, n=n, m=m)
         Z = self.z_parameters(freq, mode_type=mode_type, n=n, m=m)
 
@@ -1050,7 +1053,7 @@ class CWGAnalytical(PlotMixin):
         """Frequency grid [Hz] set by compute(). Required by PlotMixin."""
         if self._frequencies is None:
             raise AttributeError("Call compute() or a plot method first.")
-        return self._frequencies
+        return self._frequencies  # Returns Hz, PlotMixin will convert to GHz for display
 
     @property
     def S_dict(self) -> Dict[str, np.ndarray]:
@@ -1100,7 +1103,7 @@ def compare_eigenfrequencies(
     Parameters
     ----------
     fem_freqs : ndarray
-        Eigenfrequencies from FEM solver [Hz]
+        Eigenfrequencies from FEM solver [GHz]
     radius : float
         Waveguide radius [m]
     length : float
@@ -1172,7 +1175,7 @@ def print_eigenfrequency_comparison(
     Parameters
     ----------
     fem_freqs : ndarray
-        Eigenfrequencies from FEM solver [Hz]
+        Eigenfrequencies from FEM solver [GHz]
     radius, length : float
         Waveguide dimensions [m]
     n_modes : int
@@ -1192,14 +1195,14 @@ def print_eigenfrequency_comparison(
 
     for idx in sorted(matches.keys()):
         m = matches[idx]
-        print(f"{idx:<6} {m['fem_freq']/1e9:<14.4f} {m['anal_freq']/1e9:<18.4f} "
+        print(f"{idx:<6} {m['fem_freq']:<14.4f} {m['anal_freq']:<18.4f} "
               f"{m['mode']:<25} {m['error']*100:<10.2f}")
 
     if len(unmatched) > 0:
         print("-" * 85)
         print("Unmatched FEM frequencies:")
         for idx in unmatched[:10]:
-            print(f"  Index {idx}: {fem_freqs[idx]/1e9:.4f} GHz")
+            print(f"  Index {idx}: {fem_freqs[idx]:.4f} GHz")
 
     if len(errors) > 0:
         print("-" * 85)

@@ -1,7 +1,7 @@
 {
     "project_name": "untitled",
     "order": 1,
-    "bc": "wall",
+    "bc": "default",
     "use_wave_impedance": true,
     "is_compound": true,
     "n_domains": 2,

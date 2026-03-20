@@ -23,7 +23,7 @@ class RWGAnalytical(PlotMixin):
     b : float, optional
         Height [m] (default: a/2)
     freq_range : tuple of float, optional
-        Frequency range (f_min, f_max) in Hz for auto-sampling.
+        Frequency range (f_min, f_max) in GHz for auto-sampling.
         If None, defaults to (0.5·fc, 2.5·fc) based on the TE10 cutoff.
     n_samples : int
         Number of frequency samples (default: 1000).
@@ -44,10 +44,10 @@ class RWGAnalytical(PlotMixin):
         # Cutoff quantities for TE10 mode
         self.kc = np.pi / self.a   # Cutoff wavenumber
         self.wc = self.kc * c0     # Cutoff angular frequency
-        self.fc = c0 / (2 * self.a)  # Cutoff frequency [Hz]
+        self.fc = c0 / (2 * self.a) / 1e9  # Cutoff frequency [GHz]
 
         # Frequency grid config
-        self._freq_range = freq_range  # (f_min, f_max) Hz, or None → physics default
+        self._freq_range = freq_range  # (f_min, f_max) GHz, or None → physics default
         self._n_samples  = n_samples
 
         # Cache — populated lazily on first plot call (or manually via compute())
@@ -68,7 +68,7 @@ class RWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
 
         Returns
         -------
@@ -76,7 +76,8 @@ class RWGAnalytical(PlotMixin):
             TE10 wave impedance (complex)
         """
         freq = np.atleast_1d(freq).astype(complex)
-        omega = 2 * np.pi * freq
+        freq_hz = freq * 1e9  # Convert GHz to Hz
+        omega = 2 * np.pi * freq_hz
         s = 1j * omega
         return s * Z0 / np.sqrt(s**2 + self.wc**2)
 
@@ -89,7 +90,7 @@ class RWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
 
         Returns
         -------
@@ -97,7 +98,8 @@ class RWGAnalytical(PlotMixin):
             Propagation constant (complex)
         """
         freq = np.atleast_1d(freq).astype(complex)
-        omega = 2 * np.pi * freq
+        freq_hz = freq * 1e9  # Convert GHz to Hz
+        omega = 2 * np.pi * freq_hz
         return omega * mu0 / self.wave_impedance(freq)
 
     def z_parameters(self, freq: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -110,7 +112,7 @@ class RWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
 
         Returns
         -------
@@ -143,7 +145,7 @@ class RWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : float or ndarray
-            Frequency [Hz]
+            Frequency [GHz]
         Z0_ref : float, ndarray, or str
             Reference impedance for S-parameter conversion.
             - 'ZTE': Use frequency-dependent wave impedance (matched case)
@@ -210,7 +212,14 @@ class RWGAnalytical(PlotMixin):
         return Zn @ np.linalg.inv(Zd)
 
     def abcd_parameters(self, freq: Union[float, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Compute ABCD (transmission) parameters."""
+        """
+        Compute ABCD (transmission) parameters.
+
+        Parameters
+        ----------
+        freq : float or ndarray
+            Frequency [GHz]
+        """
         freq = np.atleast_1d(freq).astype(complex)
         ZTE = self.wave_impedance(freq)
         kzL = self.propagation_constant(freq) * self.L
@@ -242,13 +251,13 @@ class RWGAnalytical(PlotMixin):
         Returns
         -------
         freqs : ndarray
-            Resonant frequencies [Hz]
+            Resonant frequencies [GHz]
         """
         freqs = []
         for p in range(1, n_modes + 1):
             kz = p * np.pi / self.L
             k = np.sqrt(self.kc**2 + kz**2)
-            freqs.append(c0 * k / (2 * np.pi))
+            freqs.append(c0 * k / (2 * np.pi) / 1e9)  # Convert to GHz
         return np.array(freqs)
 
     # =========================================================================
@@ -264,8 +273,8 @@ class RWGAnalytical(PlotMixin):
         return np.sqrt((m * np.pi / self.a)**2 + (n * np.pi / self.b)**2)
 
     def cutoff_frequency(self, m: int, n: int) -> float:
-        """Compute cutoff frequency for TE_mn or TM_mn mode [Hz]."""
-        return c0 * self.cutoff_wavenumber(m, n) / (2 * np.pi)
+        """Compute cutoff frequency for TE_mn or TM_mn mode [GHz]."""
+        return c0 * self.cutoff_wavenumber(m, n) / (2 * np.pi) / 1e9
 
     def port_eigenmodes(
         self,
@@ -294,7 +303,7 @@ class RWGAnalytical(PlotMixin):
         Depending on return_format:
             list: [{'label': 'TE10', 'type': 'TE', 'm': 1, 'n': 0, 'kc': ..., 'fc': ...}, ...]
             dict: {'TE10': {'type': 'TE', 'm': 1, ...}, ...}
-            array: ndarray of cutoff frequencies [Hz]
+            array: ndarray of cutoff frequencies [GHz]
         """
         modes = []
 
@@ -304,16 +313,16 @@ class RWGAnalytical(PlotMixin):
                     continue
 
                 kc = self.cutoff_wavenumber(m, n)
-                fc = c0 * kc / (2 * np.pi)
+                fc_hz = c0 * kc / (2 * np.pi)
+                fc_ghz = fc_hz / 1e9
 
                 modes.append({
                     'label': f'TE{m}{n}',
                     'type': 'TE',
                     'm': m, 'n': n,
                     'kc': kc,
-                    'fc_Hz': fc,
-                    'fc_GHz': fc / 1e9,
-                    'lambda_c': c0 / fc if fc > 0 else np.inf
+                    'fc': fc_ghz,
+                    'lambda_c': c0 / fc_hz if fc_hz > 0 else np.inf
                 })
 
                 if m >= 1 and n >= 1:
@@ -322,16 +331,15 @@ class RWGAnalytical(PlotMixin):
                         'type': 'TM',
                         'm': m, 'n': n,
                         'kc': kc,
-                        'fc_Hz': fc,
-                        'fc_GHz': fc / 1e9,
-                        'lambda_c': c0 / fc if fc > 0 else np.inf
+                        'fc': fc_ghz,
+                        'lambda_c': c0 / fc_hz if fc_hz > 0 else np.inf
                     })
 
-        modes.sort(key=lambda x: (x['fc_Hz'], 0 if x['type'] == 'TE' else 1, x['m'], x['n']))
+        modes.sort(key=lambda x: (x['fc'], 0 if x['type'] == 'TE' else 1, x['m'], x['n']))
         modes = modes[:n_modes]
 
         if return_format == 'array':
-            return np.array([m['fc_Hz'] for m in modes])
+            return np.array([m['fc'] for m in modes])
         elif return_format == 'dict':
             return {m['label']: m for m in modes}
         else:
@@ -351,11 +359,12 @@ class RWGAnalytical(PlotMixin):
                     continue
 
                 kc = self.cutoff_wavenumber(m, n)
-                fc = c0 * kc / (2 * np.pi)
+                fc_hz = c0 * kc / (2 * np.pi)
+                fc_ghz = fc_hz / 1e9
                 base = {
                     'm': m, 'n': n, 'kc': kc,
-                    'fc_Hz': fc, 'fc_GHz': fc / 1e9,
-                    'lambda_c': c0 / fc if fc > 0 else np.inf
+                    'fc': fc_ghz,
+                    'lambda_c': c0 / fc_hz if fc_hz > 0 else np.inf
                 }
 
                 te = {**base, 'label': f'TE{m}{n}', 'type': 'TE'}
@@ -365,8 +374,8 @@ class RWGAnalytical(PlotMixin):
                     tm = {**base, 'label': f'TM{m}{n}', 'type': 'TM'}
                     tm_modes.append(tm)
 
-        te_modes.sort(key=lambda x: (x['fc_Hz'], x['m'], x['n']))
-        tm_modes.sort(key=lambda x: (x['fc_Hz'], x['m'], x['n']))
+        te_modes.sort(key=lambda x: (x['fc'], x['m'], x['n']))
+        tm_modes.sort(key=lambda x: (x['fc'], x['m'], x['n']))
 
         return {'TE': te_modes[:n_modes], 'TM': tm_modes[:n_modes]}
 
@@ -382,10 +391,16 @@ class RWGAnalytical(PlotMixin):
 
         TE: Z_TE = s * Z0 / sqrt(s^2 + ωc^2)
         TM: Z_TM = Z0 * sqrt(s^2 + ωc^2) / s
+
+        Parameters
+        ----------
+        freq : float or ndarray
+            Frequency [GHz]
         """
         freq = np.atleast_1d(freq).astype(complex)
+        freq_hz = freq * 1e9  # Convert GHz to Hz
         wc = self.cutoff_wavenumber(m, n) * c0
-        s = 1j * 2 * np.pi * freq
+        s = 1j * 2 * np.pi * freq_hz
         sqrt_term = np.sqrt(s**2 + wc**2)
 
         if mode_type.upper() == 'TE':
@@ -405,10 +420,16 @@ class RWGAnalytical(PlotMixin):
         Compute propagation constant for a specific port mode.
 
         β = sqrt((ω/c)^2 - kc^2)  [real above cutoff, imaginary below]
+
+        Parameters
+        ----------
+        freq : float or ndarray
+            Frequency [GHz]
         """
         freq = np.atleast_1d(freq).astype(complex)
+        freq_hz = freq * 1e9  # Convert GHz to Hz
         wc = self.cutoff_wavenumber(m, n) * c0
-        s = 1j * 2 * np.pi * freq
+        s = 1j * 2 * np.pi * freq_hz
         return np.sqrt(s**2 + wc**2) / c0
 
     def print_port_eigenmodes(self, n_modes: int = 20, max_index: int = 10) -> None:
@@ -427,14 +448,14 @@ class RWGAnalytical(PlotMixin):
             lc_mm = mode['lambda_c'] * 1e3 if mode['lambda_c'] < np.inf else np.inf
             print(f"{i:<6} {mode['label']:<10} {mode['type']:<6} "
                   f"({mode['m']},{mode['n']}){'':>5} "
-                  f"{mode['fc_GHz']:<12.4f} {mode['kc']:<14.4f} {lc_mm:<12.2f}")
+                  f"{mode['fc']:<12.4f} {mode['kc']:<14.4f} {lc_mm:<12.2f}")
 
         print("=" * 80)
 
         from collections import defaultdict
         groups = defaultdict(list)
         for mode in modes:
-            groups[round(mode['fc_GHz'], 6)].append(mode['label'])
+            groups[round(mode['fc'], 6)].append(mode['label'])
 
         print("\nDegenerate mode groups (same cutoff frequency):")
         print("-" * 40)
@@ -466,7 +487,7 @@ class RWGAnalytical(PlotMixin):
         Returns
         -------
         freqs : dict
-            {mode_label: frequency_Hz}
+            {mode_label: frequency_GHz}
         """
         if mode_types is None:
             mode_types = ['TE10p']
@@ -488,7 +509,7 @@ class RWGAnalytical(PlotMixin):
             for p in range(p_start, p_start + n_modes):
                 kz = p * np.pi / self.L
                 k = np.sqrt(kc_fam**2 + kz**2)
-                results[f'{prefix}{p}'] = c0 * k / (2 * np.pi)
+                results[f'{prefix}{p}'] = c0 * k / (2 * np.pi) / 1e9  # GHz
 
         return results
 
@@ -515,7 +536,7 @@ class RWGAnalytical(PlotMixin):
 
         Returns
         -------
-        Depending on return_format
+        Depending on return_format (frequencies in GHz)
         """
         pi_over_a_sq = (np.pi / self.a) ** 2
         pi_over_b_sq = (np.pi / self.b) ** 2
@@ -560,7 +581,7 @@ class RWGAnalytical(PlotMixin):
 
         if return_format == 'array':
             return np.array([
-                c0 * np.sqrt(k_sq) / (2 * np.pi)
+                c0 * np.sqrt(k_sq) / (2 * np.pi) / 1e9  # GHz
                 for k_sq in sorted_eigenvalues[:n_modes]
             ])
 
@@ -570,7 +591,7 @@ class RWGAnalytical(PlotMixin):
                 if len(result_list) >= n_modes:
                     break
                 k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
+                f = c0 * k / (2 * np.pi) / 1e9  # GHz
                 modes = eigenvalue_modes[k_sq]
                 mode_string = ", ".join(
                     f"{mt}{m}{n}{p}"
@@ -586,7 +607,7 @@ class RWGAnalytical(PlotMixin):
                 if count >= n_modes:
                     break
                 k = np.sqrt(k_sq)
-                f = c0 * k / (2 * np.pi)
+                f = c0 * k / (2 * np.pi) / 1e9  # GHz
                 for m, n, p, mt in eigenvalue_modes[k_sq]:
                     label = f"{mt}{m}{n}{p}"
                     if label not in result_dict:
@@ -603,36 +624,33 @@ class RWGAnalytical(PlotMixin):
         kz = p * np.pi / self.L
         kc = np.sqrt(kx**2 + ky**2)
         k  = np.sqrt(kx**2 + ky**2 + kz**2)
-        f  = c0 * k / (2 * np.pi)
-        fc = c0 * kc / (2 * np.pi)
+        f_hz  = c0 * k / (2 * np.pi)
+        fc_hz = c0 * kc / (2 * np.pi)
 
         return {
             'mode_type': mode_type,
             'indices': (m, n, p),
             'label': f"{mode_type}{m}{n}{p}",
-            'frequency_Hz': f,
-            'frequency_GHz': f / 1e9,
-            'cutoff_frequency_Hz': fc,
-            'cutoff_frequency_GHz': fc / 1e9,
+            'frequency': f_hz / 1e9,  # GHz
+            'cutoff_frequency': fc_hz / 1e9,  # GHz
             'k': k, 'kc': kc,
             'kx': kx, 'ky': ky, 'kz': kz,
-            'wavelength_m': c0 / f if f > 0 else np.inf,
-            'cutoff_wavelength_m': c0 / fc if fc > 0 else np.inf,
+            'wavelength_m': c0 / f_hz if f_hz > 0 else np.inf,
+            'cutoff_wavelength_m': c0 / fc_hz if fc_hz > 0 else np.inf,
         }
 
     def get_port_mode_info(self, m: int, n: int, mode_type: str = 'TE') -> Dict:
         """Get detailed information about a specific port (2D) mode."""
         kc = self.cutoff_wavenumber(m, n)
-        fc = c0 * kc / (2 * np.pi)
-        lc = c0 / fc if fc > 0 else np.inf
+        fc_hz = c0 * kc / (2 * np.pi)
+        lc = c0 / fc_hz if fc_hz > 0 else np.inf
 
         return {
             'mode_type': mode_type,
             'indices': (m, n),
             'label': f"{mode_type}{m}{n}",
             'kc': kc,
-            'fc_Hz': fc,
-            'fc_GHz': fc / 1e9,
+            'fc': fc_hz / 1e9,  # GHz
             'lambda_c_m': lc,
             'lambda_c_mm': lc * 1e3,
         }
@@ -648,7 +666,7 @@ class RWGAnalytical(PlotMixin):
         print(f"{'Rank':<6} {'Frequency [GHz]':<18} {'k [rad/m]':<15} {'Modes'}")
         print("-" * 90)
         for i, (f, k, mode_string, _) in enumerate(results, 1):
-            print(f"{i:<6} {f/1e9:<18.6f} {k:<15.4f} {mode_string}")
+            print(f"{i:<6} {f:<18.6f} {k:<15.4f} {mode_string}")
         print("=" * 90)
 
     # =========================================================================
@@ -656,7 +674,7 @@ class RWGAnalytical(PlotMixin):
     # =========================================================================
 
     def _default_freq_range(self) -> Tuple[float, float]:
-        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff."""
+        """Physics-based default: 0.5·fc → 2.5·fc, spanning below and above cutoff [GHz]."""
         return (0.5 * self.fc, 2.5 * self.fc)
 
     def _ensure_computed(self, n_samples: Optional[int] = None) -> None:
@@ -667,10 +685,10 @@ class RWGAnalytical(PlotMixin):
         self.compute(np.linspace(f_min, f_max, n_samples or self._n_samples))
 
     def compute(
-        self,
-        freq: Optional[Union[float, np.ndarray]] = None,
-        n_samples: Optional[int] = None,
-        Z0_ref: Union[float, str] = 'ZTE',
+            self,
+            freq: Optional[Union[float, np.ndarray]] = None,
+            n_samples: Optional[int] = None,
+            Z0_ref: Union[float, str] = 'ZTE',
     ) -> 'RWGAnalytical':
         """
         Evaluate and cache S/Z on a frequency grid.
@@ -678,18 +696,9 @@ class RWGAnalytical(PlotMixin):
         Parameters
         ----------
         freq : array-like, optional
-            Frequency points [Hz]. If None, uses freq_range from __init__
+            Frequency points [GHz]. If None, uses freq_range from __init__
             (or the physics default 0.5·fc → 2.5·fc).
-        n_samples : int, optional
-            Number of points. Overrides the instance default.
-            If freq is an array, resamples it to n_samples evenly-spaced points.
-        Z0_ref : float or str
-            Reference impedance for S-parameters (default: 'ZTE').
-
-        Returns
-        -------
-        self
-            Allows chaining: rwg.compute(freq).plot_s()
+        ...
         """
         if freq is None:
             f_min, f_max = self._freq_range or self._default_freq_range()
@@ -699,8 +708,10 @@ class RWGAnalytical(PlotMixin):
             if n_samples is not None:
                 freq = np.linspace(freq[0], freq[-1], n_samples)
 
-        self._frequencies = freq
+        # freq is in GHz, store in Hz for PlotMixin compatibility
+        self._frequencies = freq * 1e9  # Store in Hz
 
+        # Pass GHz to s_parameters and z_parameters (they handle conversion internally)
         S = self.s_parameters(freq, Z0_ref=Z0_ref)
         Z = self.z_parameters(freq)
 
@@ -722,6 +733,13 @@ class RWGAnalytical(PlotMixin):
     @property
     def frequencies(self) -> np.ndarray:
         """Frequency grid [Hz] set by compute(). Required by PlotMixin."""
+        if self._frequencies is None:
+            raise AttributeError("Call compute() or a plot method first.")
+        return self._frequencies  # Returns Hz, PlotMixin will convert to GHz for display
+
+    @property
+    def frequencies(self) -> np.ndarray:
+        """Frequency grid [GHz] set by compute(). Required by PlotMixin."""
         if self._frequencies is None:
             raise AttributeError("Call compute() or a plot method first.")
         return self._frequencies
@@ -775,7 +793,7 @@ def compare_eigenfrequencies(
     Parameters
     ----------
     fem_freqs : ndarray
-        Eigenfrequencies from FEM solver [Hz]
+        Eigenfrequencies from FEM solver [GHz]
     a : float
         Waveguide width [m]
     L : float
@@ -839,7 +857,7 @@ def compare_port_eigenmodes(
     Parameters
     ----------
     fem_cutoffs : ndarray
-        Cutoff frequencies from FEM solver [Hz]
+        Cutoff frequencies from FEM solver [GHz]
     a : float
         Waveguide width [m]
     b : float, optional
@@ -869,7 +887,7 @@ def compare_port_eigenmodes(
         for anal_idx, mode in enumerate(anal_modes):
             if anal_idx in matched_anal:
                 continue
-            anal_fc = mode['fc_Hz']
+            anal_fc = mode['fc']
             rel_error = abs(fem_fc - anal_fc) / anal_fc if anal_fc > 0 else np.inf
             if rel_error < best_error:
                 best_error = rel_error
@@ -880,7 +898,7 @@ def compare_port_eigenmodes(
             matches[fem_idx] = {
                 'mode': mode['label'], 'type': mode['type'],
                 'm': mode['m'], 'n': mode['n'],
-                'fem_fc': fem_fc, 'anal_fc': mode['fc_Hz'], 'error': best_error
+                'fem_fc': fem_fc, 'anal_fc': mode['fc'], 'error': best_error
             }
             errors.append(best_error)
             matched_fem.add(fem_idx)
@@ -911,14 +929,14 @@ def print_eigenfrequency_comparison(
 
     for idx in sorted(matches.keys()):
         m = matches[idx]
-        print(f"{idx:<6} {m['fem_freq']/1e9:<14.4f} {m['anal_freq']/1e9:<18.4f} "
+        print(f"{idx:<6} {m['fem_freq']:<14.4f} {m['anal_freq']:<18.4f} "
               f"{m['mode']:<25} {m['error']*100:<10.2f}")
 
     if len(unmatched) > 0:
         print("-" * 85)
         print("Unmatched FEM frequencies:")
         for idx in unmatched[:10]:
-            print(f"  Index {idx}: {fem_freqs[idx]/1e9:.4f} GHz")
+            print(f"  Index {idx}: {fem_freqs[idx]:.4f} GHz")
 
     if len(errors) > 0:
         print("-" * 85)
@@ -948,7 +966,7 @@ def print_port_eigenmode_comparison(
 
     for idx in sorted(matches.keys()):
         m = matches[idx]
-        print(f"{idx:<6} {m['fem_fc']/1e9:<14.4f} {m['anal_fc']/1e9:<14.4f} "
+        print(f"{idx:<6} {m['fem_fc']:<14.4f} {m['anal_fc']:<14.4f} "
               f"{m['mode']:<10} {m['type']:<6} ({m['m']},{m['n']}){'':>4} "
               f"{m['error']*100:<10.2f}")
 
@@ -956,7 +974,7 @@ def print_port_eigenmode_comparison(
         print("-" * 85)
         print("Unmatched FEM cutoff frequencies:")
         for idx in unmatched[:10]:
-            print(f"  Index {idx}: {fem_cutoffs[idx]/1e9:.4f} GHz")
+            print(f"  Index {idx}: {fem_cutoffs[idx]:.4f} GHz")
 
     if len(errors) > 0:
         print("-" * 85)

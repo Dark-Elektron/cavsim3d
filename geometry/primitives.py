@@ -199,13 +199,13 @@ class CircularWaveguide(BaseGeometry):
 
         for face in self.geo.faces:
             if face.name not in ["port1", "port2"]:
-                face.name = "wall"
+                face.name = "default"
 
         self.geo.faces.Min(Z).col = (1, 0, 0)
         self.geo.faces.Max(Z).col = (1, 0, 0)
 
         self.geo.mat('vacuum')
-        self.bc = 'wall'
+        self.bc = 'default'
         self._bc_explicitly_set = True
         self.invalidate_tag()
 

@@ -19,6 +19,7 @@ import h5py
 import json
 from pathlib import Path
 from datetime import datetime
+import cavsim3d.utils.printing as pr
 
 
 class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
@@ -155,16 +156,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         # Provide helpful warnings
         if not has_matrices:
-            print("Warning: No matrices found in solver. "
-                  "Ensure assemble_matrices() was called.")
-
-        if not has_per_domain_snapshots and not has_global_snapshots:
-            print("Warning: No snapshots found in solver. "
-                  "Ensure solve() was called with store_snapshots=True")
-        elif self.n_domains > 1 and not has_per_domain_snapshots:
-            print("Warning: Multi-domain structure detected but only global snapshots available.")
-            print("         For multi-domain ROM, re-run solve() with per_domain=True:")
-            print("         solver.solve(fmin, fmax, nsamples, per_domain=True, store_snapshots=True)")
+            pr.warning("No matrices found in solver. Ensure assemble_matrices() was called.")
+            return
+        if not self.solver.snapshots:
+            pr.warning("No snapshots found in solver. Ensure solve(..., store_snapshots=True) was called.")
+            if self.solver.n_domains > 1:
+                pr.warning("Multi-domain structure detected but only global snapshots available.")
+                pr.warning("         For multi-domain ROM, re-run solve() with per_domain=True:")
+                pr.warning("         solver.solve(fmin, fmax, nsamples, per_domain=True, store_snapshots=True)")
 
     def _validate_snapshots_for_reduction(self) -> None:
         """Validate that required snapshots are available for reduction."""
@@ -221,6 +220,40 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
         """Get port impedance from underlying solver."""
         return self._port_impedance_func(port, mode, freq)
+
+    # ------------------------------------------------------------------
+    # Logical Matrix Access (Reduced)
+    # ------------------------------------------------------------------
+
+    @property
+    def A(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the reduced system matrix.
+        Returns the global coupled matrix if available, otherwise a dictionary of per-domain matrices.
+        """
+        if self._A_r_global is not None:
+            return self._A_r_global
+        return self._A_r
+
+    @property
+    def B(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the reduced port basis (mass-weighted).
+        Returns the global coupled matrix if available, otherwise a dictionary of per-domain matrices.
+        """
+        if self._B_r_global is not None:
+            return self._B_r_global
+        return self._B_r
+
+    @property
+    def W(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Access the POD projection basis.
+        Returns the global coupled basis if available, otherwise a dictionary of per-domain bases.
+        """
+        if self._W_r_global is not None:
+            return self._W_r_global
+        return self._W
 
     @staticmethod
     def _filter_eigenvalues(
@@ -367,7 +400,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         if not auto_concatenate:
             raise RuntimeError("Global matrix not available. Call concatenate() first.")
 
-        print("Auto-concatenating to get global matrix...")
+        pr.debug("Auto-concatenating to get global matrix...")
         self.concatenate()
         return self._A_r_global
 
@@ -494,9 +527,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self
             For method chaining
         """
-        print("\n" + "=" * 60)
-        print("Model Order Reduction")
-        print("=" * 60)
+        pr.running("\n" + "=" * 60)
+        pr.running("Model Order Reduction")
+        pr.running("=" * 60)
 
         # Validate snapshots
         self._validate_snapshots_for_reduction()
@@ -505,14 +538,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         total_reduced = 0
 
         for domain in self.domains:
-            print(f"\nDomain: {domain}")
+            pr.info(f"\nDomain: {domain}")
 
             # Get snapshots for this domain
             if domain in self._snapshots:
                 snapshots = self._snapshots[domain]
             elif 'global' in self._snapshots and self.n_domains == 1:
                 # Single domain can use global snapshots
-                print("  Using global snapshots (single-domain structure)")
+                pr.debug("  Using global snapshots (single-domain structure)")
                 snapshots = self._snapshots['global']
             else:
                 # This shouldn't happen if _validate_snapshots_for_reduction passed
@@ -554,11 +587,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             W = U[:, :r]
             self._W[domain] = W
 
-            print(f"  Full DOFs: {n}")
-            print(f"  Snapshots: {snapshots.shape[1]}")
-            print(f"  Reduced DOFs: {r}")
-            print(f"  Compression: {100*(1-r/n):.1f}%")
-            print(f"  Singular value decay: {S[0]:.2e} → {S[min(r, len(S)-1)]:.2e}")
+            pr.debug(f"  Full DOFs: {n}")
+            pr.debug(f"  Snapshots: {snapshots.shape[1]}")
+            pr.debug(f"  Reduced DOFs: {r}")
+            pr.debug(f"  Compression: {100*(1-r/n):.1f}%")
+            pr.debug(f"  Singular value decay: {S[0]:.2e} → {S[min(r, len(S)-1)]:.2e}")
 
             # Project matrices
             M_r = W.T @ M @ W
@@ -586,10 +619,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             total_full += n
             total_reduced += r
 
-        print("\n" + "-" * 60)
-        print(f"Total: {total_full} → {total_reduced} DOFs")
-        print(f"Overall compression: {100*(1-total_reduced/total_full):.1f}%")
-        print("=" * 60)
+        pr.done(f"Total: {total_full} → {total_reduced} DOFs")
+        pr.done(f"Overall compression: {100*(1-total_reduced/total_full):.1f}%")
+        pr.done("=" * 60)
 
         self._is_reduced = True
 
@@ -613,34 +645,62 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     def solve(
         self,
-        fmin: float,
-        fmax: float,
-        nsamples: int = 100,
-        solver_type: str = 'auto',
+        fmin: float = None,
+        fmax: float = None,
+        nsamples: int = None,
+        config: Optional[Dict] = None,
         **kwargs
     ) -> Dict:
         """
         Solve reduced system over frequency range.
 
-        For multi-domain systems, automatically concatenates internal
-        domains and returns results for external ports only.
+        Supports passing arguments directly or via a 'config' dictionary.
+        Individual keyword arguments override the config dictionary.
 
         Parameters
         ----------
-        fmin, fmax : float
+        fmin, fmax : float, optional
             Frequency range [GHz]
-        nsamples : int
+        nsamples : int, optional
             Number of frequency samples
-        solver_type : str
-            ``'auto'`` (default) picks direct for small systems, GMRES for
-            large.  ``'iterative'`` forces GMRES.  ``'direct'`` forces
-            ``np.linalg.solve``.
-
-        Returns
-        -------
-        dict
-            Results with frequencies, Z, S matrices and dicts
+        config : dict, optional
+            Dictionary containing solve parameters
+        **kwargs :
+            Individual solve parameters (solver_type, rerun, etc.)
         """
+        # 1. Merge config and kwargs
+        cfg = (config or {}).copy()
+        cfg.update(kwargs)
+
+        # 2. Extract core parameters with defaults
+        fmin = fmin if fmin is not None else cfg.get('fmin')
+        fmax = fmax if fmax is not None else cfg.get('fmax')
+        nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
+
+        # Validate mandatory frequency range
+        if fmin is None or fmax is None:
+            raise ValueError("fmin and fmax must be provided (either directly or via config).")
+
+        # 3. Extract other options from merged cfg
+        solver_type = cfg.get('solver_type', 'auto')
+        rerun = cfg.get('rerun', False)
+        verbose = cfg.get('verbose', False)
+
+        # Set verbosity level
+        pr.set_verbosity(verbose)
+
+        # --- Rerun protection ---
+        has_results = (self._Z_matrix is not None)
+        if has_results and not rerun:
+            import warnings
+            warnings.warn(
+                "Results already exist for this ROM solver. "
+                "To overwrite, call solve(..., rerun=True).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self._build_results_dict()
+
         if not self._is_reduced:
             raise ValueError("Must call reduce() first")
 
@@ -650,6 +710,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             return self._solve_single_domain(solver_type=solver_type)
         else:
             return self._solve_multi_domain(solver_type=solver_type)
+
+    def _build_results_dict(self) -> Dict:
+        """Build results dictionary for reduced solver."""
+        return {
+            'frequencies': self.frequencies,
+            'Z': self._Z_matrix,
+            'S': self._S_matrix,
+            'Z_dict': self.Z_dict,
+            'S_dict': self.S_dict,
+            'x_r': getattr(self, '_x_r_snapshots', None),
+        }
 
     # =========================================================================
     # Persistence
@@ -795,6 +866,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             rom._all_ports = solver.all_ports
             rom._external_ports = solver.external_ports
             rom.domain_port_map = solver.domain_port_map
+            rom._port_impedance_func = solver._get_port_impedance
             rom.port_modes = solver.port_modes
         else:
             rom.mesh = None
@@ -915,7 +987,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         # Resolve 'auto' solver type
         if solver_type == 'auto':
             solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
-            print(f"  Solver: {solver_type} (system size {r})")
+            pr.debug(f"  Solver: {solver_type} (system size {r})")
 
         n_freq = len(self.frequencies)
         n_ports = B_r.shape[1]
@@ -981,10 +1053,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
             if gmres_failures > 0:
                 total_solves = n_freq * n_ports
-                print(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
+                pr.warning(f"  GMRES: {gmres_failures}/{total_solves} solves did NOT converge.")
 
         t1 = time.time()
-        print(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
+        pr.done(f"  Solve loop: {t1 - t0:.3f}s ({n_freq} freq points)")
 
         # ================================================================
         # Store reduced snapshots for field reconstruction
@@ -1243,7 +1315,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             order = getattr(self.solver, 'order', 3)
             bc = getattr(self.solver, 'bc', 'default')
             fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
-            print(f"  Created FES for {domain}: {fes.ndof} DOFs")
+            pr.debug(f"  Created FES for {domain}: {fes.ndof} DOFs")
             return fes
 
         raise ValueError(
@@ -1472,6 +1544,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         component: Literal['real', 'imag', 'abs'] = 'abs',
         field_type: Literal['E', 'H'] = 'E',
         clipping: Optional[Dict] = None,
+        euler_angles: Optional[List] = [45, -45, 0],
         **kwargs
     ) -> None:
         """
@@ -1513,15 +1586,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 raise ValueError(
                     "Multi-domain ROM: call solve() first to create concatenated system."
                 )
-            self._concatenated.plot_field(
-                freq_idx=freq_idx,
-                excitation_port=excitation_port,
-                excitation_mode=excitation_mode,
-                component=component,
-                field_type=field_type,
-                clipping=clipping,
-                **kwargs
-            )
+            self._concatenated.plot_field(freq_idx=freq_idx, excitation_port=excitation_port,
+                                          excitation_mode=excitation_mode, component=component, field_type=field_type,
+                                          clipping=clipping, **kwargs)
             return
 
         # Single domain case
@@ -1542,9 +1609,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 f"Available: {domain_ports}"
             )
 
-        print(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
-        print(f"  Domain: {domain}")
-        print(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+        pr.info(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        pr.info(f"  Domain: {domain}")
+        pr.info(f"  Excitation: {excitation_port}, mode {excitation_mode}")
 
         # Reconstruct field
         E_gf = self._reconstruct_field_gf(freq_idx, excitation_port, excitation_mode, domain)
@@ -1572,11 +1639,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         else:
             raise ValueError(f"Invalid component: {component}")
 
-        print(f"  Plotting: {plot_name}")
+        pr.debug(f"  Plotting: {plot_name}")
 
         draw_kwargs = kwargs.copy()
         if clipping:
             draw_kwargs['clipping'] = clipping
+
+        if euler_angles:
+            draw_kwargs['euler_angles'] = euler_angles
 
         Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
 
@@ -1598,7 +1668,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         actual_freq = self.frequencies[freq_idx]
 
         if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
-            print(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
+            pr.debug(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
 
         self.plot_field(freq_idx=freq_idx, **kwargs)
 
@@ -1745,47 +1815,47 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     def print_info(self) -> None:
         """Print ROM information."""
-        print("\n" + "=" * 60)
-        print("ModelOrderReduction Information")
-        print("=" * 60)
-        print(f"Structure: {'Compound' if self.n_domains > 1 else 'Single'}")
-        print(f"Domains: {self.domains}")
-        print(f"External ports: {self._external_ports}")
+        pr.info("\n" + "=" * 60)
+        pr.info("ModelOrderReduction Information")
+        pr.info("=" * 60)
+        pr.info(f"Structure: {'Compound' if self.n_domains > 1 else 'Single'}")
+        pr.info(f"Domains: {self.domains}")
+        pr.info(f"External ports: {self._external_ports}")
         if self.n_domains > 1:
-            print(f"All ports: {self._all_ports}")
+            pr.info(f"All ports: {self._all_ports}")
 
         print(f"\nSnapshots available: {list(self._snapshots.keys())}")
 
         if self._is_reduced:
-            print("\nPer-domain reduction:")
+            pr.info("\nPer-domain reduction:")
             for domain in self.domains:
                 n = self._M[domain].shape[0]
                 r = self._r[domain]
                 ports = self.domain_port_map[domain]
-                print(f"  {domain}: {n} → {r} DOFs, ports: {ports}")
+                pr.info(f"  {domain}: {n} → {r} DOFs, ports: {ports}")
 
-            print(f"\nTotal: {self.total_dofs} → {self.total_reduced_dofs} DOFs")
-            print(f"Compression: {100*self.compression_ratio:.1f}%")
+            pr.info(f"\nTotal: {self.total_dofs} → {self.total_reduced_dofs} DOFs")
+            pr.info(f"Compression: {100*self.compression_ratio:.1f}%")
 
             if self.has_global_system:
-                print(f"\nGlobal system:")
-                print(f"  Global reduced DOFs: {self._r_global}")
-                print(f"  A_global shape: {self._A_r_global.shape}")
-                print(f"  B_global shape: {self._B_r_global.shape}")
+                pr.debug(f"\nGlobal system:")
+                pr.debug(f"  Global reduced DOFs: {self._r_global}")
+                pr.debug(f"  A_global shape: {self._A_r_global.shape}")
+                pr.debug(f"  B_global shape: {self._B_r_global.shape}")
                 if self._concatenated is not None:
-                    print(f"  External ports: {self._concatenated.ports}")
+                    pr.debug(f"  External ports: {self._concatenated.ports}")
 
-            print(f"\nField reconstruction: {'Available' if self.can_reconstruct() else 'Not available'}")
+            pr.debug(f"\nField reconstruction: {'Available' if self.can_reconstruct() else 'Not available'}")
         else:
-            print("\nNot yet reduced. Call reduce() first.")
+            pr.info("\nNot yet reduced. Call reduce() first.")
 
         if self.frequencies is not None:
-            print(f"\nSolution available:")
-            print(f"  Frequency range: {self.frequencies[0]/1e9:.4f} - "
+            pr.info(f"\nSolution available:")
+            pr.info(f"  Frequency range: {self.frequencies[0]/1e9:.4f} - "
                   f"{self.frequencies[-1]/1e9:.4f} GHz")
-            print(f"  Number of samples: {len(self.frequencies)}")
+            pr.info(f"  Number of samples: {len(self.frequencies)}")
 
-        print("=" * 60)
+        pr.info("=" * 60)
 
     def print_eigenfrequency_comparison(
         self,

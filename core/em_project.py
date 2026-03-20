@@ -27,7 +27,7 @@ class EMProject:
         name: str,
         base_dir: Optional[Union[str, Path]] = None,
         geometry: Optional[BaseGeometry] = None,
-        bc: str = 'wall',
+        bc: str = None,
     ):
         self.name = name
         # Use current directory if base_dir is not provided
@@ -60,39 +60,50 @@ class EMProject:
         metadata_file = self.project_path / "project.json"
         if not metadata_file.exists():
             return
-            
+
         with open(metadata_file, "r") as f:
             metadata = json.load(f)
-            
+
         self.bc = metadata.get("bc", self.bc)
         self._order = metadata.get("order", self._order)
         self._n_port_modes = metadata.get("n_port_modes", self._n_port_modes)
-        
-        # 1. Load Geometry
+
+        # 1. Load Geometry FIRST
         if metadata.get("has_geometry"):
             from geometry.base import BaseGeometry
             try:
                 self.geometry = BaseGeometry.load_geometry(self.project_path)
             except Exception as e:
                 print(f"Warning: Could not load geometry: {e}")
-            
-        # 2. Load Mesh
+
+        # 2. Load Mesh SECOND (needed for FDS port modes)
         if metadata.get("has_mesh"):
             from core.persistence import ProjectManager
             pm = ProjectManager(self.base_dir)
             self.mesh = pm.load_ngs_mesh(self.mesh_path)
-            
-        # 3. Load Solver (FDS)
+
+        # 3. Load Solver (FDS) LAST - needs mesh for port mode reconstruction
         if metadata.get("has_fds"):
             from solvers.frequency_domain import FrequencyDomainSolver
-            self.fds = FrequencyDomainSolver.load_from_path(self.fds_path, geometry=self.geometry)
-            if self.fds:
-                self.fds._project_path = self.project_path
+
+            # Pass mesh to load method so port modes can be reconstructed
+            self._fds = FrequencyDomainSolver.load_from_path(
+                self.fds_path,
+                geometry=self.geometry,
+                mesh=self.mesh,  # Pass mesh here
+                order=self._order,
+                bc=self.bc
+            )
+
+            if self._fds:
+                self._fds._project_path = self.project_path
                 if self.mesh:
-                    self.fds.mesh = self.mesh
+                    self._fds.mesh = self.mesh
                     # Restore FES
                     pm = ProjectManager(self.base_dir)
-                    self.fds._fes_global = pm.load_ngs_fes(self.mesh_path)
+                    fes = pm.load_ngs_fes(self.fds_path)
+                    if fes:
+                        self._fds._fes_global = fes
 
     @property
     def geo(self) -> Optional[BaseGeometry]:

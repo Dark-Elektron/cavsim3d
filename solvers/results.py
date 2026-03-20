@@ -146,6 +146,53 @@ class FOMResult(PlotMixin):
                 "Call fom.reduce() first to compute the ROM."
             )
         return self._rom_cache
+    
+    # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Rerun simulation for this FOM.
+        
+        Delegates to the underlying FrequencyDomainSolver.
+        """
+        if self._solver_ref is None:
+            raise RuntimeError("Cannot solve: no solver reference available.")
+        return self._solver_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                     config=config, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Logical Matrix Access
+    # ------------------------------------------------------------------
+
+    @property
+    def K(self):
+        """Access the full-order stiffness matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'K_global', None)
+        return getattr(self._solver_ref, 'K', {}).get(self.domain)
+
+    @property
+    def M(self):
+        """Access the full-order mass matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'M_global', None)
+        return getattr(self._solver_ref, 'M', {}).get(self.domain)
+
+    @property
+    def B(self):
+        """Access the full-order port excitation matrix for this domain."""
+        if self._solver_ref is None:
+            return None
+        if self.domain == 'global':
+            return getattr(self._solver_ref, 'B_global', None)
+        return getattr(self._solver_ref, 'B', {}).get(self.domain)
 
     # ------------------------------------------------------------------
     # Explicit reduce / concatenate
@@ -277,13 +324,24 @@ class FOMResult(PlotMixin):
         mat_path.mkdir(parents=True, exist_ok=True)
         
         if self._solver_ref is not None:
-            if self.domain in getattr(self._solver_ref, 'K', {}):
+            if self.domain == 'global':
+                K = getattr(self._solver_ref, 'K_global', None)
+                M = getattr(self._solver_ref, 'M_global', None)
+                B = getattr(self._solver_ref, 'B_global', None)
+            else:
+                K = getattr(self._solver_ref, 'K', {}).get(self.domain)
+                M = getattr(self._solver_ref, 'M', {}).get(self.domain)
+                B = getattr(self._solver_ref, 'B', {}).get(self.domain)
+
+            if K is not None:
                 with h5py.File(mat_path / "K.h5", "a") as f:
-                    H5Serializer.save_dataset(f, "data", self._solver_ref.K.get(self.domain))
+                    H5Serializer.save_dataset(f, "data", K)
+            if M is not None:
                 with h5py.File(mat_path / "M.h5", "a") as f:
-                    H5Serializer.save_dataset(f, "data", self._solver_ref.M.get(self.domain))
+                    H5Serializer.save_dataset(f, "data", M)
+            if B is not None:
                 with h5py.File(mat_path / "B.h5", "a") as f:
-                    H5Serializer.save_dataset(f, "data", self._solver_ref.B.get(self.domain))
+                    H5Serializer.save_dataset(f, "data", B)
 
         # 2. Save S and Z results
         if self._Z_matrix is not None:
@@ -331,7 +389,7 @@ class FOMResult(PlotMixin):
         ProjectManager.save_json(path, metadata)
 
     @classmethod
-    def load(cls, path: Union[str, Path], solver=None) -> 'FOMResult':
+    def load(cls, path: Union[str, Path], _solver_ref=None) -> 'FOMResult':
         """Load FOM result from disk."""
         path = Path(path)
         with open(path / "metadata.json", "r") as f:
@@ -367,10 +425,9 @@ class FOMResult(PlotMixin):
 
         # 3. Load snapshots and residuals
         residual_data = None
-        if not (path / snap_file).exists(): snap_file = "snapshots.h5"
         
-        if (path / snap_file).exists():
-            with h5py.File(path / snap_file, "r") as f:
+        if snap_path.exists():
+            with h5py.File(snap_path, "r") as f:
                 frequencies = H5Serializer.load_dataset(f["frequencies"]) if "frequencies" in f else None
                 residual_data = H5Serializer.load_dataset(f["residual_data"]) if "residual_data" in f else None
                 field_snapshots = H5Serializer.load_dataset(f["field_snapshots"]) if "field_snapshots" in f else None
@@ -387,6 +444,7 @@ class FOMResult(PlotMixin):
                 _solver_ref._residuals = {}
             if Z_matrix is not None: _solver_ref._Z_global_coupled = Z_matrix
             if S_matrix is not None: _solver_ref._S_global_coupled = S_matrix
+            if frequencies is not None: _solver_ref.frequencies = frequencies
             if residual_data is not None: _solver_ref._residuals['global'] = residual_data
             if field_snapshots is not None and domain:
                 _solver_ref.snapshots[domain] = field_snapshots
@@ -396,20 +454,24 @@ class FOMResult(PlotMixin):
             domain = metadata["domain"]
             mat_path = path / "matrices"
             if mat_path.exists():
-                if (mat_path / "K.h5").exists():
-                    with h5py.File(mat_path / "K.h5", "r") as f:
-                        _solver_ref.K[domain] = H5Serializer.load_sparse_csr(f["data"])
-                if (mat_path / "M.h5").exists():
-                    with h5py.File(mat_path / "M.h5", "r") as f:
-                        _solver_ref.M[domain] = H5Serializer.load_sparse_csr(f["data"])
-                if (mat_path / "B.h5").exists():
-                    with h5py.File(mat_path / "B.h5", "r") as f:
-                        _solver_ref.B[domain] = H5Serializer.load_dataset(f["data"])
+                for mname in ["K", "M", "B"]:
+                    mfile = mat_path / f"{mname}.h5"
+                    if mfile.exists():
+                        with h5py.File(mfile, "r") as f:
+                            data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
+                            if domain == 'global':
+                                setattr(_solver_ref, f"{mname}_global", data)
+                            else:
+                                getattr(_solver_ref, mname)[domain] = data
             elif (path / "matrices.h5").exists():
                 with h5py.File(path / "matrices.h5", "r") as f:
-                    if "K" in f: _solver_ref.K[domain] = H5Serializer.load_sparse_csr(f["K"])
-                    if "M" in f: _solver_ref.M[domain] = H5Serializer.load_sparse_csr(f["M"])
-                    if "B" in f: _solver_ref.B[domain] = H5Serializer.load_dataset(f["B"])
+                    for mname in ["K", "M", "B"]:
+                        if mname in f:
+                            data = H5Serializer.load_sparse_csr(f[mname]) if mname in ["K", "M"] else H5Serializer.load_dataset(f[mname])
+                            if domain == 'global':
+                                setattr(_solver_ref, f"{mname}_global", data)
+                            else:
+                                getattr(_solver_ref, mname)[domain] = data
 
         # Build Z/S dicts if matrices are loaded
         res = cls(
@@ -574,8 +636,8 @@ class FOMCollection(PlotMixin):
                 ax[0].set_title(title)
             else:
                 ax.set_title(title)
-        if show:
-            plt.show()
+        # if show:
+        #     plt.show()
         return fig, ax
 
     # ------------------------------------------------------------------
@@ -623,6 +685,41 @@ class FOMCollection(PlotMixin):
                 "Call foms.concatenate() first."
             )
         return self._concat_cache
+
+    # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Rerun simulation for all domains in this collection.
+        
+        Delegates to the underlying FrequencyDomainSolver.
+        """
+        if self._fds_ref is None:
+            raise RuntimeError("Cannot solve: no solver reference available.")
+        return self._fds_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                  config=config, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Logical Matrix Access (Aggregated)
+    # ------------------------------------------------------------------
+
+    @property
+    def K(self) -> Dict[str, np.ndarray]:
+        """Access per-domain stiffness matrices as a dictionary."""
+        return {fom.domain: fom.K for fom in self._foms}
+
+    @property
+    def M(self) -> Dict[str, np.ndarray]:
+        """Access per-domain mass matrices as a dictionary."""
+        return {fom.domain: fom.M for fom in self._foms}
+
+    @property
+    def B(self) -> Dict[str, np.ndarray]:
+        """Access per-domain port excitation matrices as a dictionary."""
+        return {fom.domain: fom.B for fom in self._foms}
 
     # ------------------------------------------------------------------
     # Reduce and Concatenate
@@ -989,6 +1086,7 @@ class FOMCollection(PlotMixin):
                 if field_snapshots is not None: _fds_ref.snapshots[domain] = field_snapshots
                 if Z_matrix is not None: _fds_ref._Z_per_domain[domain] = fom.Z_dict
                 if S_matrix is not None: _fds_ref._S_per_domain[domain] = fom.S_dict
+                if frequencies is not None: _fds_ref.frequencies = frequencies
 
             fom_list.append(fom)
             
@@ -1109,6 +1207,22 @@ class ROMCollection(PlotMixin):
                 "Call roms.concatenate() first."
             )
         return self._concat_cache
+
+    # ------------------------------------------------------------------
+    # Solve routing
+    # ------------------------------------------------------------------
+
+    def solve(self, fmin: float = None, fmax: float = None, nsamples: int = None,
+              config: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        Solve all reduced models in this collection.
+        
+        Delegates to the underlying ModelOrderReduction object.
+        """
+        if self._mor_ref is None:
+            raise RuntimeError("Cannot solve: no MOR reference available.")
+        return self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                  config=config, **kwargs)
 
     # ------------------------------------------------------------------
     # Concatenate

@@ -489,16 +489,33 @@ class PlotMixin:
                 fig, ax1 = self._ensure_ax(None, figsize=figsize)
                 ax2 = ax1.twinx()
 
-            # Merge styles
-            iter_style = self._merge_style(default_iter_style, {**kwargs, **iter_kwargs})
-            res_style = self._merge_style(default_res_style, {**kwargs, **res_kwargs})
+            # Palette for multi-solid distinction (Cold for iterations, Warm for residuals)
+            cold_colors = ['tab:blue', 'tab:cyan', 'tab:green', 'teal', 'navy']
+            warm_colors = ['tab:red', 'tab:orange', 'tab:pink', 'magenta', 'darkred']
+            
+            # Determine color index from existing lines to support multi-solid or repeated calls
+            n_existing = len(ax1.get_lines())
+            color_idx = n_existing % min(len(cold_colors), len(warm_colors))
+
+            # Merge styles and apply default distinction if not provided
+            iter_style = self._merge_style({'linestyle': '-', **default_iter_style}, {**kwargs, **iter_kwargs})
+            res_style = self._merge_style({'linestyle': '--', **default_res_style}, {**kwargs, **res_kwargs})
 
             for j in range(n_exc):
                 alpha = 0.4 if per_excitation and n_exc > 1 else iter_style.get('alpha', 1.0)
                 exc_lbl = f'{base_label} exc {j}' if per_excitation and n_exc > 1 else base_label
 
-                iter_style_j = {**iter_style, 'alpha': alpha}
-                res_style_j = {**res_style, 'alpha': alpha}
+                # Use palette colors if not explicitly provided by user
+                iter_style_j = {
+                    'color': cold_colors[color_idx], 
+                    **iter_style, 
+                    'alpha': alpha
+                }
+                res_style_j = {
+                    'color': warm_colors[color_idx], 
+                    **res_style, 
+                    'alpha': alpha
+                }
 
                 iter_label = f'{exc_lbl} iterations' if j == 0 or per_excitation else '_nolegend_'
                 res_label = f'{exc_lbl} residual' if j == 0 or per_excitation else '_nolegend_'
@@ -524,41 +541,41 @@ class PlotMixin:
             if show:
                 plt.show()
             return fig, (ax1, ax2)
-
-        # Single plot (iterations or residual)
-        fig, ax = self._ensure_ax(ax, figsize=figsize)
-
-        if what == 'iterations':
-            style = self._merge_style(default_iter_style, kwargs)
         else:
-            style = self._merge_style(default_res_style, kwargs)
-
-        for j in range(n_exc):
-            alpha = 0.4 if per_excitation and n_exc > 1 else style.get('alpha', 1.0)
-            exc_lbl = f'{base_label} exc {j}' if per_excitation and n_exc > 1 else base_label
-            style_j = {**style, 'alpha': alpha}
+            # Single plot (iterations or residual)
+            fig, ax = self._ensure_ax(ax, figsize=figsize)
 
             if what == 'iterations':
-                ax.plot(freq_ghz, iters_2d[:, j], label=exc_lbl, **style_j)
-                ax.set_ylabel('GMRES Iterations')
-            elif what == 'residual':
-                ax.semilogy(freq_ghz, res_2d[:, j] + 1e-30, label=exc_lbl, **style_j)
-                ax.set_ylabel('Relative Residual')
+                style = self._merge_style(default_iter_style, kwargs)
             else:
-                raise ValueError(f"Unknown what='{what}'. Use 'iterations', 'residual', or 'both'.")
+                style = self._merge_style(default_res_style, kwargs)
 
-        ax.set_xlabel(xlabel or 'Frequency (GHz)')
-        suffix = ' (per excitation)' if per_excitation and n_exc > 1 else ''
-        ax.set_title(title or f'{base_label} Solver Convergence{suffix}')
-        
-        if legend:
-            ax.legend()
-        if grid:
-            ax.grid(True, alpha=grid_alpha)
+            for j in range(n_exc):
+                alpha = 0.4 if per_excitation and n_exc > 1 else style.get('alpha', 1.0)
+                exc_lbl = f'{base_label} exc {j}' if per_excitation and n_exc > 1 else base_label
+                style_j = {**style, 'alpha': alpha}
 
-        if show:
-            plt.show()
-        return fig, ax
+                if what == 'iterations':
+                    ax.plot(freq_ghz, iters_2d[:, j], label=exc_lbl, **style_j)
+                    ax.set_ylabel('GMRES Iterations')
+                elif what == 'residual':
+                    ax.semilogy(freq_ghz, res_2d[:, j] + 1e-30, label=exc_lbl, **style_j)
+                    ax.set_ylabel('Relative Residual')
+                else:
+                    raise ValueError(f"Unknown what='{what}'. Use 'iterations', 'residual', or 'both'.")
+
+            ax.set_xlabel(xlabel or 'Frequency (GHz)')
+            suffix = ' (per excitation)' if per_excitation and n_exc > 1 else ''
+            ax.set_title(title or f'{base_label} Solver Convergence{suffix}')
+
+            if legend:
+                ax.legend()
+            if grid:
+                ax.grid(True, alpha=grid_alpha)
+
+            if show:
+                plt.show()
+            return fig, ax
 
     # ------------------------------------------------------------------
     # Comparison helper
