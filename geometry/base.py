@@ -57,15 +57,120 @@ class BaseGeometry(ABC, TaggableMixin):
         self._source_link: Optional[str] = None  # original file path
         self._source_hash: Optional[str] = None  # SHA-256 of source at save time
 
+    def get_extreme_faces(self, axis: str = 'Z') -> Dict[str, Tuple[float, float, Any]]:
+        """
+        Identify the most extreme planar faces perpendicular to the axis.
+        
+        Returns
+        -------
+        dict
+            'min': (position, area, face_obj)
+            'max': (position, area, face_obj)
+        """
+        if self.geo is None:
+            return {}
+            
+        try:
+            axis_idx = self._AXIS_MAP[axis.upper()].index
+        except (AttributeError, KeyError):
+            axis_idx = {'X': 0, 'Y': 1, 'Z': 2}.get(axis.upper(), 2)
+            
+        extreme_min = {'pos': float('inf'), 'area': 0.0, 'face': None}
+        extreme_max = {'pos': float('-inf'), 'area': 0.0, 'face': None}
+        
+        tolerance = 1e-4
+        
+        # First pass: find max area at each end
+        try:
+            for face in self.geo.faces:
+                bb = face.bounding_box
+                extent = bb[1][axis_idx] - bb[0][axis_idx]
+                
+                if extent < tolerance:
+                    pos = (bb[0][axis_idx] + bb[1][axis_idx]) / 2
+                    
+                    # Calculate proxy area from bounding box
+                    axes = [0, 1, 2]
+                    axes.remove(axis_idx)
+                    area = (bb[1][axes[0]] - bb[0][axes[0]]) * (bb[1][axes[1]] - bb[0][axes[1]])
+                    
+                    if pos < extreme_min['pos'] - tolerance:
+                        extreme_min = {'pos': pos, 'area': area, 'face': face}
+                    elif abs(pos - extreme_min['pos']) < tolerance:
+                        if area > extreme_min['area']:
+                            extreme_min = {'pos': pos, 'area': area, 'face': face}
+                            
+                    if pos > extreme_max['pos'] + tolerance:
+                        extreme_max = {'pos': pos, 'area': area, 'face': face}
+                    elif abs(pos - extreme_max['pos']) < tolerance:
+                        if area > extreme_max['area']:
+                            extreme_max = {'pos': pos, 'area': area, 'face': face}
+            
+            # Second pass: ensure we didn't pick a tiny ghost face that's more extreme
+            # but much smaller than the actual port face.
+            max_face_area = max(extreme_min['area'], extreme_max['area'])
+            if max_face_area > 0:
+                refined_min = {'pos': float('inf'), 'area': 0.0, 'face': None}
+                refined_max = {'pos': float('-inf'), 'area': 0.0, 'face': None}
+                
+                for face in self.geo.faces:
+                    bb = face.bounding_box
+                    if (bb[1][axis_idx] - bb[0][axis_idx]) < tolerance:
+                        axes = [0, 1, 2]
+                        axes.remove(axis_idx)
+                        area = (bb[1][axes[0]] - bb[0][axes[0]]) * (bb[1][axes[1]] - bb[0][axes[1]])
+                        
+                        if area > max_face_area * 0.05: # At least 5% of largest face
+                            pos = (bb[0][axis_idx] + bb[1][axis_idx]) / 2
+                            if pos < refined_min['pos']:
+                                refined_min = {'pos': pos, 'area': area, 'face': face}
+                            if pos > refined_max['pos']:
+                                refined_max = {'pos': pos, 'area': area, 'face': face}
+                
+                if refined_min['face'] is not None: extreme_min = refined_min
+                if refined_max['face'] is not None: extreme_max = refined_max
+
+        except Exception as e:
+            print(f"  [Warning] get_extreme_faces Exception: {e}")
+            pass
+            
+        result = {}
+        if extreme_min['face']:
+            result['min'] = (extreme_min['pos'], extreme_min['area'], extreme_min['face'])
+        if extreme_max['face']:
+            result['max'] = (extreme_max['pos'], extreme_max['area'], extreme_max['face'])
+            
+        return result
+
+    def get_physical_bounds(self, axis: str = 'Z') -> Tuple[float, float]:
+        """
+        Calculate physical extremes using the actual faces.
+        """
+        extremes = self.get_extreme_faces(axis)
+        if 'min' in extremes and 'max' in extremes:
+            return (extremes['min'][0], extremes['max'][0])
+            
+        # Fallback to general bounding box
+        if self.geo is None:
+            return (0.0, 1.0)
+            
+        try:
+            axis_idx = self._AXIS_MAP[axis.upper()].index
+        except (AttributeError, KeyError):
+            axis_idx = {'X': 0, 'Y': 1, 'Z': 2}.get(axis.upper(), 2)
+            
+        bb = self.geo.bounding_box
+        return (bb[0][axis_idx], bb[1][axis_idx])
+
     @abstractmethod
     def build(self) -> None:
         """Build the geometry."""
         pass
 
     def generate_mesh(self, maxh=None, curve_order: int = 3) -> Mesh:
-        """Generate mesh from geometry."""
+        """Generate mesh from geometry. Automatically calls build() if needed."""
         if self.geo is None:
-            raise ValueError("Geometry not built. Call build() first.")
+            self.build()
         
         if maxh:
             self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(maxh=maxh))
@@ -88,7 +193,7 @@ class BaseGeometry(ABC, TaggableMixin):
 
         if what in ("geometry", "geo"):
             if self.geo is None:
-                raise ValueError("Geometry not built. Call build() first.")
+                self.build()
             Draw(self.geo, **kwargs)
         elif what == "mesh":
             if self.mesh is None:
@@ -197,7 +302,13 @@ class BaseGeometry(ABC, TaggableMixin):
         print(f"Saved to: {path}")
 
     def print_info(self) -> None:
-        """Print detailed geometry information including tag."""
+        """Print detailed geometry information. Automatically builds if needed."""
+        if self.geo is None:
+            try:
+                self.build()
+            except Exception:
+                pass
+
         class_name = self.__class__.__name__
         
         print("\n" + "=" * 70)
@@ -353,6 +464,7 @@ class BaseGeometry(ABC, TaggableMixin):
         try:
             from . import primitives
             from . import importers
+            from . import assembly
         except (ImportError, ValueError):
             pass
 
@@ -391,38 +503,96 @@ class BaseGeometry(ABC, TaggableMixin):
         """
         Compare the project's geometry copy against the linked source.
         
-        This check is now non-interactive by default to ensure robust loading 
-        in notebooks and automation scripts.
+        Interactive behaviour:
+        - Source missing  → prompt to break link or keep it
+        - Source changed → prompt to update (copy new), keep local, or break link
+        - link_broken flag → skip all checks
         """
         if self._source_link is None:
             return  # No link — standalone project
 
-        source_path = Path(self._source_link)
         geo_dir = Path(project_path) / 'geometry'
+        history_file = geo_dir / 'history.json'
+        
+        # Check if link was already broken
+        if history_file.exists():
+            with open(history_file, 'r') as f:
+                meta = json.load(f)
+            if meta.get('link_broken', False):
+                return  # Link was broken — skip all checks
+
+        source_path = Path(self._source_link)
 
         if not source_path.exists():
-            warnings.warn(
-                f"Linked source geometry file not found: {source_path}. "
-                "Using the project's saved copy instead. Link is preserved.",
-                UserWarning,
-                stacklevel=2
-            )
+            print(f"\n⚠ Linked source geometry not found: {source_path}")
+            print("  The original CAD file has been moved or deleted.")
+            print("  The project's saved local copy will be used.\n")
+            print("  Options:")
+            print("    [1] Break link (stop checking in the future)")
+            print("    [2] Keep link (ask again next time)")
+            
+            try:
+                from utils.io_utils import get_user_confirmation
+                choice = input("  Choice [1/2]: ").strip()
+                if choice == '1':
+                    self._source_link = None
+                    self._source_hash = None
+                    # Write link_broken flag
+                    if history_file.exists():
+                        with open(history_file, 'r') as f:
+                            meta = json.load(f)
+                        meta['link_broken'] = True
+                        meta['source_link'] = None
+                        with open(history_file, 'w') as f:
+                            json.dump(meta, f, indent=2, default=str)
+                    print("  Link broken. Using local copy only.")
+                else:
+                    print("  Link preserved. Will check again next time.")
+            except Exception:
+                pass  # Non-interactive environment — just use local copy
             return
 
         # Source exists — check for changes
         try:
             current_hash = self._file_hash(source_path)
             if self._source_hash is not None and current_hash != self._source_hash:
-                warnings.warn(
-                    f"Linked source geometry file has been modified: {source_path}. "
-                    "However, the project is still using its internal saved copy to avoid "
-                    "accidentally deleting existing results. To update to the new geometry, "
-                    "use project.update_geometry() explicitly.",
-                    UserWarning,
-                    stacklevel=2
-                )
+                print(f"\n⚠ Linked source geometry has been modified: {source_path}")
+                print("  The original CAD file has changed since the project was saved.")
+                print("  Options:")
+                print("    [1] Update (replace local copy with new file — invalidates results)")
+                print("    [2] Keep local (ignore changes, use saved copy)")
+                print("    [3] Break link (stop checking in the future)")
+                
+                try:
+                    choice = input("  Choice [1/2/3]: ").strip()
+                    if choice == '1':
+                        # Copy new source into project
+                        source_filename = f'source_model{source_path.suffix}'
+                        dest = geo_dir / source_filename
+                        shutil.copy2(str(source_path), str(dest))
+                        self._source_hash = self._file_hash(dest)
+                        self._update_link_in_history(geo_dir)
+                        # Invalidate results
+                        self._delete_project_results(project_path)
+                        print("  Updated to new geometry. Results invalidated.")
+                    elif choice == '3':
+                        self._source_link = None
+                        self._source_hash = None
+                        if history_file.exists():
+                            with open(history_file, 'r') as f:
+                                meta = json.load(f)
+                            meta['link_broken'] = True
+                            meta['source_link'] = None
+                            with open(history_file, 'w') as f:
+                                json.dump(meta, f, indent=2, default=str)
+                        print("  Link broken. Using local copy only.")
+                    else:
+                        print("  Keeping local copy. Original changes ignored.")
+                except Exception:
+                    pass  # Non-interactive — just use local copy
         except Exception as e:
             warnings.warn(f"Could not verify source geometry hash: {e}")
+
 
     def _update_link_in_history(self, geo_dir: Path) -> None:
         """Update the source_link and source_hash in history.json."""

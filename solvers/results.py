@@ -33,6 +33,7 @@ import numpy as np
 from utils.plot_mixin import PlotMixin
 from core.persistence import H5Serializer, ProjectManager
 import h5py
+import shutil
 from pathlib import Path
 from datetime import datetime
 import json
@@ -160,8 +161,28 @@ class FOMResult(PlotMixin):
         """
         if self._solver_ref is None:
             raise RuntimeError("Cannot solve: no solver reference available.")
+        
+        # Clear children if rerunning
+        if (config and config.get('rerun')) or kwargs.get('rerun'):
+            self.clear_rom()
+            
         return self._solver_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
                                      config=config, **kwargs)
+
+    def clear_rom(self) -> None:
+        """Clear the cached ROM and delete its saved data from the project folder."""
+        self._rom_cache = None
+        if self._solver_ref and getattr(self._solver_ref, '_project_path', None):
+            project_path = Path(self._solver_ref._project_path)
+            # Paths where ROM data might be stored
+            paths_to_delete = [
+                project_path / "fds" / "fom" / "rom",
+                project_path / "eigenmode" / "fom" / "rom"
+            ]
+            for p in paths_to_delete:
+                if p.exists():
+                    print(f"  Deleting stale ROM data at {p}")
+                    shutil.rmtree(p)
 
     # ------------------------------------------------------------------
     # Logical Matrix Access
@@ -611,19 +632,24 @@ class FOMCollection(PlotMixin):
                       title: Optional[str] = None, show: bool = False, **kwargs):
         """Overlay iterative solver residuals for every domain."""
         import matplotlib.pyplot as plt
-        fig, ax = self._ensure_ax(ax)
-        for fom in self._foms:
+        
+        # Only ensure ax here if we are not doing a dual-axis plot, 
+        # or if an axes was already provided.
+        # Otherwise, let the first fom.plot_residual create the dual structure.
+        fig = None
+        if what != 'both' or ax is not None:
+            fig, ax = self._ensure_ax(ax)
+
+        for i, fom in enumerate(self._foms):
             lbl = f"{label or ''}{fom.domain}" if label else fom.domain
             # Set a generic title for sub-plots to avoid flickering titles in overlays
             sub_title = title if title else (f"{fom.domain} Convergence" if len(self._foms) == 1 else None)
             try:
-                fig, res = fom.plot_residual(what=what, ax=ax, label=lbl,
+                # Pass ax=None for the first call if what='both' and no ax was provided
+                current_ax = ax if (i > 0 or ax is not None or what != 'both') else None
+                fig, res = fom.plot_residual(what=what, ax=current_ax, label=lbl,
                                              title=sub_title, show=False, **kwargs)
-                # If what='both', 'res' is (ax1, ax2). Use them for next domain.
-                if what == 'both':
-                    ax = res
-                else:
-                    ax = res
+                ax = res
             except RuntimeError:
                 pass
 
@@ -699,8 +725,30 @@ class FOMCollection(PlotMixin):
         """
         if self._fds_ref is None:
             raise RuntimeError("Cannot solve: no solver reference available.")
+        
+        # Clear children if rerunning
+        if (config and config.get('rerun')) or kwargs.get('rerun'):
+            self.clear_roms()
+            
         return self._fds_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
                                   config=config, **kwargs)
+
+    def clear_roms(self) -> None:
+        """Clear the cached ROMCollection and delete its saved data from the project folder."""
+        self._roms_cache = None
+        if self._fds_ref and getattr(self._fds_ref, '_project_path', None):
+            project_path = Path(self._fds_ref._project_path)
+            # Paths where ROM/Concat data might be stored
+            paths_to_delete = [
+                project_path / "fds" / "foms" / "roms",
+                project_path / "fds" / "foms" / "concat",
+                project_path / "eigenmode" / "foms" / "roms",
+                project_path / "eigenmode" / "foms" / "concat",
+            ]
+            for p in paths_to_delete:
+                if p.exists():
+                    print(f"  Deleting stale ROM/Concat data at {p}")
+                    shutil.rmtree(p)
 
     # ------------------------------------------------------------------
     # Logical Matrix Access (Aggregated)

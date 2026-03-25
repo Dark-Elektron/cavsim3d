@@ -1,27 +1,30 @@
-"""Geometry importers for STEP and GMSH files with visualization."""
+"""Geometry importers with OCC-based loading, splitting, and visualization."""
 
 import os
 import tempfile
 from typing import List, Optional, Tuple, Callable, Dict, Union, Literal
 import numpy as np
 
-from OCC.Core.STEPControl import STEPControl_Reader, STEPControl_Writer, STEPControl_AsIs
+# PythonOCC imports — must come before netgen imports
+from OCC.Core.STEPControl import STEPControl_Reader
+from OCC.Core.IGESControl import IGESControl_Reader
 from OCC.Core.IFSelect import IFSelect_RetDone
-from OCC.Core.Interface import Interface_Static
 from OCC.Core.BOPAlgo import BOPAlgo_Splitter
-from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon, BRepBuilderAPI_Transform
 from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Ax1, gp_Ax2, gp_Trsf, gp_Vec
 from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeCone
 from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Fuse
 from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
 from OCC.Core.BRep import BRep_Builder
+from OCC.Core.BRepTools import breptools
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_FACE
-from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
+from OCC.Core.GProp import GProp_GProps
+from OCC.Core.BRepGProp import brepgprop
 from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
 
-# Must import OCC stuff before netgen
+# Netgen/NGSolve imports — must come after OCC imports
 from netgen.occ import OCCGeometry, Glue, X, Y, Z, Axis
 from netgen.webgui import Draw as NetgenDraw
 from ngsolve import Mesh
@@ -147,18 +150,21 @@ def create_coordinate_axes(
     return axes
 
 
-# ==================== STEP IMPORTER WITH VISUALIZATION ====================
+# ==================== OCC IMPORTER WITH VISUALIZATION ====================
 
-class STEPImporter(BaseGeometry):
+class OCCImporter(BaseGeometry):
     """
-    Import geometry from STEP file with optional splitting planes.
+    Import geometry from CAD files (STEP, BREP, IGES) with optional splitting.
+
+    Uses PythonOCC for loading and splitting, then transfers directly
+    to netgen.occ via ``From_PyOCC()`` for meshing — no temp files needed.
 
     Parameters
     ----------
     filepath : str
-        Path to STEP file
+        Path to CAD file (STEP, BREP, or IGES format)
     unit : str
-        Unit of the STEP file ('mm', 'cm', 'm')
+        Unit of the geometry file ('mm', 'cm', 'm')
     auto_build : bool
         If True, automatically build geometry and mesh on init.
         Set to False if you want to add splitting planes first.
@@ -168,20 +174,30 @@ class STEPImporter(BaseGeometry):
     Examples
     --------
     # Simple import without splitting
-    >>> geo = STEPImporter("cavity.step", unit='mm', maxh=0.05)
+    >>> geo = OCCImporter("cavity.step", unit='mm', maxh=0.05)
     >>> geo.show('mesh')
 
     # Import with splitting (deferred build)
-    >>> geo = STEPImporter("cavity.step", unit='mm', auto_build=False)
+    >>> geo = OCCImporter("cavity.step", unit='mm', auto_build=False)
     >>> geo.add_splitting_plane((-0.1, -0.1, 0.05), (0.1, 0.1, 0.05))
     >>> geo.show_occ(show_planes=True)  # Preview before splitting
     >>> geo.split()
     >>> geo.show_occ()  # View split result
     >>> geo.finalize(maxh=0.05)
     >>> geo.show('mesh')
+
+    # Import IGES file
+    >>> geo = OCCImporter("cavity.iges", unit='mm', maxh=0.05)
     """
 
     UNIT_MAP = {'mm': 1000, 'cm': 100, 'm': 1}
+
+    # Supported file extensions mapped to format identifiers
+    FORMAT_MAP = {
+        '.step': 'step', '.stp': 'step',
+        '.brep': 'brep',
+        '.iges': 'iges', '.igs': 'iges',
+    }
 
     # Default colors
     GEOMETRY_COLOR = (0.7, 0.7, 0.8)  # Light gray-blue
@@ -213,6 +229,16 @@ class STEPImporter(BaseGeometry):
         self._plane_corners = []  # Store corner coordinates for reference
         self._is_split = False
 
+        # Detect file format
+        import os
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in self.FORMAT_MAP:
+            raise ValueError(
+                f"Unsupported file format: '{ext}'. "
+                f"Supported formats: {', '.join(sorted(self.FORMAT_MAP.keys()))}"
+            )
+        self._format = self.FORMAT_MAP[ext]
+
         # Set source link for geometry linking
         self._source_link = str(filepath)
 
@@ -220,8 +246,8 @@ class STEPImporter(BaseGeometry):
         self._load_occ_shape()
 
         # Record import in history
-        self._record('import_step', filepath=str(filepath), unit=unit,
-                     auto_build=auto_build, maxh=maxh)
+        self._record('import_occ', filepath=str(filepath), unit=unit,
+                     format=self._format, auto_build=auto_build, maxh=maxh)
 
         # Auto-build if requested
         if auto_build:
@@ -229,26 +255,157 @@ class STEPImporter(BaseGeometry):
             self.generate_mesh(maxh=maxh)
 
     def _load_occ_shape(self) -> None:
-        """Load STEP file into raw OCC shape."""
+        """Load CAD file into raw PythonOCC TopoDS_Shape.
+
+        Supports STEP, BREP, and IGES formats.
+        All geometries are converted to METERS for NGSolve.
+        """
         if self.unit not in self.UNIT_MAP:
             raise ValueError(f"Unknown unit: {self.unit}. Use 'mm', 'cm', or 'm'.")
 
-        reader = STEPControl_Reader()
-        reader.SetSystemLengthUnit(self.UNIT_MAP[self.unit])
+        # Scale factor to convert FROM input unit TO meters
+        # mm → m: divide by 1000 (scale = 0.001)
+        # cm → m: divide by 100 (scale = 0.01)
+        # m → m: no change (scale = 1.0)
+        scale_to_meters = 1.0 / self.UNIT_MAP[self.unit]
 
-        status = reader.ReadFile(self.filepath)
-        if status != IFSelect_RetDone:
-            raise RuntimeError(f"Failed to read STEP file: {self.filepath}")
+        if self._format == 'step':
+            reader = STEPControl_Reader()
+            status = reader.ReadFile(self.filepath)
+            if status != IFSelect_RetDone:
+                raise RuntimeError(f"Failed to read STEP file: {self.filepath}")
+            reader.TransferRoots()
+            shape = reader.OneShape()
+            
+            # Filter to keep only significant solids (removes ghost geometry)
+            solids = get_solids(shape)
+            if solids:
+                # Calculate volumes to find the main component(s)
+                solid_volumes = []
+                for s in solids:
+                    props = GProp_GProps()
+                    brepgprop.VolumeProperties(s, props)
+                    solid_volumes.append(props.Mass())
+                
+                max_vol = max(solid_volumes) if solid_volumes else 0
+                significant_solids = [s for s, v in zip(solids, solid_volumes) if v > max_vol * 0.1]
+                
+                if len(significant_solids) > 1:
+                    builder = BRep_Builder()
+                    comp = TopoDS_Compound()
+                    builder.MakeCompound(comp)
+                    for s in significant_solids:
+                        builder.Add(comp, s)
+                    self._occ_shape = comp
+                elif significant_solids:
+                    self._occ_shape = significant_solids[0]
+                else:
+                    self._occ_shape = solids[0]
+            else:
+                self._occ_shape = shape
 
-        reader.TransferRoots()
-        self._occ_shape = reader.OneShape()
+            # Apply scaling if not already in meters
+            if self.unit != 'm':
+                trsf = gp_Trsf()
+                trsf.SetScale(gp_Pnt(0, 0, 0), scale_to_meters)
+                app = BRepBuilderAPI_Transform(trsf)
+                app.Perform(self._occ_shape, True)
+                self._occ_shape = app.Shape()
+
+        elif self._format == 'iges':
+            reader = IGESControl_Reader()
+            status = reader.ReadFile(self.filepath)
+            if status != IFSelect_RetDone:
+                raise RuntimeError(f"Failed to read IGES file: {self.filepath}")
+            reader.TransferRoots()
+            shape = reader.OneShape()
+            
+            # Filter to keep only significant solids
+            solids = get_solids(shape)
+            if solids:
+                solid_volumes = []
+                for s in solids:
+                    props = GProp_GProps()
+                    brepgprop.VolumeProperties(s, props)
+                    solid_volumes.append(props.Mass())
+                
+                max_vol = max(solid_volumes) if solid_volumes else 0
+                significant_solids = [s for s, v in zip(solids, solid_volumes) if v > max_vol * 0.1]
+                
+                if len(significant_solids) > 1:
+                    builder = BRep_Builder()
+                    comp = TopoDS_Compound()
+                    builder.MakeCompound(comp)
+                    for s in significant_solids:
+                        builder.Add(comp, s)
+                    self._occ_shape = comp
+                elif significant_solids:
+                    self._occ_shape = significant_solids[0]
+                else:
+                    self._occ_shape = solids[0]
+            else:
+                self._occ_shape = shape
+
+            # Apply scaling if not already in meters
+            if self.unit != 'm':
+                trsf = gp_Trsf()
+                trsf.SetScale(gp_Pnt(0, 0, 0), scale_to_meters)
+                app = BRepBuilderAPI_Transform(trsf)
+                app.Perform(self._occ_shape, True)
+                self._occ_shape = app.Shape()
+
+        elif self._format == 'brep':
+            shape = TopoDS_Shape()
+            builder = BRep_Builder()
+            success = breptools.Read(shape, self.filepath, builder)
+            if not success:
+                raise RuntimeError(f"Failed to read BREP file: {self.filepath}")
+            
+            # Filter to keep only significant solids
+            solids = get_solids(shape)
+            if solids:
+                solid_volumes = []
+                for s in solids:
+                    props = GProp_GProps()
+                    brepgprop.VolumeProperties(s, props)
+                    solid_volumes.append(props.Mass())
+                
+                max_vol = max(solid_volumes) if solid_volumes else 0
+                significant_solids = [s for s, v in zip(solids, solid_volumes) if v > max_vol * 0.1]
+                
+                if len(significant_solids) > 1:
+                    comp = TopoDS_Compound()
+                    builder.MakeCompound(comp)
+                    for s in significant_solids:
+                        builder.Add(comp, s)
+                    self._occ_shape = comp
+                elif significant_solids:
+                    self._occ_shape = significant_solids[0]
+                else:
+                    self._occ_shape = solids[0]
+            else:
+                self._occ_shape = shape
+
+            # Apply scaling if not already in meters
+            if self.unit != 'm':
+                trsf = gp_Trsf()
+                trsf.SetScale(gp_Pnt(0, 0, 0), scale_to_meters)
+                app = BRepBuilderAPI_Transform(trsf)
+                app.Perform(self._occ_shape, True)
+                self._occ_shape = app.Shape()
+
+        if self._occ_shape is None or self._occ_shape.IsNull():
+            raise RuntimeError(f"Failed to extract valid shape from {self.filepath}. Check if file is valid.")
+
+        # Store the scale factor for reference
+        self._scale_to_meters = scale_to_meters
 
     def add_splitting_plane(
             self,
             corner1: Tuple[float, float, float],
             corner2: Tuple[float, float, float],
             normal_axis: str = 'auto'
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Add a plane for splitting the geometry.
 
@@ -269,7 +426,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
             Returns self for method chaining
 
         Examples
@@ -375,7 +532,7 @@ class STEPImporter(BaseGeometry):
             self,
             x: float,
             margin: float = 0.1
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Add a splitting plane at a given x-coordinate (YZ plane).
 
@@ -388,7 +545,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
@@ -407,7 +564,7 @@ class STEPImporter(BaseGeometry):
             self,
             y: float,
             margin: float = 0.1
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Add a splitting plane at a given y-coordinate (XZ plane).
 
@@ -420,7 +577,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
@@ -439,7 +596,7 @@ class STEPImporter(BaseGeometry):
             self,
             z: float,
             margin: float = 0.1
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Add a splitting plane at a given z-coordinate (XY plane).
 
@@ -452,7 +609,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
@@ -467,7 +624,7 @@ class STEPImporter(BaseGeometry):
 
         return self.add_splitting_plane(corner1, corner2, normal_axis='z')
 
-    def split(self) -> 'STEPImporter':
+    def split(self) -> 'OCCImporter':
         """
         Split geometry using added planes, then auto-rebuild.
 
@@ -477,7 +634,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
             Returns self for method chaining
         """
         if not self._planes:
@@ -508,50 +665,61 @@ class STEPImporter(BaseGeometry):
 
         return self
 
-    def _export_occ_shape_to_temp(self) -> str:
-        """Export raw OCC shape to a temporary STEP file."""
-        fd, temp_path = tempfile.mkstemp(suffix='.step')
+    @staticmethod
+    def _pyocc_to_netgen(occ_shape: TopoDS_Shape) -> OCCGeometry:
+        """Transfer PythonOCC shape to netgen.occ via BREP.
+
+        Uses OpenCASCADE's native binary BREP format for fast,
+        lossless in-memory transfer between PythonOCC (SWIG) and
+        netgen.occ (pybind11) bindings.
+
+        Parameters
+        ----------
+        occ_shape : TopoDS_Shape
+            PythonOCC shape to convert
+
+        Returns
+        -------
+        OCCGeometry
+            Netgen OCCGeometry wrapping the transferred shape
+        """
+        fd, tmp = tempfile.mkstemp(suffix='.brep')
         os.close(fd)
-
-        Interface_Static.SetCVal("write.step.schema", "AP214")
-        writer = STEPControl_Writer()
-        writer.Transfer(self._occ_shape, STEPControl_AsIs)
-        writer.Write(temp_path)
-
-        return temp_path
+        try:
+            breptools.Write(occ_shape, tmp)
+            return OCCGeometry(tmp)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
     def build(self) -> None:
         """
         Build NGSolve geometry from OCC shape.
 
-        This converts the internal OCC shape to an NGSolve-compatible
-        OCCGeometry object. If the geometry was split, solids are
-        glued together for proper mesh connectivity.
+        Transfers the PythonOCC shape to netgen.occ via BREP format
+        (fast, lossless binary transfer).
+
+        If the geometry was split, solids are glued together for proper
+        mesh connectivity.
 
         After building:
-        - All faces are named ``'wall'``
+        - All faces are named ``'default'``
         - If split: solids are named ``cell_1``, ``cell_2``, etc. and
           port faces are named ``port1``, ``port2``, etc.
-        - ``self.bc`` is set to ``'wall'``
+        - ``self.bc`` is set to ``'default'``
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
 
-        # Export to temp file and reimport as NGSolve OCCGeometry
-        temp_path = self._export_occ_shape_to_temp()
+        # Transfer from PythonOCC to netgen.occ via BREP
+        occ_geo = self._pyocc_to_netgen(self._occ_shape)
 
-        try:
-            occ_geo = OCCGeometry(temp_path)
-
-            if self._is_split and hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
-                # Glue solids together for mesh connectivity
-                self.geo = Glue([solid for solid in occ_geo.solids])
-            else:
-                # Single solid or not split - extract the shape
-                self.geo = occ_geo.shape
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        if self._is_split and hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
+            # Glue solids together for mesh connectivity
+            self.geo = Glue([solid for solid in occ_geo.solids])
+        else:
+            # Single solid or not split - extract the shape
+            self.geo = occ_geo.shape
 
         # --- Deterministic boundary naming ---
         # Step 1: Name ALL faces 'wall'
@@ -565,7 +733,7 @@ class STEPImporter(BaseGeometry):
         self.bc = 'default'
         self._bc_explicitly_set = True
 
-    def finalize(self, maxh: Optional[float] = None) -> 'STEPImporter':
+    def finalize(self, maxh: Optional[float] = None) -> 'OCCImporter':
         """
         Build geometry and generate mesh.
 
@@ -578,7 +746,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
             Returns self for method chaining
         """
         if maxh is not None:
@@ -819,30 +987,24 @@ class STEPImporter(BaseGeometry):
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
 
-        temp_path = self._export_occ_shape_to_temp()
+        # Transfer from PythonOCC to netgen.occ via BREP
+        occ_geo = self._pyocc_to_netgen(self._occ_shape)
 
-        try:
-            occ_geo = OCCGeometry(temp_path)
+        if hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
+            geo = Glue([solid for solid in occ_geo.solids])
+            n_solids = len(geo.solids)
 
-            if hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
-                geo = Glue([solid for solid in occ_geo.solids])
-                n_solids = len(geo.solids)
+            colors = generate_distinct_colors(n_solids)
+            for i, solid in enumerate(geo.solids):
+                solid.mat(f"cell_{i+1}")
+                # Convert to 0-1 range for netgen
+                solid.faces.col = colors[i]
 
-                colors = generate_distinct_colors(n_solids)
-                for i, solid in enumerate(geo.solids):
-                    solid.mat(f"cell_{i+1}")
-                    # Convert to 0-1 range for netgen
-                    solid.faces.col = colors[i]
+            print(f"Colored {n_solids} solids")
+        else:
+            geo = occ_geo.shape
 
-                print(f"Colored {n_solids} solids")
-            else:
-                geo = occ_geo.shape
-
-            NetgenDraw(geo, **kwargs)
-
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        NetgenDraw(geo, **kwargs)
 
     # ==================== GEOMETRY INFO ====================
 
@@ -912,7 +1074,7 @@ class STEPImporter(BaseGeometry):
             port_axis: Optional[str] = None,
             port_prefix: str = 'port',
             print_info: bool = False,
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Name solids in the geometry.
 
@@ -939,10 +1101,10 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self.geo is None:
-            raise ValueError("Geometry not built. Call build() first.")
+            self.build()
 
         # Step 1: Name all faces 'wall' first
         self._name_all_faces_wall()
@@ -1091,7 +1253,7 @@ class STEPImporter(BaseGeometry):
             self,
             axis: str = 'Z',
             port_prefix: str = 'port'
-    ) -> 'STEPImporter':
+    ) -> 'OCCImporter':
         """
         Name faces based on their position along an axis.
 
@@ -1104,7 +1266,7 @@ class STEPImporter(BaseGeometry):
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self.geo is None:
             raise ValueError("Geometry not built. Call build() first.")
@@ -1123,13 +1285,13 @@ class STEPImporter(BaseGeometry):
 
         return self
 
-    def color_solids(self) -> 'STEPImporter':
+    def color_solids(self) -> 'OCCImporter':
         """
         Apply distinct colors to each solid in the geometry.
 
         Returns
         -------
-        self : STEPImporter
+        self : OCCImporter
         """
         if self.geo is None:
             raise ValueError("Geometry not built. Call build() first.")
@@ -1164,9 +1326,9 @@ class STEPImporter(BaseGeometry):
 
     def save_geometry(self, project_path) -> None:
         """
-        Save STEPImporter geometry to project.
+        Save OCCImporter geometry to project.
 
-        Copies the source STEP file and writes the history so that
+        Copies the source CAD file and writes the history so that
         the geometry can be reconstructed on load.
         """
         from pathlib import Path as _Path
@@ -1182,7 +1344,8 @@ class STEPImporter(BaseGeometry):
             source_filename = f'source_model{src.suffix}'
             dest = geo_dir / source_filename
             import shutil
-            shutil.copy2(str(src), str(dest))
+            if src.absolute() != dest.absolute():
+                shutil.copy2(str(src), str(dest))
             source_hash = self._file_hash(dest)
             self._source_hash = source_hash
 
@@ -1190,7 +1353,7 @@ class STEPImporter(BaseGeometry):
         history_for_save = []
         for entry in self._history:
             e = dict(entry)
-            if e.get('op') == 'import_step' and source_filename:
+            if e.get('op') == 'import_occ' and source_filename:
                 e['filepath'] = f'geometry/{source_filename}'
             history_for_save.append(e)
 
@@ -1210,17 +1373,18 @@ class STEPImporter(BaseGeometry):
     @classmethod
     def _rebuild_from_history(cls, history, project_path, source_file=None):
         """
-        Reconstruct a STEPImporter by replaying its operation history.
+        Reconstruct an OCCImporter by replaying its operation history.
         """
         from pathlib import Path as _Path
         project_path = _Path(project_path)
 
         geo = None
+        built = False
         for entry in history:
             op = entry['op']
 
-            if op == 'import_step':
-                # Resolve filepath: use project-local copy
+            if op in ('import_occ', 'import_step'):
+                # Resolve filepath: use project-local copy first, then history path
                 filepath = str(source_file) if source_file else entry['filepath']
                 # If filepath is project-relative, resolve it
                 fp = _Path(filepath)
@@ -1232,6 +1396,10 @@ class STEPImporter(BaseGeometry):
                     auto_build=False,
                     maxh=entry.get('maxh'),
                 )
+
+            elif op == 'build' and geo is not None:
+                geo.build()
+                built = True
 
             elif op == 'add_splitting_plane' and geo is not None:
                 geo.add_splitting_plane(
@@ -1255,247 +1423,25 @@ class STEPImporter(BaseGeometry):
                 )
 
             elif op == 'generate_mesh' and geo is not None:
-                geo.generate_mesh(
-                    maxh=entry.get('maxh'),
-                    curve_order=entry.get('curve_order', 3),
-                )
-
-            # Other ops (build, etc.) are handled implicitly by split/finalize
-
-        if geo is None:
-            raise ValueError("History does not contain an 'import_step' operation.")
-
-        return geo
-
-
-# ==================== GMSH IMPORTER (unchanged, but add show_occ compatibility) ====================
-
-class GMSHImporter(BaseGeometry):
-    """
-    Import geometry from GMSH .geo file.
-
-    Parameters
-    ----------
-    filepath : str
-        Path to .geo file
-    revolve : bool
-        Whether to revolve 2D geometry around X-axis
-    auto_build : bool
-        If True, automatically build geometry and mesh on init
-    maxh : float
-        Maximum mesh element size
-    """
-
-    def __init__(
-            self,
-            filepath: str,
-            revolve: bool = False,
-            auto_build: bool = True,
-            maxh: float = 0.05
-    ):
-        super().__init__()
-        self.filepath = filepath
-        self.revolve = revolve
-        self.maxh = maxh
-        self._boundary_map = {}
-        self._2d_shape = None
-
-        # Set source link for geometry linking
-        self._source_link = str(filepath)
-
-        self._load()
-
-        # Record import in history
-        self._record('import_gmsh', filepath=str(filepath), revolve=revolve,
-                     auto_build=auto_build, maxh=maxh)
-
-        if auto_build:
-            self.build()
-            self.generate_mesh(maxh=maxh)
-
-    def _load(self) -> None:
-        """Load GMSH geometry."""
-        import gmsh
-
-        output_dir = os.path.dirname(self.filepath) or '.'
-        step_path = os.path.join(output_dir, "temp_mesh.step")
-
-        gmsh.initialize()
-        gmsh.option.setNumber("General.Verbosity", 0)
-        gmsh.option.setNumber("General.Terminal", 0)
-
-        try:
-            gmsh.open(self.filepath)
-            gmsh.model.mesh.generate(2)
-
-            # Extract boundary conditions before writing
-            self._extract_boundary_conditions()
-
-            gmsh.write(step_path)
-        finally:
-            gmsh.finalize()
-
-        self._2d_shape = OCCGeometry(step_path, dim=2).shape
-
-
-        # Clean up temp file
-        if os.path.exists(step_path):
-            os.remove(step_path)
-
-    def _extract_boundary_conditions(self) -> None:
-        """Extract boundary condition labels from GMSH model."""
-        import gmsh
-
-        for dim, phys_tag in gmsh.model.getPhysicalGroups():
-            if dim != 1:  # Only 1D groups (lines)
-                continue
-            name = gmsh.model.getPhysicalName(dim, phys_tag)
-            for line_id in gmsh.model.getEntitiesForPhysicalGroup(dim, phys_tag):
-                if isinstance(line_id, tuple):
-                    _, line_id = line_id
-                self._boundary_map[line_id] = name
-
-    def build(self) -> None:
-        """Build the geometry, optionally revolving around X-axis."""
-        if self._2d_shape is None:
-            raise RuntimeError("No shape loaded.")
-
-        if self.revolve:
-            ax = Axis((0, 0, 0), X)
-            self.geo = self._2d_shape.faces[0].Revolve(ax, 360)
-        else:
-            self.geo = self._2d_shape
-
-        # Name ports
-        self.geo.faces.Min(X).name = "port1"
-        self.geo.faces.Max(X).name = "port2"
-
-    def finalize(self, maxh: Optional[float] = None) -> 'GMSHImporter':
-        """
-        Build geometry and generate mesh.
-
-        Parameters
-        ----------
-        maxh : float, optional
-            Maximum mesh element size.
-
-        Returns
-        -------
-        self : GMSHImporter
-        """
-        if maxh is not None:
-            self.maxh = maxh
-
-        self.build()
-        self.generate_mesh(maxh=self.maxh)
-        return self
-
-    @property
-    def boundary_map(self) -> dict:
-        """Get mapping of line IDs to boundary names from GMSH."""
-        return self._boundary_map.copy()
-
-    # === Persistence ===
-
-    def save_geometry(self, project_path) -> None:
-        """Save GMSHImporter geometry to project."""
-        from pathlib import Path as _Path
-        import shutil as _shutil
-        import json as _json
-
-        project_path = _Path(project_path)
-        geo_dir = project_path / 'geometry'
-        geo_dir.mkdir(parents=True, exist_ok=True)
-
-        source_hash = None
-        source_filename = None
-        src = _Path(self.filepath)
-        if src.exists():
-            source_filename = f'source_model{src.suffix}'
-            dest = geo_dir / source_filename
-            _shutil.copy2(str(src), str(dest))
-            source_hash = self._file_hash(dest)
-            self._source_hash = source_hash
-
-        history_for_save = []
-        for entry in self._history:
-            e = dict(entry)
-            if e.get('op') == 'import_gmsh' and source_filename:
-                e['filepath'] = f'geometry/{source_filename}'
-            history_for_save.append(e)
-
-        meta = {
-            'type': self.__class__.__name__,
-            'module': self.__class__.__module__,
-            'source_link': str(self._source_link) if self._source_link else None,
-            'source_filename': source_filename,
-            'source_hash': source_hash,
-            'history': history_for_save,
-        }
-
-        with open(geo_dir / 'history.json', 'w') as f:
-            _json.dump(meta, f, indent=2, default=str)
-
-    @classmethod
-    def _rebuild_from_history(cls, history, project_path, source_file=None):
-        """Reconstruct a GMSHImporter by replaying its operation history."""
-        from pathlib import Path as _Path
-        project_path = _Path(project_path)
-
-        geo = None
-        for entry in history:
-            op = entry['op']
-            if op == 'import_gmsh':
-                filepath = str(source_file) if source_file else entry['filepath']
-                fp = _Path(filepath)
-                if not fp.is_absolute():
-                    fp = project_path / fp
-                geo = cls(
-                    filepath=str(fp),
-                    revolve=entry.get('revolve', False),
-                    auto_build=False,
-                    maxh=entry.get('maxh', 0.05),
-                )
-            elif op == 'generate_mesh' and geo is not None:
+                # Ensure build before mesh
+                if not built:
+                    geo.build()
+                    built = True
                 geo.generate_mesh(
                     maxh=entry.get('maxh'),
                     curve_order=entry.get('curve_order', 3),
                 )
 
         if geo is None:
-            raise ValueError("History does not contain an 'import_gmsh' operation.")
+            raise ValueError("History does not contain an 'import_occ' or 'import_step' operation.")
+
+        # Always ensure the geometry is built for assembly use
+        if not built:
+            geo.build()
+
         return geo
 
 
-class TESLACavity(GMSHImporter):
-    """
-    TESLA 9-cell SRF cavity geometry.
 
-    Parameters
-    ----------
-    filepath : str
-        Path to .geo file defining the cavity cross-section
-    maxh : float
-        Maximum mesh element size
-    """
-
-    def __init__(self, filepath: str, maxh: float = 1.0):
-        # Initialize without auto_build so we can customize
-        super().__init__(filepath, revolve=True, auto_build=False, maxh=maxh)
-
-        # Build and customize
-        self.build()
-        self._setup_boundaries()
-        self.generate_mesh(maxh=maxh)
-
-    def _setup_boundaries(self) -> None:
-        """Set up port and boundary names."""
-        if self.geo is None:
-            raise RuntimeError("Geometry not built.")
-
-        # Name ports
-        self.geo.faces.Min(X).name = "port1"
-        self.geo.faces.Max(X).name = "port2"
-
-        # Set default BC
-        self.bc = 'default'
+# Backward-compatible alias
+STEPImporter = OCCImporter

@@ -6,6 +6,7 @@ from typing import Optional, Union, TYPE_CHECKING
 import json
 from datetime import datetime
 import shutil
+from utils.io_utils import get_user_confirmation
 
 if TYPE_CHECKING:
     from geometry.base import BaseGeometry
@@ -22,6 +23,28 @@ class EMProject:
     - Provide a unified entry point for simulation.
     """
     
+    def create_assembly(self, main_axis: str = 'Z') -> 'Assembly':
+        """
+        Create a new multi-component assembly for this project.
+        
+        This sets the project's geometry to an empty Assembly and returns it.
+        You can then add components to the assembly using assembly.add().
+        
+        Parameters
+        ----------
+        main_axis : str
+            Primary axis for concatenation ('X', 'Y', or 'Z')
+            
+        Returns
+        -------
+        Assembly
+            The new assembly instance
+        """
+        from geometry.assembly import Assembly
+        self.geometry = Assembly(main_axis=main_axis)
+        self.save()
+        return self.geometry
+
     def __init__(
         self,
         name: str,
@@ -34,9 +57,9 @@ class EMProject:
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.project_path = self.base_dir / self.name
         
-        self.geometry = geometry
+        self._geometry = geometry
         self.bc = bc
-        self.mesh: Optional[Mesh] = None
+        self._mesh: Optional[Mesh] = None
         self._fds: Optional[FrequencyDomainSolver] = None
         self._order = 3
         self._n_port_modes = 1
@@ -69,7 +92,12 @@ class EMProject:
         self._n_port_modes = metadata.get("n_port_modes", self._n_port_modes)
 
         # 1. Load Geometry FIRST
-        if metadata.get("has_geometry"):
+        has_geo = metadata.get("has_geometry", False)
+        # Self-healing: check if geometry folder has contents even if flag is false
+        if not has_geo and self.geometry_path.exists() and any(self.geometry_path.iterdir()):
+            has_geo = True
+
+        if has_geo:
             from geometry.base import BaseGeometry
             try:
                 self.geometry = BaseGeometry.load_geometry(self.project_path)
@@ -77,7 +105,12 @@ class EMProject:
                 print(f"Warning: Could not load geometry: {e}")
 
         # 2. Load Mesh SECOND (needed for FDS port modes)
-        if metadata.get("has_mesh"):
+        has_mesh = metadata.get("has_mesh", False)
+        # Self-healing: check if mesh folder has contents even if flag is false
+        if not has_mesh and self.mesh_path.exists() and (self.mesh_path / "mesh.pkl").exists():
+            has_mesh = True
+
+        if has_mesh:
             from core.persistence import ProjectManager
             pm = ProjectManager(self.base_dir)
             self.mesh = pm.load_ngs_mesh(self.mesh_path)
@@ -97,7 +130,8 @@ class EMProject:
 
             if self._fds:
                 self._fds._project_path = self.project_path
-                if self.mesh:
+                # Only sync mesh if the FDS doesn't have one already (load_from_path handles it)
+                if self.mesh and self._fds.mesh is None:
                     self._fds.mesh = self.mesh
                     # Restore FES
                     pm = ProjectManager(self.base_dir)
@@ -137,14 +171,40 @@ class EMProject:
             value.order = self._order
             value.n_port_modes = self._n_port_modes
 
-    def import_geometry(self, filepath: Union[str, Path], **kwargs) -> BaseGeometry:
-        """Import geometry from a STEP file and associate it with the project."""
-        from geometry.importers import STEPImporter
-        self.geometry = STEPImporter(str(filepath), **kwargs)
+    def import_geometry(self, filepath: Union[str, Path], force: bool = False, **kwargs) -> 'OCCImporter':
+        """Import geometry from a file into the project."""
+        if (self.has_mesh() or self.has_results()) and not force:
+            from utils.io_utils import get_user_confirmation
+            if not get_user_confirmation(
+                "\nWARNING: Importing new geometry will invalidate the current mesh and simulation results.\n"
+                "Do you want to continue and delete existing results?"
+            ):
+                print("Aborting geometry import.")
+                return self.geometry
+
+            self.invalidate_mesh()
+
+        self.geometry = self.create_importer(filepath, **kwargs)
+        self.save()  # Auto-save after successful import
         return self.geometry
 
-    def create_primitive(self, primitive_type: str, **kwargs) -> BaseGeometry:
+    def create_importer(self, filepath: Union[str, Path], **kwargs) -> 'OCCImporter':
+        """Create an OCCImporter for a CAD file (without necessarily setting it as the project geometry)."""
+        from geometry.importers import OCCImporter
+        return OCCImporter(str(filepath), **kwargs)
+
+    def create_primitive(self, primitive_type: str, force: bool = False, **kwargs) -> BaseGeometry:
         """Create a primitive geometry and associate it with the project."""
+        if (self.has_mesh() or self.has_results()) and not force:
+            if not get_user_confirmation(
+                "\nWARNING: Geometry change will invalidate the current mesh and simulation results.\n"
+                "Do you want to continue and delete existing results?"
+            ):
+                print("Aborting primitive creation.")
+                return self.geometry
+
+            self.invalidate_mesh()
+
         import geometry.primitives as primitives
         
         # Map string names to classes
@@ -160,7 +220,113 @@ class EMProject:
             raise ValueError(f"Unknown primitive type: {primitive_type}")
             
         self.geometry = cls(**kwargs)
+        self.save()  # Auto-save
         return self.geometry
+
+    def generate_mesh(self, force: bool = False, **kwargs) -> Mesh:
+        """
+        Generate mesh from current geometry.
+        
+        Automatically invalidates existing simulation results if the mesh changes.
+        """
+        if self.geometry is None:
+            raise RuntimeError("Cannot generate mesh without geometry.")
+
+        if self.has_results() and not force:
+            if not get_user_confirmation(
+                "\nWARNING: Re-generating the mesh will invalidate existing simulation results.\n"
+                "Do you want to continue and delete existing results?"
+            ):
+                print("Aborting mesh generation.")
+                return self.mesh
+
+            self.invalidate_results()
+
+        self.mesh = self.geometry.generate_mesh(**kwargs)
+        self.save()
+        return self.mesh
+
+    def has_mesh(self) -> bool:
+        """Check if mesh exists (either in memory or on disk)."""
+        if self.mesh is not None:
+            return True
+        return (self.mesh_path / "mesh.pkl").exists()
+
+    def has_results(self) -> bool:
+        """Check if any simulation results exist (either in memory or on disk)."""
+        # Check in memory
+        if self._fds and (getattr(self._fds, '_fom_cache', None) or getattr(self._fds, '_resonant_mode_cache', None)):
+            return True
+        
+        # Check on disk (config.json marks a valid simulation save)
+        return (self.fds_path / "config.json").exists()
+
+    def invalidate_mesh(self) -> None:
+        """Invalidate the mesh and all downstream results (fom, rom, etc.)."""
+        print(f"Invalidating mesh for project '{self.name}'...")
+        
+        # 1. Physical Cleanup (Content only, preserve directory)
+        if self.mesh_path.exists():
+            for item in self.mesh_path.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+        
+        # 2. In-Memory Reset
+        self.mesh = None
+        if self.geometry:
+            self.geometry.mesh = None # Sync with geometry object
+
+        # 3. Propagate Downstream
+        self.invalidate_results()
+
+    def invalidate_results(self) -> None:
+        """Invalidate all simulation results (fom, rom, concat, etc.)."""
+        print(f"Invalidating simulation results for project '{self.name}'...")
+        
+        # 1. Physical Cleanup (Content only, preserve directories)
+        for path in [self.fds_path, self.fom_path, self.foms_path, self.eigenmode_path]:
+            if path.exists():
+                for item in path.iterdir():
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+        
+        # 2. In-Memory Reset
+        if self._fds:
+            # We don't delete self._fds object, but we clear its entire state.
+            # Use full_reset to ensure matrices, FES, and flags are cleared.
+            self._fds.full_reset()
+            self._fds.mesh = self.mesh # Ensure solver still has access to new mesh if it exists
+
+    @property
+    def geometry(self) -> Optional[BaseGeometry]:
+        """Current project geometry."""
+        return self._geometry
+
+    @geometry.setter
+    def geometry(self, value: Optional[BaseGeometry]):
+        self._geometry = value
+        # Sync solver with new geometry object
+        if self._fds:
+            self._fds.geometry = value
+
+    @property
+    def mesh(self) -> Optional[Mesh]:
+        """Project mesh (NGSolve Mesh object)."""
+        return self._mesh
+
+    @mesh.setter
+    def mesh(self, value: Optional[Mesh]):
+        self._mesh = value
+        if self._fds:
+            self._fds.mesh = value
+        
+        # Auto-save mesh to disk if it exists
+        if value is not None:
+            self.save()
 
     @property
     def order(self) -> int:
@@ -208,6 +374,7 @@ class EMProject:
 
     def save(self):
         """Save the entire project with the new folder structure."""
+        from core.persistence import ProjectManager
         print(f"Saving project to {self.project_path}")
         
         # 1. Save Geometry
@@ -222,7 +389,6 @@ class EMProject:
             
         if current_mesh:
             self.mesh_path.mkdir(parents=True, exist_ok=True)
-            from core.persistence import ProjectManager
             pm = ProjectManager(self.base_dir)
             pm.save_ngs_mesh(self.mesh_path, current_mesh)
             

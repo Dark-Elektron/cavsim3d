@@ -486,7 +486,7 @@ class PlotMixin:
                 ax1, ax2 = ax
                 fig = ax1.get_figure()
             else:
-                fig, ax1 = self._ensure_ax(None, figsize=figsize)
+                fig, ax1 = self._ensure_ax(ax, figsize=figsize)
                 ax2 = ax1.twinx()
 
             # Palette for multi-solid distinction (Cold for iterations, Warm for residuals)

@@ -814,10 +814,69 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Set verbosity level
         pr.set_verbosity(verbose)
 
+        # 4. Initialize frequency array
+        self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
+
         if self.A_coupled is None:
             raise ValueError("Must call couple() first")
 
-        self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
+        # --- Rerun protection ---
+        has_results = (self._Z_matrix is not None)
+        rerun = cfg.get('rerun', False)
+
+        # Check disk if in-memory is missing
+        if not has_results and not rerun and self._solver_ref and hasattr(self._solver_ref, '_project_path'):
+            # Concatenated results are usually in fds/foms/concat or fds/fom/rom/concat
+            # We check the most likely locations
+            project_path = Path(self._solver_ref._project_path)
+            
+            # Use same logic as auto_save_eigenmodes to find sub_path
+            sub_path = "foms/concat"
+            from rom.reduction import ModelOrderReduction
+            if isinstance(self._solver_ref, ModelOrderReduction):
+                if self._solver_ref.n_domains == 1:
+                    sub_path = "fom/rom/concat"
+                else:
+                    sub_path = "foms/roms/concat"
+            
+            concat_dir = project_path / "fds" / sub_path
+            z_path = concat_dir / "z" / "z.h5"
+            if z_path.exists():
+                try:
+                    with h5py.File(z_path, "r") as f:
+                        self._Z_matrix = H5Serializer.load_dataset(f["data"])
+                    s_path = concat_dir / "s" / "s.h5"
+                    if s_path.exists():
+                        with h5py.File(s_path, "r") as f:
+                            self._S_matrix = H5Serializer.load_dataset(f["data"])
+                    
+                    # Load frequencies
+                    snap_path = concat_dir / "snapshots" / "snapshots.h5"
+                    if not snap_path.exists(): snap_path = concat_dir / "snapshots.h5"
+                    if snap_path.exists():
+                        with h5py.File(snap_path, "r") as f:
+                            self.frequencies = H5Serializer.load_dataset(f["frequencies"])
+
+                    has_results = True
+                    pr.info(f"  Loaded existing Concatenated results from {concat_dir}")
+                except Exception as e:
+                    pr.warning(f"  Could not load existing Concatenated results: {e}")
+
+        if has_results and not rerun:
+            import warnings
+            warnings.warn(
+                "Results already exist for this Concatenated system. "
+                "To overwrite, call solve(..., rerun=True).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return {
+                "frequencies": self.frequencies,
+                "Z": self._Z_matrix,
+                "S": self._S_matrix if compute_s_params else None,
+                "Z_dict": self.Z_dict,
+                "S_dict": self.S_dict if compute_s_params else None,
+            }
         n_ext = self._n_external
         r = self.A_coupled.shape[0]
 

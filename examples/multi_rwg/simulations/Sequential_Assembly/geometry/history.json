@@ -1,0 +1,55 @@
+{
+  "type": "Assembly",
+  "module": "geometry.assembly",
+  "source_link": null,
+  "source_filename": null,
+  "source_hash": null,
+  "history": [
+    {
+      "op": "__init__",
+      "timestamp": "2026-03-25T14:22:52.138793",
+      "main_axis": "Z"
+    },
+    {
+      "op": "add",
+      "timestamp": "2026-03-25T14:22:52.209122",
+      "name": "input",
+      "geometry_type": "RectangularWaveguide",
+      "geometry_history": [
+        {
+          "op": "generate_mesh",
+          "timestamp": "2026-03-25T14:22:52.159296",
+          "maxh": 0.05,
+          "curve_order": 3
+        },
+        {
+          "op": "__init__",
+          "timestamp": "2026-03-25T14:22:52.159296",
+          "a": 0.1,
+          "L": 0.3,
+          "maxh": 0.05,
+          "compute_method": "numeric"
+        }
+      ]
+    },
+    {
+      "op": "add",
+      "timestamp": "2026-03-25T14:22:52.209122",
+      "name": "output",
+      "geometry_type": "CircularWaveguide",
+      "geometry_history": [
+        {
+          "op": "generate_mesh",
+          "timestamp": "2026-03-25T14:22:52.209122",
+          "maxh": 0.05,
+          "curve_order": 3
+        }
+      ],
+      "after": "input"
+    },
+    {
+      "op": "build",
+      "timestamp": "2026-03-25T14:22:52.212130"
+    }
+  ]
+}

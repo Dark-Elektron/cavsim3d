@@ -1,0 +1,11 @@
+{
+    "domain": "global",
+    "n_ports": 3,
+    "ports": [
+        "port1",
+        "port2",
+        "port3"
+    ],
+    "n_modes_per_port": 3,
+    "timestamp": "2026-03-25T14:35:02.501382"
+}

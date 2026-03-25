@@ -9,6 +9,9 @@ from typing import (
 )
 from enum import Enum, auto
 import numpy as np
+import json
+import shutil
+from pathlib import Path
 
 from netgen.occ import OCCGeometry, Glue, X, Y, Z, Axes
 from ngsolve.webgui import Draw
@@ -63,11 +66,20 @@ class ComponentEntry:
         if isinstance(geo, Assembly):
             return geo.get_assembly_bounds()
         elif geo.geo is not None:
+            # Prefer physical face bounds if available for better alignment
+            # Default to Z-axis for the main bounds estimation
             try:
-                bb = geo.geo.bounding_box
-                return (tuple(bb[0]), tuple(bb[1]))
-            except:
-                pass
+                z_min, z_max = geo.get_physical_bounds('Z')
+                x_min, x_max = geo.get_physical_bounds('X')
+                y_min, y_max = geo.get_physical_bounds('Y')
+                return ((x_min, y_min, z_min), (x_max, y_max, z_max))
+            except Exception:
+                # Fallback to general bounding box
+                try:
+                    bb = geo.geo.bounding_box
+                    return (tuple(bb[0]), tuple(bb[1]))
+                except:
+                    pass
         return ((0, 0, 0), (1, 1, 1))
     
     @property
@@ -166,6 +178,8 @@ class Assembly(BaseGeometry):
         # Port and solid information (populated by build())
         self._port_info: Dict[str, Dict] = {}
         self._solid_info: Dict[str, Dict] = {}
+
+        self._record('__init__', main_axis=main_axis)
     
     # =========================================================================
     # Component Management (with duplicate name support)
@@ -247,7 +261,11 @@ class Assembly(BaseGeometry):
             if not geometry._is_built:
                 geometry.build()
         elif geometry.geo is None:
-            raise ValueError(f"Geometry '{name}' not built. Call build() first.")
+            # Auto-build if possible instead of raising error
+            try:
+                geometry.build()
+            except Exception as e:
+                raise ValueError(f"Geometry '{name}' not built and auto-build failed: {e}. Call build() first.")
         
         transform = Transform3D(
             translation=position or (0.0, 0.0, 0.0),
@@ -265,9 +283,20 @@ class Assembly(BaseGeometry):
         
         self._components[key] = entry
         
-        # Handle ordering - resolve base names to actual keys
-        resolved_after = self._resolve_component_ref(after) if after else None
-        resolved_before = self._resolve_component_ref(before) if before else None
+        # Handle ordering - resolve component and optional gap
+        gap = 0.0
+        if isinstance(after, tuple):
+            ref_after, gap = after
+        else:
+            ref_after = after
+            
+        if isinstance(before, tuple):
+            ref_before, gap = before
+        else:
+            ref_before = before
+
+        resolved_after = self._resolve_component_ref(ref_after) if ref_after else None
+        resolved_before = self._resolve_component_ref(ref_before) if ref_before else None
         
         if resolved_after is not None:
             idx = self._component_order.index(resolved_after) + 1
@@ -277,7 +306,8 @@ class Assembly(BaseGeometry):
                 from_key=resolved_after,
                 to_key=key,
                 from_port='port2',
-                to_port=align_port or 'port1'
+                to_port=align_port or 'port1',
+                gap=gap
             ))
             
         elif resolved_before is not None:
@@ -288,7 +318,8 @@ class Assembly(BaseGeometry):
                 from_key=key,
                 to_key=resolved_before,
                 from_port=align_port or 'port2',
-                to_port='port1'
+                to_port='port1',
+                gap=-gap  # Before means moving current component backwards relative to target
             ))
         else:
             self._component_order.append(key)
@@ -296,6 +327,18 @@ class Assembly(BaseGeometry):
         self._layout_computed = False
         self._is_built = False
         self.invalidate_tag()
+        self._record(
+            'add', 
+            name=name, 
+            geometry_type=type(geometry).__name__,
+            geometry_history=geometry.get_history(),
+            position=position,
+            rotation=rotation,
+            after=after,
+            before=before,
+            align_port=align_port,
+            **metadata
+        )
         
         return self
     
@@ -400,14 +443,18 @@ class Assembly(BaseGeometry):
         # Get the key that was just added (might be suffixed)
         new_key = self._component_order[-1]
         
-        self._connections.append(Connection(
-            from_key=resolved_to,
-            to_key=new_key,
-            from_port=to_port,
-            to_port=from_port,
-            connection_type=ConnectionType.PORT_TO_PORT,
-            gap=gap
-        ))
+        self._record(
+            'connect',
+            name=name,
+            geometry_type=type(geometry).__name__,
+            geometry_history=geometry.get_history(),
+            to_component=to_component,
+            from_port=from_port,
+            to_port=to_port,
+            rotation=rotation,
+            gap=gap,
+            **metadata
+        )
         
         return self
     
@@ -443,6 +490,8 @@ class Assembly(BaseGeometry):
         self._layout_computed = False
         self._is_built = False
         self.invalidate_tag()
+        
+        self._record('remove', ref=ref)
         
         return self
 
@@ -532,16 +581,17 @@ class Assembly(BaseGeometry):
         first_key = self._component_order[0]
         positioned.add(first_key)
         
-        max_iter = len(self._connections) * 2 + 1
-        for _ in range(max_iter):
-            for conn in self._connections:
-                if conn.to_key in positioned:
-                    continue
-                if conn.from_key not in positioned:
-                    continue
+        for conn in self._connections:
+            if conn.to_key in positioned and conn.from_key in positioned:
+                continue
+            if conn.from_key in positioned:
                 self._position_connected(conn)
                 positioned.add(conn.to_key)
+            elif conn.to_key in positioned:
+                # Reverse connection positioning not yet implemented for all cases
+                pass
         
+        # Safety for unpositioned components
         for key in self._component_order:
             if key not in positioned:
                 if positioned:
@@ -557,11 +607,20 @@ class Assembly(BaseGeometry):
         entry: ComponentEntry, 
         port_name: str
     ) -> Optional[Tuple[float, float, float]]:
-        """Get port position in local coordinates."""
-        if entry.original_bounds is None:
-            return None
+        """Get port position in local coordinates using physical bounds."""
+        # Refresh physical bounds for better precision if possible
+        if not isinstance(entry.geometry, Assembly) and entry.geometry.geo is not None:
+            axis = self.main_axis
+            z_min, z_max = entry.geometry.get_physical_bounds('Z')
+            x_min, x_max = entry.geometry.get_physical_bounds('X')
+            y_min, y_max = entry.geometry.get_physical_bounds('Y')
+            pmin = (x_min, y_min, z_min)
+            pmax = (x_max, y_max, z_max)
+        else:
+            if entry.original_bounds is None:
+                return None
+            pmin, pmax = entry.original_bounds
         
-        pmin, pmax = entry.original_bounds
         axis_idx = self._AXIS_IDX[self.main_axis]
         center = [(pmin[i] + pmax[i]) / 2 for i in range(3)]
         
@@ -610,32 +669,61 @@ class Assembly(BaseGeometry):
             rotation_center=to_entry.transform.rotation_center
         )
     
-    def _position_after(self, key: str, after_key: str) -> None:
-        """Position component after another along main axis."""
+    def _position_after(self, key: str, after_key: str, gap: float = 0.0) -> None:
+        """Position component after another along main axis using bounding boxes."""
         entry = self._components[key]
         after_entry = self._components[after_key]
         
         axis_idx = self._AXIS_IDX[self.main_axis]
         
-        after_max = (
-            after_entry.transform.translation[axis_idx] + 
-            after_entry.size[axis_idx]
-        )
+        # World max of previous component
+        pmin_after, pmax_after = after_entry.original_bounds
+        world_max_after = pmax_after[axis_idx] + after_entry.transform.translation[axis_idx]
+        
+        # Local min of current component
+        pmin_self, pmax_self = entry.original_bounds
+        local_min_self = pmin_self[axis_idx]
         
         translation = [0.0, 0.0, 0.0]
         
         for i in range(3):
             if i == axis_idx:
-                translation[i] = after_max
+                translation[i] = world_max_after - local_min_self + gap
             else:
-                if after_entry.original_bounds and entry.original_bounds:
-                    after_center = (after_entry.original_bounds[0][i] + 
-                                   after_entry.original_bounds[1][i]) / 2
-                    entry_center = (entry.original_bounds[0][i] + 
-                                  entry.original_bounds[1][i]) / 2
-                    translation[i] = (after_center + 
-                                     after_entry.transform.translation[i] - 
-                                     entry_center)
+                after_center = (pmin_after[i] + pmax_after[i]) / 2 + after_entry.transform.translation[i]
+                self_center = (pmin_self[i] + pmax_self[i]) / 2
+                translation[i] = after_center - self_center
+        
+        entry.transform = Transform3D(
+            translation=tuple(translation),
+            rotation=entry.transform.rotation,
+            rotation_center=entry.transform.rotation_center
+        )
+
+    def _position_before(self, key: str, before_key: str, gap: float = 0.0) -> None:
+        """Position component before another along main axis using bounding boxes."""
+        entry = self._components[key]
+        before_entry = self._components[before_key]
+        
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        
+        # World min of next component
+        pmin_before, pmax_before = before_entry.original_bounds
+        world_min_before = pmin_before[axis_idx] + before_entry.transform.translation[axis_idx]
+        
+        # Local max of current component
+        pmin_self, pmax_self = entry.original_bounds
+        local_max_self = pmax_self[axis_idx]
+        
+        translation = [0.0, 0.0, 0.0]
+        
+        for i in range(3):
+            if i == axis_idx:
+                translation[i] = world_min_before - local_max_self - gap
+            else:
+                before_center = (pmin_before[i] + pmax_before[i]) / 2 + before_entry.transform.translation[i]
+                self_center = (pmin_self[i] + pmax_self[i]) / 2
+                translation[i] = before_center - self_center
         
         entry.transform = Transform3D(
             translation=tuple(translation),
@@ -663,6 +751,10 @@ class Assembly(BaseGeometry):
         
         self.compute_layout()
         
+        # NEW: Snap interfaces to compensate for CAD inaccuracies
+        self._snap_interfaces()
+        
+        shapes = []
         # Build sub-assemblies first
         for entry in self._components.values():
             if entry.is_assembly and not entry.geometry._is_built:
@@ -679,17 +771,48 @@ class Assembly(BaseGeometry):
             shapes.append(transformed)
             shape_keys.append(key)
         
-        # Create multi-solid compound using Glue
+        # To prevent merging identical/co-planar solids, we assign unique 
+        # temporary materials and use OCCGeometry(shapes).shape which is
+        # often more robust than Glue() for preserving solid identities.
+        if len(shapes) > 1:
+            for i, shape in enumerate(shapes):
+                shape.mat(f"__temp_solid_{i}")
+        
+        # Create multi-solid compound
         if len(shapes) == 1:
             self.geo = shapes[0]
         else:
-            self.geo = Glue(shapes)
+            # OCCGeometry(list) performs gluing but preserves solid domains better
+            occ_geo = OCCGeometry(shapes)
+            self.geo = occ_geo.shape
         
         # Name solids and setup boundaries
         self._name_solids(shape_keys)
         self._setup_boundaries()
         
         self._is_built = True
+        self._record('build')
+
+    def generate_mesh(self, maxh=None, curve_order: int = 3) -> Mesh:
+        """
+        Generate mesh with support for per-component refinement.
+        """
+        if self.geo is None:
+            self.build()
+            
+        # Apply per-component maxh if available
+        solids = list(self.geo.solids)
+        if len(solids) == len(self._component_order):
+            for i, key in enumerate(self._component_order):
+                entry = self._components[key]
+                # Try to get maxh from component geometry
+                comp_maxh = getattr(entry.geometry, 'maxh', None)
+                if comp_maxh:
+                    solids[i].maxh = comp_maxh
+        
+        # Call base generate_mesh which will create OCCGeometry(self.geo)
+        # and respect the per-solid maxh settings.
+        return super().generate_mesh(maxh=maxh, curve_order=curve_order)
     
     def _name_solids(self, shape_keys: List[str]) -> None:
         """Name each solid in the geometry based on component keys."""
@@ -702,7 +825,9 @@ class Assembly(BaseGeometry):
             if n_solids != len(shape_keys):
                 # Mismatch - solids might have been merged or split
                 # Fall back to position-based naming
-                print(f"Warning: Expected {len(shape_keys)} solids, found {n_solids}")
+                print(f"WARNING: Assembly solid mismatch! Expected {len(shape_keys)} components, "
+                      f"but found {n_solids} solids in the final geometry.")
+                print("         This usually means identical adjacent components were merged.")
                 self._name_solids_by_position(solids)
                 return
             
@@ -734,18 +859,74 @@ class Assembly(BaseGeometry):
                     'is_identical': len(self._base_name_groups.get(entry.base_name, [])) > 1
                 }
                 
-        except AttributeError:
-            # Single solid
-            key = shape_keys[0]
-            entry = self._components[key]
-            self.geo.mat(key)
-            self._solid_info[key] = {
-                'material': key,
-                'base_name': entry.base_name,
-                'position': 0,
-                'bounds': None,
-                'is_identical': False
-            }
+        except Exception as e:
+            # Single solid or error
+            print(f"Warning in _name_solids: {e}")
+            try:
+                key = shape_keys[0]
+                entry = self._components[key]
+                self.geo.mat(key)
+                self._solid_info[key] = {
+                    'material': key,
+                    'base_name': entry.base_name,
+                    'position': 0,
+                    'bounds': None,
+                    'is_identical': False
+                }
+            except:
+                pass
+
+    def _snap_interfaces(self, tolerance: float = 1e-1) -> None: # 0.1 meter = 10cm tolerance (very aggressive)
+        """
+        Perform a bit-perfect alignment pass to snap faces together.
+        """
+        if not self._component_order or len(self._component_order) < 2:
+            return
+            
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        
+        # We follow the component order and snap each to its predecessor
+        for i in range(1, len(self._component_order)):
+            to_key = self._component_order[i]
+            from_key = self._component_order[i-1]
+            
+            from_entry = self._components[from_key]
+            to_entry = self._components[to_key]
+            
+            if from_entry.geometry.geo is None or to_entry.geometry.geo is None:
+                continue
+                
+            # Get BIT-PRECISE physical extremes from extreme faces
+            from_extremes = from_entry.geometry.get_extreme_faces(self.main_axis)
+            to_extremes = to_entry.geometry.get_extreme_faces(self.main_axis)
+            
+            if 'max' not in from_extremes or 'min' not in to_extremes:
+                # Fallback to physical bounds if no extreme face identified
+                _, pmax_from = from_entry.geometry.get_physical_bounds(self.main_axis)
+                pmin_to, _ = to_entry.geometry.get_physical_bounds(self.main_axis)
+            else:
+                pmax_from = from_extremes['max'][0]
+                pmin_to = to_extremes['min'][0]
+                
+            world_max_from = pmax_from + from_entry.transform.translation[axis_idx]
+            world_min_to = pmin_to + to_entry.transform.translation[axis_idx]
+            
+            gap = world_min_to - world_max_from
+            
+            # SNAP SAFETY: If the gap is massive, something is wrong with face detection
+            # We don't want to fly components across the world.
+            # Usually a gap should be < 10% of component size for snapping.
+            comp_size = max(from_entry.size[axis_idx], to_entry.size[axis_idx])
+            if abs(gap) > comp_size * 0.5:
+                # print(f"SNAP REJECTED: Gap too large ({gap:.3e}) for {to_key}")
+                continue
+            
+            # Snap them if they are reasonably close
+            if abs(gap) < tolerance:
+                trans = list(to_entry.transform.translation)
+                trans[axis_idx] -= gap
+                to_entry.transform.translation = tuple(trans)
+                self._layout_computed = True
     
     def _name_solids_by_position(self, solids: list) -> None:
         """Fallback: name solids by their position along main axis."""
@@ -782,7 +963,7 @@ class Assembly(BaseGeometry):
             return
         
         axis_idx = self._AXIS_IDX[self.main_axis]
-        tolerance = 1e-6
+        tolerance = 1e-3 # 1mm grouping tolerance for ports
         
         # Step 1: Name all faces 'wall' first
         self._name_all_faces_wall()
@@ -1321,3 +1502,191 @@ class Assembly(BaseGeometry):
             'unique_keys': unique_keys,
             'groups': groups
         }
+
+    def save_geometry(self, project_path) -> None:
+        """
+        Save assembly geometry and all sub-component source files.
+
+        Creates:
+        - ``geometry/components/{key}_source.{ext}`` for imported CAD files
+        - ``geometry/components/{key}.step`` for primitives
+        - ``geometry/history.json`` with rewritten paths
+        """
+        project_path = Path(project_path)
+        geo_dir = project_path / 'geometry'
+        comp_dir = geo_dir / 'components'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+        comp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Also export the whole assembly as a STEP file for external tools
+        if self.geo is not None:
+            try:
+                self.geo.WriteStep(str(geo_dir / 'assembly.step'))
+            except Exception:
+                pass
+
+        # Build history with rewritten sub-component paths
+        history_for_save = []
+        component_sources = {}  # key -> {source_link, source_hash, source_filename}
+
+        for entry in self._history:
+            e = dict(entry)
+
+            if e.get('op') == 'add' or e.get('op') == 'connect':
+                name = e.get('name', '')
+                geo_type = e.get('geometry_type', '')
+                sub_history = e.get('geometry_history', [])
+
+                # Find the component key for this name
+                # (might be suffixed like name_1, name_2)
+                comp_key = None
+                for k, comp in self._components.items():
+                    if comp.base_name == name:
+                        if k not in component_sources:
+                            comp_key = k
+                            break
+                if comp_key is None:
+                    comp_key = name
+
+                comp_entry = self._components.get(comp_key)
+                if comp_entry is not None:
+                    geo_obj = comp_entry.geometry
+                    from .importers import OCCImporter
+
+                    if isinstance(geo_obj, OCCImporter) and geo_obj._source_link:
+                        # Copy source CAD file
+                        src = Path(geo_obj._source_link)
+                        if src.exists():
+                            ext = src.suffix
+                            local_name = f'{comp_key}_source{ext}'
+                            dest = comp_dir / local_name
+                            if src.absolute() != dest.absolute():
+                                shutil.copy2(str(src), str(dest))
+                            source_hash = self._file_hash(dest)
+                            component_sources[comp_key] = {
+                                'source_link': str(geo_obj._source_link),
+                                'source_hash': source_hash,
+                                'source_filename': f'components/{local_name}',
+                            }
+                            # Rewrite filepath in sub-history
+                            rewritten_sub = []
+                            for sh in sub_history:
+                                sh_copy = dict(sh)
+                                if sh_copy.get('op') in ('import_occ', 'import_step'):
+                                    sh_copy['filepath'] = f'geometry/components/{local_name}'
+                                rewritten_sub.append(sh_copy)
+                            e['geometry_history'] = rewritten_sub
+
+                    elif not isinstance(geo_obj, Assembly):
+                        # Primitive — export as STEP
+                        if geo_obj.geo is not None:
+                            try:
+                                step_name = f'{comp_key}.step'
+                                geo_obj.geo.WriteStep(str(comp_dir / step_name))
+                                component_sources[comp_key] = {
+                                    'source_link': None,
+                                    'source_hash': None,
+                                    'source_filename': f'components/{step_name}',
+                                }
+                            except Exception:
+                                pass
+
+            history_for_save.append(e)
+
+        meta = {
+            'type': 'Assembly',
+            'module': 'geometry.assembly',
+            'source_link': None,
+            'source_filename': None,
+            'source_hash': None,
+            'component_sources': component_sources,
+            'history': history_for_save,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)
+
+    @classmethod
+    def _rebuild_from_history(
+        cls,
+        history: List[dict],
+        project_path,
+        source_file=None,
+    ) -> 'Assembly':
+        """Reconstruct assembly by replaying operation history."""
+        project_path = Path(project_path)
+        obj = None
+        
+        for entry in history:
+            op = entry['op']
+            params = {k: v for k, v in entry.items() if k not in ['op', 'timestamp']}
+            
+            if op == '__init__':
+                obj = cls(main_axis=params.get('main_axis', 'Z'))
+            
+            elif op == 'add':
+                # Reconstruct sub-geometry
+                sub_history = list(params.pop('geometry_history'))
+                sub_type = params.pop('geometry_type')
+                
+                sub_cls = BaseGeometry._get_subclass(sub_type)
+                if sub_cls is None:
+                    raise ValueError(f"Unknown geometry type '{sub_type}'")
+                
+                # Resolve source file from rewritten paths
+                sub_source = None
+                for sh in sub_history:
+                    if sh.get('op') in ('import_occ', 'import_step'):
+                        fp = sh.get('filepath', '')
+                        candidate = project_path / fp
+                        if candidate.exists():
+                            sub_source = candidate
+                        break
+                
+                sub_geo = sub_cls._rebuild_from_history(
+                    sub_history, project_path, source_file=sub_source
+                )
+                
+                name = params.pop('name')
+                obj.add(name, sub_geo, **params)
+            
+            elif op == 'connect':
+                sub_history = list(params.pop('geometry_history'))
+                sub_type = params.pop('geometry_type')
+                
+                sub_cls = BaseGeometry._get_subclass(sub_type)
+                if sub_cls is None:
+                    raise ValueError(f"Unknown geometry type '{sub_type}'")
+                
+                sub_source = None
+                for sh in sub_history:
+                    if sh.get('op') in ('import_occ', 'import_step'):
+                        fp = sh.get('filepath', '')
+                        candidate = project_path / fp
+                        if candidate.exists():
+                            sub_source = candidate
+                        break
+                
+                sub_geo = sub_cls._rebuild_from_history(
+                    sub_history, project_path, source_file=sub_source
+                )
+                
+                name = params.pop('name')
+                obj.connect(name, sub_geo, **params)
+            
+            elif op == 'remove':
+                obj.remove(**params)
+            
+            elif op == 'rotate':
+                obj.rotate(**params)
+            
+            elif op == 'translate':
+                obj.translate(**params)
+            
+            elif op == 'build':
+                obj.build()
+            
+            elif op == 'generate_mesh':
+                obj.generate_mesh(**params)
+                
+        return obj

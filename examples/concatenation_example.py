@@ -15,7 +15,7 @@ produce the full-model 2-port result.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from geometry.importers import STEPImporter
+from geometry.importers import OCCImporter
 from geometry.primitives import RectangularWaveguide
 from solvers.frequency_domain import FrequencyDomainSolver
 from rom.reduction import ModelOrderReduction
@@ -31,25 +31,25 @@ def main():
     # 1. Geometry — split waveguide
     # =========================
     # We use a normal RectangularWaveguide but create a split version
-    # by importing a STEP file and adding splitting planes.
-    # For demonstration, we'll use the STEP file in rwg_step_split/.
+    # by importing a CAD file and adding splitting planes.
+    # For demonstration, we'll use the CAD file in rwg_step_split/.
 
     a = 100e-3   # 100 mm width
     L = 200e-3   # 200 mm total length
     maxh = 0.04
 
-    # --- Option A: Use STEP file with splitting planes ---
+    # --- Option A: Use CAD file with splitting planes ---
     import os
     step_path = os.path.join(os.path.dirname(__file__), 'rwg_step_split', 'rectangular_waveguide.step')
     if os.path.exists(step_path):
-        print("\n1. Loading STEP geometry with splitting plane...")
-        geom = STEPImporter(step_path, unit='mm', auto_build=False, maxh=maxh)
+        print("\n1. Loading geometry with splitting plane...")
+        geom = OCCImporter(step_path, unit='mm', auto_build=False, maxh=maxh)
         # Split at the midpoint
         geom.add_splitting_plane_at_z(L / 2)
         geom.split()
         geom.finalize(maxh=maxh)
     else:
-        print("\n1. STEP file not found, using single-domain geometry instead.")
+        print("\n1. CAD file not found, using single-domain geometry instead.")
         print("   To test multi-domain, place a STEP file at:")
         print(f"   {step_path}")
         geom = RectangularWaveguide(a=a, L=L, maxh=maxh)
