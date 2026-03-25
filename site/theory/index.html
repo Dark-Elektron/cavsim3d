@@ -1,0 +1,1614 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="3D Cavity Simulation and Model Order Reduction">
+      
+      
+      
+        <link rel="canonical" href="https://dark-elektron.github.io/cavsim3d/theory/">
+      
+      
+        <link rel="prev" href="../tutorials/persistence/">
+      
+      
+        <link rel="next" href="../api/project/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Mathematical Theory - cavsim3d</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mathematical-theory" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="cavsim3d" class="md-header__button md-logo" aria-label="cavsim3d" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            cavsim3d
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Mathematical Theory
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Dark-Elektron/cavsim3d
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../getting_started/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Getting Started
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../architecture/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Architecture
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../tutorials/pathway1_single_solid/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Mathematical Theory
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../api/project/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../viewing_locally/" class="md-tabs__link">
+          
+  
+  
+  Developers
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="cavsim3d" class="md-nav__button md-logo" aria-label="cavsim3d" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    cavsim3d
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Dark-Elektron/cavsim3d
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/pathway1_single_solid/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathway 1: Single Solid Analysis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/pathway2_global_assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathway 2: Multi-Solid Global Assembly
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/pathway3_fom_concatenation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathway 3: FOM Concatenation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/pathway4_rom_concatenation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathway 4: ROM Concatenation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/importing_cad/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Importing CAD Files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mathematical Theory
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mathematical Theory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-maxwells-equations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Maxwell's Equations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. Maxwell&#39;s Equations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#vector-wave-equation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vector Wave Equation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-variational-formulation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Variational Formulation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Variational Formulation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#discretisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discretisation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-port-modal-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Port Modal Analysis
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-s-and-z-parameter-extraction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. S and Z-Parameter Extraction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-model-order-reduction-pod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Model Order Reduction (POD)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Model Order Reduction (POD)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-by-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step-by-Step:
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-concatenation-theory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Concatenation Theory
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Concatenation Theory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#kirchhoff-conditions-at-internal-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kirchhoff Conditions at Internal Ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#global-system-assembly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global System Assembly
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/geometry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Geometry & Assembly
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/solvers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/rom/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Reduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developers
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../viewing_locally/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Viewing Locally
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-maxwells-equations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Maxwell's Equations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. Maxwell&#39;s Equations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#vector-wave-equation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vector Wave Equation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-variational-formulation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Variational Formulation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Variational Formulation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#discretisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discretisation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-port-modal-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Port Modal Analysis
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-s-and-z-parameter-extraction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. S and Z-Parameter Extraction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-model-order-reduction-pod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Model Order Reduction (POD)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Model Order Reduction (POD)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-by-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step-by-Step:
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-concatenation-theory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Concatenation Theory
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Concatenation Theory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#kirchhoff-conditions-at-internal-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kirchhoff Conditions at Internal Ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#global-system-assembly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global System Assembly
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="mathematical-theory">Mathematical Theory<a class="headerlink" href="#mathematical-theory" title="Permanent link">&para;</a></h1>
+<p><strong>cavsim3d</strong> solves the frequency-domain Maxwell's equations using the <strong>Finite Element Method (FEM)</strong> and accelerates wideband analysis through <strong>Model Order Reduction (MOR)</strong>.</p>
+<hr />
+<h2 id="1-maxwells-equations">1. Maxwell's Equations<a class="headerlink" href="#1-maxwells-equations" title="Permanent link">&para;</a></h2>
+<p>In the frequency domain, assuming an <span class="arithmatex">\(\exp(j\omega t)\)</span> time dependence:</p>
+<p>[
+\nabla \times \mathbf{E} = -j\omega \mu \mathbf{H}
+]
+[
+\nabla \times \mathbf{H} = j\omega \epsilon^* \mathbf{E} + \mathbf{J}_e
+]</p>
+<p>where:</p>
+<ul>
+<li><span class="arithmatex">\(\omega = 2\pi f\)</span> is the angular frequency</li>
+<li><span class="arithmatex">\(\mu\)</span> is the magnetic permeability</li>
+<li><span class="arithmatex">\(\epsilon^* = \epsilon - j\sigma/\omega\)</span> is the complex permittivity (incorporating conductive losses)</li>
+<li><span class="arithmatex">\(\mathbf{J}_e\)</span> is the impressed electric current density</li>
+</ul>
+<h3 id="vector-wave-equation">Vector Wave Equation<a class="headerlink" href="#vector-wave-equation" title="Permanent link">&para;</a></h3>
+<p>Taking the curl of the first equation and substituting yields the second-order equation for <span class="arithmatex">\(\mathbf{E}\)</span>:</p>
+<div class="arithmatex">\[
+\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \epsilon_r^* \mathbf{E} = -j\omega \mu_0 \mathbf{J}_e
+\]</div>
+<p>where <span class="arithmatex">\(k_0 = \omega\sqrt{\mu_0\epsilon_0}\)</span> is the free-space wavenumber. This is the core equation solved by <strong>FrequencyDomainSolver</strong>.</p>
+<hr />
+<h2 id="2-variational-formulation">2. Variational Formulation<a class="headerlink" href="#2-variational-formulation" title="Permanent link">&para;</a></h2>
+<p>To solve numerically via FEM, we multiply by a test function <span class="arithmatex">\(\mathbf{v} \in H(\text{curl})\)</span> and integrate over the volume <span class="arithmatex">\(\Omega\)</span>:</p>
+<div class="arithmatex">\[
+\int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{E}) \cdot (\nabla \times \mathbf{v}) \, d\Omega
+- k_0^2 \int_\Omega \epsilon_r^* \mathbf{E} \cdot \mathbf{v} \, d\Omega
++ j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, ds
+= \text{(source)}
+\]</div>
+<p>The surface integral naturally imposes boundary conditions:</p>
+<table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Condition</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PEC</strong></td>
+<td><span class="arithmatex">\(\mathbf{n} \times \mathbf{E} = 0\)</span></td>
+<td>Perfect conductor (default for cavity walls)</td>
+</tr>
+<tr>
+<td><strong>PMC</strong></td>
+<td><span class="arithmatex">\(\mathbf{n} \times \mathbf{H} = 0\)</span></td>
+<td>Perfect magnetic conductor</td>
+</tr>
+<tr>
+<td><strong>Port</strong></td>
+<td>Modal expansion</td>
+<td>Waveguide interface for S-parameter extraction</td>
+</tr>
+</tbody>
+</table>
+<h3 id="discretisation">Discretisation<a class="headerlink" href="#discretisation" title="Permanent link">&para;</a></h3>
+<p>Expanding <span class="arithmatex">\(\mathbf{E} \approx \sum_i x_i \mathbf{N}_i\)</span> in the Nédélec (edge) basis leads to the linear system:</p>
+<div class="arithmatex">\[
+(\mathbf{K} - \omega^2 \mathbf{M}) \mathbf{x} = \mathbf{B} \mathbf{a}
+\]</div>
+<p>where:</p>
+<ul>
+<li><span class="arithmatex">\(\mathbf{K}\)</span> = stiffness matrix (from curl-curl term)</li>
+<li><span class="arithmatex">\(\mathbf{M}\)</span> = mass matrix (from <span class="arithmatex">\(\epsilon\)</span> term)</li>
+<li><span class="arithmatex">\(\mathbf{B}\)</span> = port excitation matrix</li>
+<li><span class="arithmatex">\(\mathbf{a}\)</span> = incident wave amplitudes</li>
+</ul>
+<hr />
+<h2 id="3-port-modal-analysis">3. Port Modal Analysis<a class="headerlink" href="#3-port-modal-analysis" title="Permanent link">&para;</a></h2>
+<p>At each waveguide port, we solve a 2D eigenvalue problem to find the propagating modes <span class="arithmatex">\(\mathbf{e}_m\)</span>:</p>
+<div class="arithmatex">\[
+\nabla_t \times (\nabla_t \times \mathbf{e}_m) = \gamma_m^2 \mathbf{e}_m
+\]</div>
+<p>The transverse field at a port is expanded as:</p>
+<div class="arithmatex">\[
+\mathbf{E}_t = \sum_m (a_m + b_m) \mathbf{e}_m
+\]</div>
+<p>where <span class="arithmatex">\(a_m\)</span> and <span class="arithmatex">\(b_m\)</span> are the incident and reflected wave amplitudes for mode <span class="arithmatex">\(m\)</span>.</p>
+<hr />
+<h2 id="4-s-and-z-parameter-extraction">4. S and Z-Parameter Extraction<a class="headerlink" href="#4-s-and-z-parameter-extraction" title="Permanent link">&para;</a></h2>
+<p>The <strong>Scattering Matrix</strong> relates incident and reflected waves:</p>
+<div class="arithmatex">\[
+\mathbf{b} = \mathbf{S} \mathbf{a}
+\]</div>
+<p>The <strong>Impedance Matrix</strong> relates modal voltages and currents:</p>
+<div class="arithmatex">\[
+\mathbf{Z} = \sqrt{\mathbf{Z}_c} \, (\mathbf{I} + \mathbf{S})(\mathbf{I} - \mathbf{S})^{-1} \, \sqrt{\mathbf{Z}_c}
+\]</div>
+<p>where <span class="arithmatex">\(\mathbf{Z}_c = \text{diag}(Z_{c,1}, Z_{c,2}, \dots)\)</span> is the diagonal matrix of modal characteristic impedances.</p>
+<hr />
+<h2 id="5-model-order-reduction-pod">5. Model Order Reduction (POD)<a class="headerlink" href="#5-model-order-reduction-pod" title="Permanent link">&para;</a></h2>
+<p>Solving the full system at every frequency point is expensive. <strong>Proper Orthogonal Decomposition (POD)</strong> creates a compact basis from a few carefully chosen solutions.</p>
+<h3 id="step-by-step">Step-by-Step:<a class="headerlink" href="#step-by-step" title="Permanent link">&para;</a></h3>
+<ol>
+<li>
+<p><strong>Compute snapshots</strong> at <span class="arithmatex">\(N_s\)</span> "master" frequencies <span class="arithmatex">\(\omega_1, \dots, \omega_{N_s}\)</span>:</p>
+<div class="arithmatex">\[
+\mathbf{X} = [\mathbf{x}(\omega_1), \dots, \mathbf{x}(\omega_{N_s})]
+\]</div>
+</li>
+<li>
+<p><strong>SVD</strong> of the snapshot matrix:</p>
+<div class="arithmatex">\[
+\mathbf{X} = \mathbf{U} \mathbf{\Sigma} \mathbf{W}^H
+\]</div>
+</li>
+<li>
+<p><strong>Truncate</strong> at rank <span class="arithmatex">\(r\)</span> where <span class="arithmatex">\(\sigma_r / \sigma_1 &gt; \text{tol}\)</span>:</p>
+<div class="arithmatex">\[
+\mathbf{V} = \mathbf{U}_{:, 1:r}
+\]</div>
+</li>
+<li>
+<p><strong>Project</strong> the system onto the reduced basis:</p>
+<div class="arithmatex">\[
+\underbrace{\mathbf{V}^H \mathbf{K} \mathbf{V}}_{\tilde{\mathbf{K}} \in \mathbb{R}^{r \times r}} \tilde{\mathbf{x}} - \omega^2 \underbrace{\mathbf{V}^H \mathbf{M} \mathbf{V}}_{\tilde{\mathbf{M}}} \tilde{\mathbf{x}} = \underbrace{\mathbf{V}^H \mathbf{B}}_{\tilde{\mathbf{B}}} \mathbf{a}
+\]</div>
+</li>
+<li>
+<p><strong>Solve</strong> the <span class="arithmatex">\(r \times r\)</span> system at each frequency (milliseconds).</p>
+</li>
+</ol>
+<pre class="mermaid"><code>graph LR
+    A["Full System&lt;br/&gt;N ≈ 10,000 DOFs"] --&gt;|"SVD"| B["Reduced Basis&lt;br/&gt;r ≈ 20 DOFs"]
+    B --&gt;|"Project K, M, B"| C["Reduced System&lt;br/&gt;r × r"]
+    C --&gt;|"Solve at 1000s&lt;br/&gt;of freq points"| D["S/Z Parameters"]</code></pre>
+<hr />
+<h2 id="6-concatenation-theory">6. Concatenation Theory<a class="headerlink" href="#6-concatenation-theory" title="Permanent link">&para;</a></h2>
+<p>For multi-domain structures, per-domain S-matrices are cascaded via <strong>Kirchhoff coupling</strong> at shared interfaces.</p>
+<h3 id="kirchhoff-conditions-at-internal-ports">Kirchhoff Conditions at Internal Ports<a class="headerlink" href="#kirchhoff-conditions-at-internal-ports" title="Permanent link">&para;</a></h3>
+<p>At the interface between domains <span class="arithmatex">\(d\)</span> and <span class="arithmatex">\(d+1\)</span>:</p>
+<div class="arithmatex">\[
+\mathbf{a}_{\text{int}}^{(d)} = \mathbf{b}_{\text{int}}^{(d+1)}, \qquad
+\mathbf{b}_{\text{int}}^{(d)} = \mathbf{a}_{\text{int}}^{(d+1)}
+\]</div>
+<p>This enforces continuity of tangential electric and magnetic fields across the shared port.</p>
+<h3 id="global-system-assembly">Global System Assembly<a class="headerlink" href="#global-system-assembly" title="Permanent link">&para;</a></h3>
+<p>Given per-domain S-matrices <span class="arithmatex">\(\mathbf{S}_1, \mathbf{S}_2, \dots\)</span>, the concatenation assembles a block system that enforces the coupling constraints and eliminates the internal port variables, yielding the global S-matrix relating only the external ports:</p>
+<div class="arithmatex">\[
+\mathbf{b}_{\text{ext}} = \mathbf{S}_{\text{global}} \, \mathbf{a}_{\text{ext}}
+\]</div>
+<pre class="mermaid"><code>graph LR
+    subgraph "Domain 1"
+        P1["Port 1&lt;br/&gt;(external)"] --&gt; S1["S₁"]
+        S1 --&gt; I1["Interface&lt;br/&gt;(internal)"]
+    end
+
+    subgraph "Domain 2"
+        I2["Interface&lt;br/&gt;(internal)"] --&gt; S2["S₂"]
+        S2 --&gt; P2["Port 2&lt;br/&gt;(external)"]
+    end
+
+    I1 ---|"Kirchhoff&lt;br/&gt;Coupling"| I2</code></pre>
+<p>The internal port DOFs are eliminated, leaving a 2-port global system.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

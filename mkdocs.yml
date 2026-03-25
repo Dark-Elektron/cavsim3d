@@ -1,0 +1,92 @@
+site_name: cavsim3d
+site_description: 3D Cavity Simulation and Model Order Reduction
+site_url: https://dark-elektron.github.io/cavsim3d/
+repo_url: https://github.com/Dark-Elektron/cavsim3d
+repo_name: Dark-Elektron/cavsim3d
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+  - mkdocs-jupyter:
+      include_source: true
+      execute: false
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - admonition
+  - footnotes
+  - attr_list
+  - def_list
+  - tables
+  - md_in_html
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting Started: getting_started.md
+  - Architecture: architecture.md
+  - Tutorials:
+      - "Pathway 1: Single Solid": tutorials/pathway1_single_solid.ipynb
+      - "Pathway 2: Global Assembly": tutorials/pathway2_global_assembly.ipynb
+      - "Pathway 3: FOM Concatenation": tutorials/pathway3_fom_concatenation.ipynb
+      - "Pathway 4: ROM Concatenation": tutorials/pathway4_rom_concatenation.ipynb
+      - Importing CAD Files: tutorials/importing_cad.md
+      - Persistence: tutorials/persistence.md
+  - Mathematical Theory: theory.md
+  - API Reference:
+      - Project Management: api/project.md
+      - Geometry & Assembly: api/geometry.md
+      - Solvers: api/solvers.md
+      - Model Reduction: api/rom.md
+  - Developers:
+      - Viewing Locally: viewing_locally.md
