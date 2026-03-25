@@ -3,7 +3,7 @@
 /workspace.xml
 # Editor-based HTTP Client requests
 /httpRequests/
-/__pycache__/
+__pycache__/
 *.pyc
 *.pyo
 .vscode/
