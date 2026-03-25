@@ -84,8 +84,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # --- Iterative solver defaults ---
     AUTO_DOF_THRESHOLD = 50_000
     DEFAULT_ITERATIVE_OPTS = {
-        'precond': 'direct',
-        'maxsteps': 100,
+        'precond': 'local',
+        'maxsteps': 500,
         'tol': 1e-6,
         'printrates': False,
     }
@@ -120,23 +120,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Snapshots storage
         self.snapshots: Dict[str, np.ndarray] = {}
 
+        self._project_path: Optional[str] = None
+        
+        # Port modes (shared across domains)
+        self.port_solver: Optional[PortEigenmodeSolver] = None
+        self.port_modes: Dict[str, Dict[int, CoefficientFunction]] = None
+        self.port_basis: Dict[str, Dict[int, np.ndarray]] = None
+        self._n_modes_per_port: int = None
+
         # Trigger structural detection and FES reconstruction via property setter
         if geometry is not None:
             self.mesh = geometry.mesh
         else:
             self.mesh = None
-
-        self._project_path: Optional[str] = None
-        
-        # Port modes (shared across domains)
-        if self.mesh is not None:
-            self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
-        else:
-            self.port_solver = None
-            
-        self.port_modes: Dict[str, Dict[int, CoefficientFunction]] = None
-        self.port_basis: Dict[str, Dict[int, np.ndarray]] = None
-        self._n_modes_per_port: int = None
 
         # Per-domain results (internal storage)
         self._Z_per_domain: Dict[str, Dict[str, np.ndarray]] = {}
@@ -164,6 +160,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._project_name: Optional[str] = None
         self._project_base_dir: Optional[Union[str, Path]] = None
         self._project_ref = None
+        self._loaded_config = None
 
         # Solver history (CST-style operation log)
         self._solver_history: List[dict] = []
@@ -204,6 +201,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             
             # Reconstruct FES for all domains (essential for field plotting after load)
             self._reconstruct_fes()
+
+            # Reconstruct Port Solver for the new mesh
+            if value is not self._mesh or self.port_solver is None:
+                self.port_solver = PortEigenmodeSolver(value, self.order, self.bc)
+                self.port_modes = None
+                self.port_basis = None
             
             # Print structure info
             self._print_structure_info()
@@ -217,6 +220,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self._external_ports = []
             self._internal_ports = []
             self._fes = {}
+            
+            # Clear global matrices and flags
+            self._fes_global = None
+            self.M_global = None
+            self.K_global = None
+            self.B_global = None
+            self._global_matrices_assembled = False
+            self._per_domain_matrices_assembled = False
+            
+            # Clear port modes to force re-assembly on new mesh
+            self.port_solver = None
+            self.port_modes = None
+            self.port_basis = None
+            self._n_modes_per_port = None
 
     def _reconstruct_fes(self) -> None:
         """
@@ -393,23 +410,35 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # === Structure detection ===
 
     def _detect_domains(self) -> List[str]:
-        """Detect domains from mesh materials."""
+        """Detect domains from mesh materials with fallback."""
+        if self.mesh is None:
+            return []
         materials = list(self.mesh.GetMaterials())
+        if not materials:
+            return ['default']
 
-        # Look for 'cell' naming convention from split geometry
-        domains = sorted(
+        # Try to find domains matching the 'cell' naming convention (sorted numerically)
+        cell_domains = sorted(
             [m for m in materials if 'cell' in m.lower()],
             key=lambda x: int(''.join(filter(str.isdigit, x)) or 0)
         )
 
-        if not domains:
-            # Single domain case
-            domains = ['default'] if 'default' in materials else [materials[0]]
+        if cell_domains:
+            return cell_domains
 
-        return domains
+        # If no 'cell' naming, include all unique non-default materials
+        other_domains = sorted([m for m in materials if m.lower() != 'default'])
+        
+        if other_domains:
+            return other_domains
+
+        # Fallback to the first available material (likely 'default' or a single custom name)
+        return [materials[0]]
 
     def _detect_ports(self) -> List[str]:
-        """Detect ports from mesh boundaries."""
+        """Detect ports from mesh boundaries with fallback."""
+        if self.mesh is None:
+            return []
         boundaries = list(self.mesh.GetBoundaries())
         ports = [b for b in boundaries if 'port' in b.lower()]
 
@@ -504,8 +533,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             assemble_global = True
             assemble_per_domain = True
 
-        # Solve port eigenmodes first (shared across all assemblies)
-        if self.port_modes is None:
+        # Solve port eigenmodes if missing or if the solver is blank
+        needs_port_solve = (self.port_modes is None)
+        if not needs_port_solve and self.port_solver is not None:
+             # Check if the solver actually has the data for the modes we need
+             if not self.port_solver.port_cutoff_kc:
+                 needs_port_solve = True
+
+        if needs_port_solve:
+            if self.port_solver is None:
+                # Emergency re-initialization
+                from solvers.ports import PortEigenmodeSolver
+                self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
+                
             pr.running("Solving port eigenmodes...")
             self.port_modes, self.port_basis = self.port_solver.solve(nmodes=nportmodes)
             self._n_modes_per_port = nportmodes
@@ -566,6 +606,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         pr.debug("\n--- Assembling Global Matrices (Coupled System) ---")
 
         # Create FES for entire mesh
+        print("boundary condition: ", self.bc)
         self._fes_global = HCurl(
             self.mesh,
             order=self.order,
@@ -784,6 +825,37 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Set verbosity level
         pr.set_verbosity(verbose)
 
+        # --- Config comparison ---
+        if self._loaded_config and not rerun:
+            diffs = []
+            # Check frequencies if they were previously solved
+            if self._loaded_config.get('fmin') is not None:
+                if not np.isclose(fmin, self._loaded_config['fmin']):
+                    diffs.append(f"fmin: {self._loaded_config['fmin']} -> {fmin}")
+                if not np.isclose(fmax, self._loaded_config['fmax']):
+                    diffs.append(f"fmax: {self._loaded_config['fmax']} -> {fmax}")
+                if nsamples != self._loaded_config['nsamples']:
+                    diffs.append(f"nsamples: {self._loaded_config['nsamples']} -> {nsamples}")
+            
+            # Check solver settings
+            if order is not None and order != self._loaded_config.get('order'):
+                diffs.append(f"order: {self._loaded_config.get('order')} -> {order}")
+            if nportmodes is not None and nportmodes != self._loaded_config.get('n_modes_per_port'):
+                diffs.append(f"nportmodes: {self._loaded_config.get('n_modes_per_port')} -> {nportmodes}")
+            
+            # Check geometry history
+            current_history = getattr(self.geometry, '_history', [])
+            loaded_history = self._loaded_config.get('geometry_history', [])
+            if current_history != loaded_history:
+                diffs.append("geometry/history has changed")
+
+            if diffs:
+                msg = "\n  [WARNING] Simulation configuration has changed since last save/load:\n"
+                for d in diffs:
+                    msg += f"    - {d}\n"
+                msg += "  Existing results may be invalid. Use rerun=True to recompute."
+                warnings.warn(msg, UserWarning, stacklevel=2)
+
         # --- Rerun protection ---
         has_results = (
             self._Z_global_coupled is not None
@@ -791,13 +863,41 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             or self._fom_cache is not None
         )
         if has_results and not rerun:
-            warnings.warn(
-                "Results already exist for this solver. "
-                "To overwrite, call solve(..., rerun=True).",
-                UserWarning,
-                stacklevel=2,
-            )
+            if not (self._loaded_config and diffs): # Don't double-warn if we already warned about diffs
+                warnings.warn(
+                    "Results already exist for this solver. "
+                    "To overwrite, call solve(..., rerun=True).",
+                    UserWarning,
+                    stacklevel=2,
+                )
             return self._build_results_dict(compute_s_params, per_domain, global_method)
+
+        # --- Mesh synchronization and validation ---
+        if self.mesh is None and self.geometry and self.geometry.mesh:
+            # Sync solver mesh with geometry if available
+            self.mesh = self.geometry.mesh
+            # Also sync back to project to ensure consistency and auto-save
+            if hasattr(self, '_project_ref') and self._project_ref:
+                self._project_ref.mesh = self.mesh
+            
+        if self.mesh is None:
+            raise RuntimeError(
+                "FrequencyDomainSolver has no mesh. "
+                "Please generate a mesh using geometry.generate_mesh() before solving."
+            )
+            
+        # Ensure port_solver is initialized if mesh exists but solver was cleared
+        if self.port_solver is None and self.mesh is not None:
+             from solvers.ports import PortEigenmodeSolver
+             self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
+
+        if rerun:
+            # Explicitly clear ROM/Concat children of existing FOM caches
+            if self._fom_cache:
+                self._fom_cache.clear_rom()
+            if self._foms_cache:
+                self._foms_cache.clear_roms()
+            self._clear_results()
 
         if order is not None and order != self.order:
             self.order = order
@@ -995,24 +1095,26 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                             inverse="pardiso"  # or "umfpack", "sparsecholesky"
                         )
                 else:
-                    # precond = NGPreconditioner(a_form, iter_opts['precond'])
-                    # precond = preconditioners.HCurlAMG(a_form, 
-                    # smoothingsteps=3, 
-                    # smoothedprolongation=False, maxcoarse=500,
-                    #           maxlevel=10, 
-                            #   potentialsmoother='amg'
-                            #   )
-                    precond = preconditioners.MultiGrid(a_form)
-                    # precond = preconditioners.MultiGrid(a_form,
-                    #                                 smoother='point',
-                    #                                 smoothingsteps=5,
-                    #                                 cycle='W',
-                    #                                 coarsetype='direct',
-                    #                                 )
-
+                    if iter_opts['precond'] == 'local':
+                        precond = preconditioners.Local(a_form)
+                    elif iter_opts['precond'] == 'multigrid':
+                        precond = preconditioners.MultiGrid(a_form)
+                        # precond = preconditioners.MultiGrid(a_form,
+                        #                                 smoother='point',
+                        #                                 smoothingsteps=5,
+                        #                                 cycle='W',
+                        #                                 coarsetype='direct',
+                        #                                 )
+                    elif iter_opts['bddc']:
+                        precond = preconditioners.BDDC(a_form)
+                    else:
+                        print('Preconditioner not found, defaulting to local.')
+                        precond = preconditioners.Local(a_form)
                 
                 with TaskManager():
                     a_form.Assemble() # only assemble a_form after attaching a preconditioner
+                    if iter_opts['precond'].lower() == 'direct':
+                        precond = a_form.mat.Inverse(fes.FreeDofs(), inverse="pardiso")
 
                 # ============================================================
                 # SOLVE: All excitations at this frequency
@@ -1189,13 +1291,25 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     a_form.Assemble()
                     inv_a = a_form.mat.Inverse(
                         freedofs=freedofs,
-                        inverse="sparsecholesky"
+                        inverse="pardiso"
                     )
             else:
-                precond = preconditioners.Local(a_form)
+                if iter_opts['precond'].lower() == 'local':
+                    precond = preconditioners.Local(a_form)
+                elif iter_opts['precond'].lower() == 'multigrid':
+                    precond = preconditioners.MultiGrid(a_form)
+                elif iter_opts['precond'].lower() == 'bddc':
+                    precond = preconditioners.BDDC(a_form)
+                elif iter_opts['precond'].lower() == 'hcurlamg':
+                    precond = preconditioners.HCurlAMG(a_form)
+                else:
+                    print('Preconditioner not found, defaulting to local.')
+                    precond = preconditioners.Local(a_form)
 
                 with TaskManager():
                     a_form.Assemble() # only assemble a_form after attaching a preconditioner
+                    if iter_opts['precond'].lower() == 'direct':
+                        precond = a_form.mat.Inverse(fes.FreeDofs(), inverse="pardiso")
 
             # Solve for all excitations
             x_all = np.zeros((fes.ndof, n_excitations))
@@ -1412,6 +1526,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # 1. Config / metadata
         config = {
             "project_name": self._project_name,
+            "fmin": self.frequencies[0] / 1e9 if self.frequencies is not None else None,
+            "fmax": self.frequencies[-1] / 1e9 if self.frequencies is not None else None,
+            "nsamples": len(self.frequencies) if self.frequencies is not None else None,
             "order": self.order,
             "bc": self.bc,
             "use_wave_impedance": self.use_wave_impedance,
@@ -1432,6 +1549,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 or self._fom_cache is not None
             ),
             "solver_history": self._solver_history,
+            "geometry_history": getattr(self.geometry, '_history', []),
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -1516,7 +1634,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         import pickle as _pkl
         import h5py
         from core.persistence import H5Serializer, ProjectManager
-        
+        self._loaded_config = config
+
         # Restore state flags and topology
         self.is_compound = config.get("is_compound", self.is_compound)
         self.domains = config.get("domains", self.domains)
@@ -1646,12 +1765,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._S_per_domain = {}
         self._Z_global_coupled = None
         self._S_global_coupled = None
+        self._Z_global_cascade = None
+        self._S_global_cascade = None
         self._current_global_method = None
         self.snapshots = {}
         self._residuals = {}
         # Invalidate result-object caches
         self._fom_cache = None
         self._foms_cache = None
+        # Clear resonant modes
+        self._resonant_mode_cache = {}
 
     def _print_solve_config(
         self,

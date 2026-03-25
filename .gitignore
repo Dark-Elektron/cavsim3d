@@ -1,0 +1,20 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+# Editor-based HTTP Client requests
+/httpRequests/
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+.DS_Store
+*.log
+*.h5
+*.pkl
+*.npz
+*.egg-info/
+*.resolved
+architecture_analysis.md
+simulation_result_structure.md
+simulation/

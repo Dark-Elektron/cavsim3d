@@ -4,14 +4,14 @@ System Name        : Windows_NT
 Machine Name       : OPHELIA
 User Name          : Soske
 Source System      : ACIS
-Destination System : IGES
+Destination System : STEP
 Input File         : C:\Users\Soske\Documents\git_projects\cavsim3d\examples\tesla_step\tesla1cell.sat
-Output File        : C:\Users\Soske\Documents\git_projects\cavsim3d\examples\tesla_step\tesla1cell.iges
-Start Time         : Fri Mar 20 09:14:45 2026
+Output File        : C:\Users\Soske\Documents\git_projects\cavsim3d\examples\tesla_step\tesla1cell.step
+Start Time         : Mon Mar 23 16:09:13 2026
 
 --------------------------------------------------------------------------------
 Message : === Translation Options ===
-Message : SaveVersion : AP214
+Message : SaveVersion : AP242
 Message : ProgramName : CST ACIS InterOp Converter 2025
 Message : IGES.Writer.TranslateSolidSheets : true
 Message : IGES.Writer.ConvertAnalyticalSurfacesAndCurvesToSpline : false
@@ -19,11 +19,11 @@ Message : IGES.TrimCurveWritePreference  : 3
 Message : AuthorName : Soske
 Message : ===========================
 -------------------------Source File Header Information-------------------------
-Modification Date        : 20 Mar 2026
+Modification Date        : 23 Mar 2026
 File Name                : tesla1cell.sat
 Organization             : CST MICROWAVE STUDIO
 Version                  : 3500
-Units                    : MILLIMETER
+Units                    : METER
 Tolerance                : 0.000001
 Document Type            : Part
 Format Type              : ACIS
@@ -53,9 +53,10 @@ BRep Target Representation Postprocessing Result : Success
 End BRep
 ------------------------Representation Conversion Summary-----------------------
 No. of Solid Bodies                       :    1
-No. of Acorn Bodies                       :    0
 No. of Sheet Bodies                       :    0
 No. of Wire Bodies                        :    0
+No. of Geometric Sets                     :    0
+No. of Curve Sets                         :    0
 --------------------------------------------------------------------------------
 BRep Conversion Result : Success
 --------------------------------------------------------------------------------
@@ -77,8 +78,7 @@ DocumentFeature Target Representation Postprocessing Result : Success
 --------------------------------------------------------------------------------
 End DocumentFeature
 ------------------------Representation Conversion Summary-----------------------
-No. of Groups                             :    0
-No. of Working Coordinate Systems         :    0
+No. of Selection Sets                     :    0
 --------------------------------------------------------------------------------
 DocumentFeature Conversion Result : No Entity to Translate
 --------------------------------------------------------------------------------
@@ -93,9 +93,9 @@ Target Document Postprocessing Result : Success
 No. of Items of BRep Representation            :    1
 No. of Items of DocumentFeature Representation :    0
 --------------------------------------------------------------------------------
-Output File "C:\Users\Soske\Documents\git_projects\cavsim3d\examples\tesla_step\tesla1cell.iges" is Successfully Written
+Output File "C:\Users\Soske\Documents\git_projects\cavsim3d\examples\tesla_step\tesla1cell.step" is Successfully Written
 --------------------------------------------------------------------------------
-Finish Time : Fri Mar 20 09:14:45 2026
+Finish Time : Mon Mar 23 16:09:14 2026
 
 --------------------------------------------------------------------------------
 Translation Result : Success

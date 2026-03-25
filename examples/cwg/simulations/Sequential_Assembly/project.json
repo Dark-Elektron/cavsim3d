@@ -1,0 +1,10 @@
+{
+    "name": "Sequential_Assembly",
+    "timestamp": "2026-03-25T14:24:53.349763",
+    "has_geometry": true,
+    "has_mesh": false,
+    "has_fds": false,
+    "order": 3,
+    "n_port_modes": 1,
+    "bc": null
+}

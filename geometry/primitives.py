@@ -4,6 +4,8 @@
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import numpy as np
+import json
+import shutil
 
 from netgen.occ import Rectangle, X, Y, Z, Cylinder, Axes
 from ngsolve import Mesh
@@ -168,6 +170,31 @@ class RectangularWaveguide(BaseGeometry):
             
         return obj
 
+    def save_geometry(self, project_path) -> None:
+        """Save primitive geometry as STEP + history."""
+        project_path = Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        # Export STEP file
+        if self.geo is not None:
+            try:
+                self.geo.WriteStep(str(geo_dir / 'geometry.step'))
+            except Exception:
+                pass
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': None,
+            'source_filename': 'geometry.step',
+            'source_hash': None,
+            'history': self._history,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)
+
 class CircularWaveguide(BaseGeometry):
     """Circular waveguide with optional analytical solution."""
 
@@ -190,6 +217,7 @@ class CircularWaveguide(BaseGeometry):
 
         self.build()
         self.generate_mesh(maxh=maxh)
+        self._record('__init__', radius=radius, length=length, maxh=maxh, compute_method=compute_method)
 
     def build(self) -> None:
         self.geo = Cylinder(Axes((0, 0, 0), Z), r=self.radius, h=self.length)
@@ -239,6 +267,52 @@ class CircularWaveguide(BaseGeometry):
     def _get_mesh_params(self) -> Dict[str, Any]:
         return {'maxh': self.maxh, 'nv': self.mesh.nv if self.mesh else None}
 
+    @classmethod
+    def _rebuild_from_history(
+        cls,
+        history: List[dict],
+        project_path: Path,
+        source_file=None,
+    ) -> 'CircularWaveguide':
+        """Reconstruct from operation history."""
+        params = {}
+        for entry in history:
+            if entry['op'] == '__init__':
+                params = entry
+                break
+        
+        radius = params.get('radius', 0.05)
+        length = params.get('length', 0.2)
+        maxh = params.get('maxh', 0.05)
+        meth = params.get('compute_method', 'numeric')
+        
+        obj = cls(radius=radius, length=length, maxh=maxh, compute_method=meth)
+        return obj
+
+    def save_geometry(self, project_path) -> None:
+        """Save primitive geometry as STEP + history."""
+        project_path = Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.geo is not None:
+            try:
+                self.geo.WriteStep(str(geo_dir / 'geometry.step'))
+            except Exception:
+                pass
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': None,
+            'source_filename': 'geometry.step',
+            'source_hash': None,
+            'history': self._history,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)
+
 
 class Box(BaseGeometry):
     """Simple box/cavity geometry."""
@@ -256,6 +330,7 @@ class Box(BaseGeometry):
 
         self.build()
         self.generate_mesh(maxh=maxh)
+        self._record('__init__', dimensions=dimensions, port_faces=port_faces, maxh=maxh)
 
     def build(self) -> None:
         from netgen.occ import Box as OCCBox
@@ -281,3 +356,48 @@ class Box(BaseGeometry):
             'dimensions': tuple(float(d) for d in self.dimensions),
             'port_faces': self.port_faces
         }
+
+    @classmethod
+    def _rebuild_from_history(
+        cls,
+        history: List[dict],
+        project_path: Path,
+        source_file=None,
+    ) -> 'Box':
+        """Reconstruct from operation history."""
+        params = {}
+        for entry in history:
+            if entry['op'] == '__init__':
+                params = entry
+                break
+        
+        dims = params.get('dimensions', (0.1, 0.1, 0.2))
+        port_faces = params.get('port_faces', ('Min(Z)', 'Max(Z)'))
+        maxh = params.get('maxh', 0.05)
+        
+        obj = cls(dimensions=tuple(dims), port_faces=tuple(port_faces), maxh=maxh)
+        return obj
+
+    def save_geometry(self, project_path) -> None:
+        """Save primitive geometry as STEP + history."""
+        project_path = Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.geo is not None:
+            try:
+                self.geo.WriteStep(str(geo_dir / 'geometry.step'))
+            except Exception:
+                pass
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': None,
+            'source_filename': 'geometry.step',
+            'source_hash': None,
+            'history': self._history,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)

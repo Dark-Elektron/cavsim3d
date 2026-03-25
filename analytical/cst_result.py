@@ -44,10 +44,14 @@ class CSTResult(PlotMixin):
     >>> fig, ax = fds.fom.plot_s(ax=ax, label='FOM')
     """
 
-    # Regex pattern for CST S-parameter filenames
-    # Matches: S-Parameters_S{port}({mode}),{port}({mode}).txt
-    _FILENAME_PATTERN = re.compile(
-        r"S-Parameters_S(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+    _FILENAME_PATTERN_S = re.compile(
+        r"(?:S-Parameters_S|S Matrix_S)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+    )
+    _FILENAME_PATTERN_Z = re.compile(
+        r"(?:Z-Parameters_Z|Z Matrix_Z)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+    )
+    _FILENAME_PATTERN_Y = re.compile(
+        r"(?:Y-Parameters_Y|Y Matrix_Y)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
     )
 
     def __init__(
@@ -65,16 +69,20 @@ class CSTResult(PlotMixin):
         self._frequencies: Optional[np.ndarray] = None
         self._S_dict: Dict[str, np.ndarray] = {}
         self._Z_dict: Optional[Dict[str, np.ndarray]] = None
+        self._Y_dict: Optional[Dict[str, np.ndarray]] = None
         self._S_matrix: Optional[np.ndarray] = None
         self._Z_matrix: Optional[np.ndarray] = None
+        self._Y_matrix: Optional[np.ndarray] = None
 
         # Port/mode info extracted from available files
         self._available_params: List[str] = []
         self._n_ports: int = 0
         self._n_modes_per_port: int = 1
 
-        # Load all available S-parameters
+        # Load all available parameters
         self._load_all_s_parameters()
+        self._load_all_z_parameters()
+        self._load_all_y_parameters()
 
     def _validate_folder(self) -> Path:
         """Validate project folder and return Export folder path."""
@@ -100,19 +108,7 @@ class CSTResult(PlotMixin):
 
         return export_folder
 
-    def _parse_filename(self, filepath: Path) -> Optional[Tuple[int, int, int, int]]:
-        """
-        Parse S-parameter filename to extract port/mode indices.
-
-        Returns
-        -------
-        tuple or None
-            (port_i, mode_i, port_j, mode_j) or None if parsing fails.
-        """
-        match = self._FILENAME_PATTERN.search(filepath.name)
-        if match:
-            return tuple(int(x) for x in match.groups())
-        return None
+    # _parse_filename removed as regex is used directly in loaders
 
     def _load_s_parameter_file(self, filepath: Path) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -152,7 +148,10 @@ class CSTResult(PlotMixin):
 
     def _load_all_s_parameters(self) -> None:
         """Load all available S-parameter files from Export folder."""
-        s_param_files = sorted(self._export_folder.glob("S-Parameters_S*.txt"))
+        s_param_files = sorted(
+            list(self._export_folder.glob("S-Parameters_S*.txt")) +
+            list(self._export_folder.glob("S Matrix_S*.txt"))
+        )
 
         if not s_param_files:
             raise FileNotFoundError(
@@ -170,11 +169,12 @@ class CSTResult(PlotMixin):
 
         # Load all files
         for filepath in s_param_files:
-            indices = self._parse_filename(filepath)
-            if indices is None:
+            match = self._FILENAME_PATTERN_S.search(filepath.name)
+            if not match:
                 print(f"  Warning: Could not parse filename {filepath.name}, skipping.")
                 continue
 
+            indices = tuple(int(x) for x in match.groups())
             port_i, mode_i, port_j, mode_j = indices
             port_indices.update([port_i, port_j])
             mode_indices.update([mode_i, mode_j])
@@ -201,14 +201,164 @@ class CSTResult(PlotMixin):
         self._n_ports = max(port_indices) if port_indices else 0
         self._n_modes_per_port = max(mode_indices) if mode_indices else 1
 
-        print(f"Loaded CST results from: {self.project_folder.name}")
+        print(f"Loaded CST S-parameters from: {self.project_folder.name}")
         print(f"  Frequency range: {self._frequencies[0]/1e9:.4f} - "
               f"{self._frequencies[-1]/1e9:.4f} GHz ({n_freqs} points)")
         print(f"  Ports: {self._n_ports}, Modes per port: {self._n_modes_per_port}")
         print(f"  S-parameters loaded: {len(self._S_dict)}")
+        self._build_s_matrix()
 
-        # Compute Z from S
-        self._compute_z_from_s()
+    def _build_s_matrix(self) -> None:
+        """Build global S-matrix from dictionaries."""
+        if not self._S_dict:
+            return
+
+        n_freqs = len(self._frequencies)
+        n_total = self._n_ports * self._n_modes_per_port
+        self._S_matrix = np.zeros((n_freqs, n_total, n_total), dtype=complex)
+
+        for key, s_data in self._S_dict.items():
+            match = re.match(r"(\d+)\((\d+)\)(\d+)\((\d+)\)", key)
+            if match:
+                pi, mi, pj, mj = [int(x) for x in match.groups()]
+                row = (pi - 1) * self._n_modes_per_port + (mi - 1)
+                col = (pj - 1) * self._n_modes_per_port + (mj - 1)
+                if row < n_total and col < n_total:
+                    self._S_matrix[:, row, col] = s_data
+
+    def _load_all_z_parameters(self) -> None:
+        """Load all available Z-parameter files from Export folder."""
+        z_param_files = sorted(
+            list(self._export_folder.glob("Z-Parameters_Z*.txt")) +
+            list(self._export_folder.glob("Z Matrix_Z*.txt"))
+        )
+
+        if not z_param_files:
+            # We don't raise error here, just don't populate Z_dict
+            self._Z_dict = {}
+            return
+
+        # Use same frequency grid as S if available, otherwise determine from first Z file
+        if self._frequencies is None:
+            first_file = z_param_files[0]
+            self._frequencies, _ = self._load_s_parameter_file(first_file)
+        
+        n_freqs = len(self._frequencies)
+
+        if self._Z_dict is None:
+            self._Z_dict = {}
+
+        for filepath in z_param_files:
+            match = self._FILENAME_PATTERN_Z.search(filepath.name)
+            if not match:
+                continue
+            
+            indices = tuple(int(x) for x in match.groups())
+            port_i, mode_i, port_j, mode_j = indices
+
+            # Load data (reuse S-loader as format is identical: freq, mag, phase)
+            freq_hz, z_complex = self._load_s_parameter_file(filepath)
+
+            # Validate consistency
+            if len(freq_hz) != n_freqs or not np.allclose(freq_hz, self._frequencies, rtol=1e-6):
+                print(f"  Warning: {filepath.name} has inconsistent frequencies. Skipping.")
+                continue
+
+            key = f"{port_i}({mode_i}){port_j}({mode_j})"
+            self._Z_dict[key] = z_complex
+            if key not in self._available_params:
+                self._available_params.append(key)
+
+        print(f"  Z-parameters loaded: {len(self._Z_dict)}")
+        self._build_z_matrix()
+
+    def _build_z_matrix(self) -> None:
+        """Build global Z-matrix from dictionaries."""
+        if not self._Z_dict:
+            return
+
+        n_freqs = len(self._frequencies)
+        n_total = self._n_ports * self._n_modes_per_port
+        self._Z_matrix = np.zeros((n_freqs, n_total, n_total), dtype=complex)
+
+        for key, z_data in self._Z_dict.items():
+            match = re.match(r"(\d+)\((\d+)\)(\d+)\((\d+)\)", key)
+            if match:
+                pi, mi, pj, mj = [int(x) for x in match.groups()]
+                row = (pi - 1) * self._n_modes_per_port + (mi - 1)
+                col = (pj - 1) * self._n_modes_per_port + (mj - 1)
+                if row < n_total and col < n_total:
+                    self._Z_matrix[:, row, col] = z_data
+
+    def _load_all_y_parameters(self) -> None:
+        """Load all available Y-parameter files from Export folder."""
+        y_param_files = sorted(
+            list(self._export_folder.glob("Y-Parameters_Y*.txt")) +
+            list(self._export_folder.glob("Y Matrix_Y*.txt"))
+        )
+
+        if not y_param_files:
+            self._Y_dict = {}
+            return
+
+        if self._frequencies is None:
+            first_file = y_param_files[0]
+            self._frequencies, _ = self._load_s_parameter_file(first_file)
+        
+        n_freqs = len(self._frequencies)
+
+        if self._Y_dict is None:
+            self._Y_dict = {}
+
+        for filepath in y_param_files:
+            match = self._FILENAME_PATTERN_Y.search(filepath.name)
+            if not match:
+                continue
+            
+            indices = tuple(int(x) for x in match.groups())
+            port_i, mode_i, port_j, mode_j = indices
+
+            freq_hz, y_complex = self._load_s_parameter_file(filepath)
+
+            if len(freq_hz) != n_freqs or not np.allclose(freq_hz, self._frequencies, rtol=1e-6):
+                print(f"  Warning: {filepath.name} has inconsistent frequencies. Skipping.")
+                continue
+
+            key = f"{port_i}({mode_i}){port_j}({mode_j})"
+            self._Y_dict[key] = y_complex
+            if key not in self._available_params:
+                self._available_params.append(key)
+
+        print(f"  Y-parameters loaded: {len(self._Y_dict)}")
+        self._build_y_matrix()
+
+    def _build_y_matrix(self) -> None:
+        """Build global Y-matrix from dictionaries."""
+        if not self._Y_dict:
+            return
+
+        n_freqs = len(self._frequencies)
+        n_total = self._n_ports * self._n_modes_per_port
+        self._Y_matrix = np.zeros((n_freqs, n_total, n_total), dtype=complex)
+
+        for key, y_data in self._Y_dict.items():
+            match = re.match(r"(\d+)\((\d+)\)(\d+)\((\d+)\)", key)
+            if match:
+                pi, mi, pj, mj = [int(x) for x in match.groups()]
+                row = (pi - 1) * self._n_modes_per_port + (mi - 1)
+                col = (pj - 1) * self._n_modes_per_port + (mj - 1)
+                if row < n_total and col < n_total:
+                    self._Y_matrix[:, row, col] = y_data
+
+    @property
+    def Y_dict(self) -> Dict[str, np.ndarray]:
+        """Y-parameters as dict: key → complex array."""
+        return self._Y_dict or {}
+
+    @property
+    def Y_matrix(self) -> np.ndarray:
+        """Y-parameter matrix: (n_freqs, n_ports*n_modes, n_ports*n_modes)."""
+        return self._Y_matrix
 
     def _compute_z_from_s(self) -> None:
         """Compute Z-parameters from S-parameters using reference impedance."""
@@ -272,8 +422,13 @@ class CSTResult(PlotMixin):
     @property
     def Z_dict(self) -> Dict[str, np.ndarray]:
         """Z-parameters as dict: key → complex array."""
-        if self._Z_dict is None:
-            self._compute_z_from_s()
+        if not self._Z_dict:
+            print("\n" + "!" * 60)
+            print("WARNING: No Z-parameter files found in CST Export folder.")
+            print("Z-parameters must be exported specifically from CST as .txt files.")
+            print("Automatic conversion from S-parameters is disabled to avoid accuracy issues.")
+            print("!" * 60 + "\n")
+            return {}
         return self._Z_dict
 
     @property

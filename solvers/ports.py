@@ -1371,11 +1371,30 @@ class PortEigenmodeSolver:
     # ────────────────────────────────────────────────────────────────────────
 
     def get_port_wave_impedance(self, port: str, mode: int, freq: float) -> complex:
-        kc = self.port_cutoff_kc[port][mode]
+        # Robust lookup: handle cases where port keys might be ints or strings
+        try:
+            p_key = port
+            if p_key not in self.port_cutoff_kc:
+                # Try converting to int if it's a digit string like '1', '2'
+                if isinstance(port, str) and port.isdigit():
+                    p_key = int(port)
+                elif isinstance(port, str) and port.lower().startswith('port'):
+                    # Try extracting the number: 'port1' -> 1
+                    try:
+                        p_key = int(port[4:])
+                    except ValueError:
+                        pass
+            
+            kc = self.port_cutoff_kc[p_key][mode]
+            mode_type = self.port_mode_types[p_key][mode]
+        except KeyError:
+            # Fallback: if 'port1' is requested but keys are 'port1', 1, etc.
+            # and our logic above didn't find it, just raise a more helpful error
+            raise KeyError(f"Port '{port}' not found in solver data. Available: {list(self.port_cutoff_kc.keys())}")
+
         wc = kc * c0
         s = 1j * 2 * np.pi * freq
         sqrt_term = np.sqrt(s**2 + wc**2)
-        mode_type = self.port_mode_types[port][mode]
         if mode_type == 'TE':
             return complex(s * Z0 / sqrt_term)
         else:
@@ -1390,7 +1409,21 @@ class PortEigenmodeSolver:
         return np.diag(impedances)
 
     def get_propagation_constant(self, port: str, mode: int, freq: float) -> complex:
-        kc = self.port_cutoff_kc[port][mode]
+        # Robust lookup
+        try:
+            p_key = port
+            if p_key not in self.port_cutoff_kc:
+                if isinstance(port, str) and port.isdigit():
+                    p_key = int(port)
+                elif isinstance(port, str) and port.lower().startswith('port'):
+                    try:
+                        p_key = int(port[4:])
+                    except ValueError:
+                        pass
+            kc = self.port_cutoff_kc[p_key][mode]
+        except KeyError:
+            raise KeyError(f"Port '{port}' not found in solver data. Available: {list(self.port_cutoff_kc.keys())}")
+
         wc = kc * c0
         s = 1j * 2 * np.pi * freq
         return complex(np.sqrt(s**2 + wc**2) / c0)
