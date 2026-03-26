@@ -55,6 +55,8 @@
     
       <link rel="stylesheet" href="../assets/_mkdocstrings.css">
     
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
@@ -531,6 +533,56 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Analysis Pathways Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pathway-1-single-solid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 1 — Single Solid
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-2-global-assembly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 2 — Global Assembly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-3-fom-concatenation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 3 — FOM Concatenation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-4-rom-concatenation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 4 — ROM Concatenation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1004,7 +1056,7 @@
   <span class="md-ellipsis">
     
   
-    Solvers
+    Solvers & Results
   
 
     
@@ -1177,6 +1229,56 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Analysis Pathways Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pathway-1-single-solid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 1 — Single Solid
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-2-global-assembly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 2 — Global Assembly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-3-fom-concatenation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 3 — FOM Concatenation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathway-4-rom-concatenation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathway 4 — ROM Concatenation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1283,45 +1385,43 @@
 
 
 <h1 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h1>
-<p><strong>cavsim3d</strong> provides four distinct analysis pathways for electromagnetic cavity simulation. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.</p>
+<p><strong>cavsim3d</strong> provides four distinct analysis pathways for electromagnetic cavity simulation. It can function like a regular frequency domain solver, or it can be used to simulate multi component systems using concatenation of the FOMs or ROMs. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.</p>
 <h2 id="analysis-pathways-overview">Analysis Pathways Overview<a class="headerlink" href="#analysis-pathways-overview" title="Permanent link">&para;</a></h2>
 <p>The figure below shows the software architecture with the available analysis options for single-segment and multi-segment assemblies.</p>
-<pre class="mermaid"><code>graph TB
-    subgraph col1["Pathway 1"]
-        A1["Single Solid&lt;br/&gt;Model"]:::input --&gt; B1["Frequency Domain&lt;br/&gt;Solver"]:::process
-        B1 --&gt; C1["Reduced Order&lt;br/&gt;Model"]:::output
-        C1 -.-&gt; C1
-    end
-
-    subgraph col2["Pathway 2"]
-        A2["Multi Solid&lt;br/&gt;Model"]:::inputGreen --&gt; B2["Frequency Domain&lt;br/&gt;Solver for&lt;br/&gt;Entire Domain"]:::process
-        B2 --&gt; C2["Reduced Order&lt;br/&gt;Model"]:::output
-        C2 -.-&gt; C2
-    end
-
-    subgraph col3["Pathway 3"]
-        A3["Multi Solid&lt;br/&gt;Model"]:::inputGreen --&gt; B3["Frequency Domain&lt;br/&gt;Solver for&lt;br/&gt;Individual Solids"]:::processGreen
-        B3 --&gt; D3["Concat. of FOM for&lt;br/&gt;Individual Solids"]:::process
-        D3 --&gt; C3["Reduced&lt;br/&gt;Order Model"]:::output
-        C3 -.-&gt; C3
-    end
-
-    subgraph col4["Pathway 4"]
-        A4["Multi Solid&lt;br/&gt;Model"]:::inputGreen --&gt; B4["Reduced Order Model&lt;br/&gt;for Individual&lt;br/&gt;System Matrices"]:::processGreen
-        B4 --&gt; D4["Concatenation"]:::processGreen
-        D4 --&gt; C4["Reduced&lt;br/&gt;Order Model"]:::output
-        C4 -.-&gt; C4
-    end
-
+<h3 id="pathway-1-single-solid">Pathway 1 — Single Solid<a class="headerlink" href="#pathway-1-single-solid" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A1("🔷 Single Device&lt;br/&gt;Model"):::input --&gt; B1("⚙️ Frequency&lt;br/&gt;Domain Solver"):::process --&gt; C1("📉 Reduced Order&lt;br/&gt;Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
-    classDef inputGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
-    classDef process fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000
-    classDef processGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#000
-    classDef output fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000</code></pre>
-<hr />
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000</code></pre>
+<h3 id="pathway-2-global-assembly">Pathway 2 — Global Assembly<a class="headerlink" href="#pathway-2-global-assembly" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A2("🔷 Multi Device&lt;br/&gt;Model"):::input --&gt; B2("🔗 Fuse into&lt;br/&gt;Single Mesh"):::concat --&gt; C2("⚙️ Frequency&lt;br/&gt;Domain Solver"):::process --&gt; D2("📉 Reduced Order&lt;br/&gt;Model"):::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000</code></pre>
+<h3 id="pathway-3-fom-concatenation">Pathway 3 — FOM Concatenation<a class="headerlink" href="#pathway-3-fom-concatenation" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A3("🔷 Multi Device&lt;br/&gt;Model"):::input --&gt; B3("⚙️ Solve Each&lt;br/&gt;Domain"):::process --&gt; C3("🔗 Concatenate&lt;br/&gt;FOMs"):::concat --&gt; D3("📉 Reduced Order&lt;br/&gt;Model"):::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000</code></pre>
+<h3 id="pathway-4-rom-concatenation">Pathway 4 — ROM Concatenation<a class="headerlink" href="#pathway-4-rom-concatenation" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A4("🔷 Multi Device&lt;br/&gt;Model"):::input --&gt; B4("⚙️ Solve Each&lt;br/&gt;Domain"):::process --&gt; C4("📉 Reduce Each&lt;br/&gt;Domain"):::output --&gt; D4("🔗 Concatenate&lt;br/&gt;ROMs"):::concat --&gt; E4("📊 Solve&lt;br/&gt;Concatenated"):::process
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000</code></pre>
 <h2 id="pathway-details">Pathway Details<a class="headerlink" href="#pathway-details" title="Permanent link">&para;</a></h2>
 <h3 id="pathway-1-single-solid-model">Pathway 1: Single Solid Model<a class="headerlink" href="#pathway-1-single-solid-model" title="Permanent link">&para;</a></h3>
-<p>The simplest pathway. A single geometry is meshed and solved globally. Best for small, simple cavities or waveguides.</p>
+<p>The simplest pathway. A single component is meshed and solved globally. Best for small, simple cavities or waveguides.</p>
 <table>
 <thead>
 <tr>
@@ -1612,8 +1712,6 @@
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
       
         <script src="../javascripts/mathjax.js"></script>
-      
-        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
       
         <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
       

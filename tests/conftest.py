@@ -2,6 +2,8 @@
 
 import pytest
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for CI/tests
 
 
 @pytest.fixture(scope="session")

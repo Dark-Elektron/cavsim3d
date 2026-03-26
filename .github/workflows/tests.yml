@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: 1
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Conda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: ${{ matrix.python-version }}
+          channels: conda-forge
+          activate-environment: cavsim3d
+          miniforge-version: latest
+
+      - name: Install dependencies
+        shell: bash -el {0}
+        run: |
+          python -m pip install --upgrade pip
+          conda install -y pythonocc-core pythreejs ipywidgets --no-update-deps
+          pip install -e .
+          pip install pytest pytest-cov
+
+
+      - name: Run tests
+        shell: bash -el {0}
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: 1
+        run: |
+          set -o pipefail
+          pytest -v --tb=short
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: pytest-output.log

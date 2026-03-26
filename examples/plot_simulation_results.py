@@ -6,8 +6,10 @@ and plot S and Z parameters for FOMs, ROMs, and concatenated systems.
 """
 
 import matplotlib.pyplot as plt
-from solvers.frequency_domain import FrequencyDomainSolver
+from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
 from pathlib import Path
+
+
 
 def run_example(project_name="example_simulation"):
     # 1. Load the simulation project
@@ -51,11 +53,11 @@ def run_example(project_name="example_simulation"):
     # Solve the ROM over the same frequency range
     fmin, fmax = fds.frequencies[0] / 1e9, fds.frequencies[-1] / 1e9
     nsamples = len(fds.frequencies)
-    rom.solve(fmin, fmax, nsamples)
+    cavsim3d.rom.solve(fmin, fmax, nsamples)
     
     # Overlay ROM results on the FOM plot
     print("Overlaying ROM results on FOM plot...")
-    rom.plot_s(ax=ax1, label="ROM", linestyle="--")
+    cavsim3d.rom.plot_s(ax=ax1, label="ROM", linestyle="--")
     ax1.legend()
     fig1.canvas.draw()
 
@@ -78,7 +80,7 @@ def run_example(project_name="example_simulation"):
 
     # 6. Z-Parameter Plotting
     print("\nPlotting Z-parameters for the global ROM...")
-    rom.plot_z(title="Global ROM - Z-parameters", plot_type="mag") # can use 'db', 'mag', 'phase'
+    cavsim3d.rom.plot_z(title="Global ROM - Z-parameters", plot_type="mag") # can use 'db', 'mag', 'phase'
 
     print("\nShowing all plots. Close windows to finish.")
     plt.show()

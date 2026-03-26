@@ -1,5 +1,7 @@
+
 import os
 import numpy as np
+
 
 SOFTWARE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))  # str(Path().parents[0])
 CUSTOM_COLORS = ['#4b8f63', '#fc6d2d', '#6a7bbf', '#e567a7', '#8cd839', '#ff5f00', '#d1a67a', '#a3a3a3']
@@ -19,7 +21,7 @@ LABELS = {'freq [MHz]': r'$f$ [MHz]', 'R/Q [Ohm]': r"$R/Q ~\mathrm{[\Omega]}$",
           '|k_kick| [V/pC/m]': r"$|k_\perp| ~\mathrm{[V/pC/m]}$",
           'P_HOM [kW]': r"$P_\mathrm{HOM}/\mathrm{cav} ~\mathrm{[kW]}$",
           'Z_2023': 'Z', 'W_2023': 'W', r'H_2023': 'H', 'ttbar_2023': r'$\mathrm{t \bar t}$',
-          'Z_b_2024': r'Z$_\mathrm{b}$', r'W_b_2024': 'W$_\mathrm{b}$',
+          'Z_b_2024': r'Z$_\mathrm{b}$', r'W_b_2024': r'W$_\mathrm{b}$',
           'H_b_2024': r'H$_\mathrm{b}$', r'ttbar_b_2024': r'$\mathrm{t \bar t}_\mathrm{b}$',
           'Z_b_2024_FB': r'Z$_\mathrm{b}$[FB]', r'W_b_2024_FB': r'W$_\mathrm{b}$[FB]',
           'H_b_2024_FB': r'H$_\mathrm{b}$[FB]', r'ttbar_b_2024_FB': r'$\mathrm{t \bar t}_\mathrm{b}$[FB]',

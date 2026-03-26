@@ -14,12 +14,15 @@ produce the full-model 2-port result.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from cavsim3d.geometry.importers import OCCImporter
+from cavsim3d.geometry.primitives import RectangularWaveguide
+from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
+from cavsim3d.rom.reduction import ModelOrderReduction
+from cavsim3d.analytical.rectangular_waveguide import RWGAnalytical
+import os
 
-from geometry.importers import OCCImporter
-from geometry.primitives import RectangularWaveguide
-from solvers.frequency_domain import FrequencyDomainSolver
-from rom.reduction import ModelOrderReduction
-from analytical.rectangular_waveguide import RWGAnalytical
+
+
 
 
 def main():
@@ -39,7 +42,6 @@ def main():
     maxh = 0.04
 
     # --- Option A: Use CAD file with splitting planes ---
-    import os
     step_path = os.path.join(os.path.dirname(__file__), 'rwg_step_split', 'rectangular_waveguide.step')
     if os.path.exists(step_path):
         print("\n1. Loading geometry with splitting plane...")
@@ -79,10 +81,10 @@ def main():
     print("\n3. Building and solving ROM...")
 
     rom = ModelOrderReduction(fds)
-    rom.reduce(tol=1e-6)
-    rom.print_info()
+    cavsim3d.rom.reduce(tol=1e-6)
+    cavsim3d.rom.print_info()
 
-    results_rom = rom.solve(fmin=1.5, fmax=3.0, nsamples=100)
+    results_rom = cavsim3d.rom.solve(fmin=1.5, fmax=3.0, nsamples=100)
 
     # =========================
     # 4. Analytical reference (full-length waveguide)
@@ -100,16 +102,16 @@ def main():
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     freq_ghz_fom = fds.frequencies / 1e9
-    freq_ghz_rom = rom.frequencies / 1e9
+    freq_ghz_rom = cavsim3d.rom.frequencies / 1e9
     freq_ghz_ana = frequencies / 1e9
 
     # S11
     ax = axes[0, 0]
-    S_ana = analytical.s_parameters(frequencies)
+    S_ana = cavsim3d.analytical.s_parameters(frequencies)
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(S_ana['S11']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, fds.get_s_db(1, 1), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, rom.get_s_db(1, 1), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, cavsim3d.rom.get_s_db(1, 1), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|S11| (dB)')
     ax.set_title('S11 Magnitude')
@@ -121,7 +123,7 @@ def main():
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(S_ana['S21']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, fds.get_s_db(1, 2), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, rom.get_s_db(1, 2), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, cavsim3d.rom.get_s_db(1, 2), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|S21| (dB)')
     ax.set_title('S21 Magnitude')
@@ -130,11 +132,11 @@ def main():
 
     # Z11
     ax = axes[1, 0]
-    Z_ana = analytical.z_parameters(frequencies)
+    Z_ana = cavsim3d.analytical.z_parameters(frequencies)
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(Z_ana['Z11']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, fds.get_z_db(1, 1), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, rom.get_z_db(1, 1), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, cavsim3d.rom.get_z_db(1, 1), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|Z11| (dB)')
     ax.set_title('Z11 Magnitude')
@@ -146,7 +148,7 @@ def main():
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(Z_ana['Z21']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, fds.get_z_db(1, 2), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, rom.get_z_db(1, 2), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, cavsim3d.rom.get_z_db(1, 2), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|Z21| (dB)')
     ax.set_title('Z21 Magnitude')
@@ -173,7 +175,7 @@ def main():
     # 7. Error analysis
     # =========================
     print("\n7. Error analysis (ROM vs FOM)...")
-    errors = rom.compute_error(fds)
+    errors = cavsim3d.rom.compute_error(fds)
     for key, err in errors.items():
         print(f"   {key}: {err:.4e}")
 

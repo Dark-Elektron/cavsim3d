@@ -10,6 +10,8 @@ import scipy.sparse as sp
 import scipy.linalg as sl
 
 
+
+
 def spy(A, cmap='tab20', markersize=10):
     """Visualise a sparse matrix (including complex) with colours representing entry magnitude."""
     A = A.tocoo()

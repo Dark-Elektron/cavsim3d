@@ -9,8 +9,8 @@
 ## Saving a Project
 
 ```python
-from core.em_project import EMProject
-from geometry.primitives import RectangularWaveguide
+from cavsim3d.core.em_project import EMProject
+from cavsim3d.geometry.primitives import RectangularWaveguide
 
 # Create and solve
 proj = EMProject(name='my_project', base_dir='./simulations')
@@ -28,7 +28,7 @@ simulations/my_project/
 ├── metadata.json            # Project config
 ├── geometry/
 │   ├── history.json         # Geometry construction history
-│   └── geometry.step        # Exported STEP file
+│   └── cavsim3d.geometry.step        # Exported STEP file
 ├── mesh/
 │   └── mesh.pkl             # Serialised NGSolve mesh
 └── fds/

@@ -4,7 +4,7 @@ Migrate cavsim3d example notebooks to use the new result-object API.
 For each notebook this script:
   1. Finds the cell that creates the ROM and the comparison plotting cells
   2. Adds NEW cells right after them that demonstrate the new API
-  3. Replaces `rom._concatenated` internal access with `fds.foms.roms.concat`
+  3. Replaces `cavsim3d.rom._concatenated` internal access with `fds.foms.roms.concat`
   4. Saves the notebook in-place (a .bak copy is created first)
 
 Usage:
@@ -162,12 +162,12 @@ def migrate_notebook(nb_path: Path):
     multi = is_multi_solid(nb_path)
     inserted = 0
 
-    # 1. Replace rom._concatenated internal access
+    # 1. Replace cavsim3d.rom._concatenated internal access
     n_replaced = 0
     for c in cells:
         if c['cell_type'] == 'code':
             src = ''.join(c['source'])
-            if 'rom._concatenated' in src:
+            if 'cavsim3d.rom._concatenated' in src:
                 # Replace the entire cell with the new API equivalent
                 c['source'] = CONCAT_INTERNALS_REPLACEMENT.splitlines(keepends=True)
                 # Ensure last line has newline
@@ -175,7 +175,7 @@ def migrate_notebook(nb_path: Path):
                     c['source'][-1] += '\n'
                 n_replaced += 1
     if n_replaced:
-        print(f"  Replaced {n_replaced} cell(s) accessing rom._concatenated")
+        print(f"  Replaced {n_replaced} cell(s) accessing cavsim3d.rom._concatenated")
 
     # 2. Find the last comparison-plot cell and insert new API cells after it
     insert_after = -1
@@ -186,9 +186,9 @@ def migrate_notebook(nb_path: Path):
                 insert_after = i
                 break
 
-    # If no comparison plot found, look for rom.solve
+    # If no comparison plot found, look for cavsim3d.rom.solve
     if insert_after < 0:
-        insert_after = find_cell_index(cells, 'rom.solve')
+        insert_after = find_cell_index(cells, 'cavsim3d.rom.solve')
 
     if insert_after >= 0:
         new_cells = [

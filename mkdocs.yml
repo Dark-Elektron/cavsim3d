@@ -6,6 +6,8 @@ repo_name: Dark-Elektron/cavsim3d
 
 theme:
   name: material
+  logo: assets/cavsim3d_logo_square.svg
+  favicon: assets/cavsim3d_logo_square.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -42,6 +44,8 @@ plugins:
   - mkdocs-jupyter:
       include_source: true
       execute: false
+      include_requirejs: true
+      kernel_name: python3
 
 markdown_extensions:
   - toc:
@@ -57,6 +61,9 @@ markdown_extensions:
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - admonition
@@ -66,9 +73,11 @@ markdown_extensions:
   - tables
   - md_in_html
 
+extra_css:
+  - stylesheets/extra.css
+
 extra_javascript:
   - javascripts/mathjax.js
-  - https://polyfill.io/v3/polyfill.min.js?features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 nav:
@@ -76,17 +85,21 @@ nav:
   - Getting Started: getting_started.md
   - Architecture: architecture.md
   - Tutorials:
-      - "Pathway 1: Single Solid": tutorials/pathway1_single_solid.ipynb
-      - "Pathway 2: Global Assembly": tutorials/pathway2_global_assembly.ipynb
-      - "Pathway 3: FOM Concatenation": tutorials/pathway3_fom_concatenation.ipynb
-      - "Pathway 4: ROM Concatenation": tutorials/pathway4_rom_concatenation.ipynb
-      - Importing CAD Files: tutorials/importing_cad.md
-      - Persistence: tutorials/persistence.md
+      - Quick Start Examples:
+          - "Pathway 1: Single Solid": tutorials/pathway1_single_solid.ipynb
+          - "Pathway 2: Global Assembly": tutorials/pathway2_global_assembly.ipynb
+          - "Pathway 3: FOM Concatenation": tutorials/pathway3_fom_concatenation.ipynb
+          - "Pathway 4: ROM Concatenation": tutorials/pathway4_rom_concatenation.ipynb
+      - Model Preparation:
+          - Importing CAD Files: tutorials/importing_cad.ipynb
+          - Creating Models from Primitives: tutorials/creating_primitives.ipynb
+          - Creating Geometry from the Project: tutorials/creating_geometry_from_project.ipynb
+          - Persistence: tutorials/persistence.md
   - Mathematical Theory: theory.md
   - API Reference:
       - Project Management: api/project.md
       - Geometry & Assembly: api/geometry.md
-      - Solvers: api/solvers.md
+      - Solvers & Results: api/solvers.md
       - Model Reduction: api/rom.md
   - Developers:
       - Viewing Locally: viewing_locally.md

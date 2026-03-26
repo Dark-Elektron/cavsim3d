@@ -1,61 +1,67 @@
 # Architecture
 
-**cavsim3d** provides four distinct analysis pathways for electromagnetic cavity simulation. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.
+**cavsim3d** provides four distinct analysis pathways for electromagnetic cavity simulation. It can function like a regular frequency domain solver, or it can be used to simulate multi component systems using concatenation of the FOMs or ROMs. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.
 
 ## Analysis Pathways Overview
 
 The figure below shows the software architecture with the available analysis options for single-segment and multi-segment assemblies.
 
+### Pathway 1 — Single Solid
 ```mermaid
-graph TB
-    subgraph col1["Pathway 1"]
-        A1["Single Solid<br/>Model"]:::input --> B1["Frequency Domain<br/>Solver"]:::process
-        B1 --> C1["Reduced Order<br/>Model"]:::output
-        C1 -.-> C1
-    end
-
-    subgraph col2["Pathway 2"]
-        A2["Multi Solid<br/>Model"]:::inputGreen --> B2["Frequency Domain<br/>Solver for<br/>Entire Domain"]:::process
-        B2 --> C2["Reduced Order<br/>Model"]:::output
-        C2 -.-> C2
-    end
-
-    subgraph col3["Pathway 3"]
-        A3["Multi Solid<br/>Model"]:::inputGreen --> B3["Frequency Domain<br/>Solver for<br/>Individual Solids"]:::processGreen
-        B3 --> D3["Concat. of FOM for<br/>Individual Solids"]:::process
-        D3 --> C3["Reduced<br/>Order Model"]:::output
-        C3 -.-> C3
-    end
-
-    subgraph col4["Pathway 4"]
-        A4["Multi Solid<br/>Model"]:::inputGreen --> B4["Reduced Order Model<br/>for Individual<br/>System Matrices"]:::processGreen
-        B4 --> D4["Concatenation"]:::processGreen
-        D4 --> C4["Reduced<br/>Order Model"]:::output
-        C4 -.-> C4
-    end
-
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px', 'primaryColor': '#ffe0b2', 'primaryBorderColor': '#e65100', 'primaryTextColor': '#000'}}}%%
+graph LR
+    A1("Single Device<br/>Model"):::input --> B1("Frequency<br/>Domain Solver"):::process --> C1("Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
-    classDef inputGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
-    classDef process fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000
-    classDef processGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#000
-    classDef output fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
 ```
 
----
+### Pathway 2 — Global Assembly
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A2("Multi Device<br/>Model"):::input --> B2("Fuse into<br/>Single Mesh"):::concat --> C2("Frequency<br/>Domain Solver"):::process --> D2("Reduced Order<br/>Model"):::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+```
+
+### Pathway 3 — FOM Concatenation
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A3("Multi Device<br/>Model"):::input --> B3("Solve Each<br/>Domain"):::process --> C3("Concatenate<br/>FOMs"):::concat --> D3("Reduced Order<br/>Model"):::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+```
+
+### Pathway 4 — ROM Concatenation
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    A4("Multi Device<br/>Model"):::input --> B4("Solve Each<br/>Domain"):::process --> C4("Reduce Each<br/>Domain"):::output --> D4("Concatenate<br/>ROMs"):::concat --> E4("Solve<br/>Concatenated"):::process
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+```
 
 ## Pathway Details
 
 ### Pathway 1: Single Solid Model
 
-The simplest pathway. A single geometry is meshed and solved globally. Best for small, simple cavities or waveguides.
+The simplest pathway. A single component is meshed and solved globally. Best for small, simple cavities or waveguides.
 
 | Step | Code | Description |
 |------|------|-------------|
 | Geometry | `RectangularWaveguide(a, L)` | Create a primitive or import a single CAD file |
-| Mesh | `geometry.generate_mesh(maxh)` | Generate the finite element mesh |
+| Mesh | `cavsim3d.geometry.generate_mesh(maxh)` | Generate the finite element mesh |
 | Solve FOM | `fds.solve(fmin, fmax, n)` | Full-order frequency sweep (few sample points) |
 | Reduce | `fds.fom.reduce(tol)` | POD-based model order reduction |
-| Solve ROM | `rom.solve(fmin, fmax, n)` | Wideband sweep on the reduced model (fast) |
+| Solve ROM | `cavsim3d.rom.solve(fmin, fmax, n)` | Wideband sweep on the reduced model (fast) |
 
 **When to use:** Single cavities, simple waveguides, quick studies.
 
@@ -72,7 +78,7 @@ Multiple parts are assembled and fused into a single mesh. The solver treats the
 | Build | `assembly.build()` | Fuse geometry into a single solid |
 | Solve FOM | `fds.solve(fmin, fmax, n)` | Global frequency sweep |
 | Reduce | `fds.fom.reduce(tol)` | POD reduction on global matrices |
-| Solve ROM | `rom.solve(fmin, fmax, n)` | Wideband sweep |
+| Solve ROM | `cavsim3d.rom.solve(fmin, fmax, n)` | Wideband sweep |
 
 **When to use:** Small multi-component systems where global coupling is important and the mesh is manageable.
 
@@ -115,6 +121,7 @@ The most efficient pathway. Each domain is **first reduced** independently, then
 The following sequence diagram shows the typical interaction flow for a single-solid analysis (Pathway 1):
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'actorBkg': '#e8eaf6', 'actorBorder': '#3f51b5', 'actorTextColor': '#000', 'signalColor': '#3f51b5', 'signalTextColor': '#000', 'labelBoxBkgColor': '#e8eaf6', 'labelBoxBorderColor': '#3f51b5', 'labelTextColor': '#000', 'loopTextColor': '#000', 'noteBkgColor': '#fff9c4', 'noteBorderColor': '#f9a825', 'noteTextColor': '#000', 'activationBkgColor': '#c5cae9', 'activationBorderColor': '#3f51b5', 'sequenceNumberColor': '#fff'}}}%%
 sequenceDiagram
     participant User
     participant EMProject
@@ -133,13 +140,14 @@ sequenceDiagram
     User->>FDS: fds.fom.reduce(tol)
     FDS->>MOR: create ROM from snapshots
     MOR->>MOR: SVD truncation
-    User->>MOR: rom.solve(fmin, fmax, n_fine)
+    User->>MOR: cavsim3d.rom.solve(fmin, fmax, n_fine)
     MOR-->>User: wideband Z, S (milliseconds)
 ```
 
 The following shows the multi-solid concatenation flow (Pathway 3/4):
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'actorBkg': '#e8eaf6', 'actorBorder': '#3f51b5', 'actorTextColor': '#000', 'signalColor': '#3f51b5', 'signalTextColor': '#000', 'labelBoxBkgColor': '#e8eaf6', 'labelBoxBorderColor': '#3f51b5', 'labelTextColor': '#000', 'loopTextColor': '#000', 'noteBkgColor': '#fff9c4', 'noteBorderColor': '#f9a825', 'noteTextColor': '#000', 'activationBkgColor': '#c5cae9', 'activationBorderColor': '#3f51b5', 'sequenceNumberColor': '#fff'}}}%%
 sequenceDiagram
     participant User
     participant FDS as FrequencyDomainSolver
@@ -178,7 +186,7 @@ The entire computation graph is navigable via attribute access:
 Single-Solid:
   proj.fds.fom                    → FOMResult
   proj.fds.fom.reduce()           → ModelOrderReduction
-  rom.solve(fmin, fmax, n)        → (updates ROM in-place)
+  cavsim3d.rom.solve(fmin, fmax, n)        → (updates ROM in-place)
 
 Multi-Solid:
   proj.fds.foms                   → FOMCollection (per-domain)

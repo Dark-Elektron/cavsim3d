@@ -2,7 +2,7 @@
 import numpy as np
 import json
 from pathlib import Path
-from core.persistence import ProjectManager, NumpyEncoder
+from cavsim3d.core.persistence import ProjectManager, NumpyEncoder
 
 def test_numpy_json_serialization():
     # 1. Prepare data with various NumPy types
