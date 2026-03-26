@@ -18,6 +18,7 @@ __pycache__/
 architecture_analysis.md
 simulation_result_structure.md
 simulation/
+simulations/
 .cache/
 .ipynb_checkpoints/
 .pytest_cache/
