@@ -11,14 +11,22 @@
 
 ## Analysis Pathways
 
-cavsim3d supports four distinct simulation workflows, from simple single-cavity analysis to advanced hierarchical ROM concatenation. See the [Architecture](architecture.md) page for details.
+cavsim3d supports four distinct simulation workflows, from simple single-component model analysis to advanced hierarchical ROM concatenation of multiple models. See the [Architecture](architecture.md) page for details.
 
 | Pathway | Input | Method | Best For |
 |---------|-------|--------|----------|
-| 1 | Single solid | FDS → ROM | Simple cavities, quick studies |
-| 2 | Multi-solid assembly | Global FDS → ROM | Small assemblies |
-| 3 | Multi-solid | Per-domain FDS → FOM Concat → ROM | Large assemblies, reusable FOMs |
-| 4 | Multi-solid | Per-domain ROM → ROM Concat | Maximum efficiency, repeated components |
+| 1 | Single solid | FDS → FOM → ROM | Single component models |
+| 2 | Multi-solid assembly | Global FDS → FOM → ROM | Small assemblies |
+| 3 | Multi-solid | Per-domain FDS → FOMs → FOMs Concatenation -> ROM | Small assemblies |
+| 4 | Multi-solid | Per-domain FDS → FOMs → ROMs → ROMs Concatenation -> ROM | Large assemblies, repeated components, maximum efficiency |
+
+FDS - Frequency Domain Solver
+FOM(s) - Full Order Model(s)
+ROM(s) - Reduced Order Model(s)
+
+The overarching workflow is as follows:
+The frequency domain solver (FDS) solves the Maxwell's equations for a given frequency range and material properties. The full order model (FOM) is a representation of the physical system that is used to solve the frequency domain problem. The reduced order model (ROM) is a reduced order model of the FOM that is used to solve the frequency domain problem over a much finer frequency grid (fast — milliseconds). A m
+
 
 ## Quick Links
 

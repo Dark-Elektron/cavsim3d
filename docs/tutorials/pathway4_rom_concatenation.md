@@ -49,7 +49,7 @@ roms = fds.foms.reduce(tol=1e-6)
 This creates a `ROMCollection` — one reduced model per domain. Each domain's snapshot matrix is decomposed via SVD:
 
 \[
-[\mathbf{x}_1^{(d)}, \dots, \mathbf{x}_N^{(d)}] = \mathbf{U}_d \mathbf{\Sigma}_d \mathbf{W}_d^H
+\mathbf{x}_1^{(d)}, \dots, \mathbf{x}_N^{(d)} = \mathbf{U}_d \mathbf{\Sigma}_d \mathbf{W}_d^H
 \]
 
 The truncated basis $\mathbf{V}_d$ projects each domain's system:

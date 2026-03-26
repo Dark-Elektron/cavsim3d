@@ -1170,7 +1170,7 @@
 <li>Handle multi-component assemblies with automatic concatenation</li>
 </ul>
 <h2 id="analysis-pathways">Analysis Pathways<a class="headerlink" href="#analysis-pathways" title="Permanent link">&para;</a></h2>
-<p>cavsim3d supports four distinct simulation workflows, from simple single-cavity analysis to advanced hierarchical ROM concatenation. See the <a href="architecture/">Architecture</a> page for details.</p>
+<p>cavsim3d supports four distinct simulation workflows, from simple single-component model analysis to advanced hierarchical ROM concatenation of multiple models. See the <a href="architecture/">Architecture</a> page for details.</p>
 <table>
 <thead>
 <tr>
@@ -1184,29 +1184,34 @@
 <tr>
 <td>1</td>
 <td>Single solid</td>
-<td>FDS → ROM</td>
-<td>Simple cavities, quick studies</td>
+<td>FDS → FOM → ROM</td>
+<td>Single component models</td>
 </tr>
 <tr>
 <td>2</td>
 <td>Multi-solid assembly</td>
-<td>Global FDS → ROM</td>
+<td>Global FDS → FOM → ROM</td>
 <td>Small assemblies</td>
 </tr>
 <tr>
 <td>3</td>
 <td>Multi-solid</td>
-<td>Per-domain FDS → FOM Concat → ROM</td>
-<td>Large assemblies, reusable FOMs</td>
+<td>Per-domain FDS → FOMs → FOMs Concatenation -&gt; ROM</td>
+<td>Small assemblies</td>
 </tr>
 <tr>
 <td>4</td>
 <td>Multi-solid</td>
-<td>Per-domain ROM → ROM Concat</td>
-<td>Maximum efficiency, repeated components</td>
+<td>Per-domain FDS → FOMs → ROMs → ROMs Concatenation -&gt; ROM</td>
+<td>Large assemblies, repeated components, maximum efficiency</td>
 </tr>
 </tbody>
 </table>
+<p>FDS - Frequency Domain Solver
+FOM(s) - Full Order Model(s)
+ROM(s) - Reduced Order Model(s)</p>
+<p>The overarching workflow is as follows:
+The frequency domain solver (FDS) solves the Maxwell's equations for a given frequency range and material properties. The full order model (FOM) is a representation of the physical system that is used to solve the frequency domain problem. The reduced order model (ROM) is a reduced order model of the FOM that is used to solve the frequency domain problem over a much finer frequency grid (fast — milliseconds). A m</p>
 <h2 id="quick-links">Quick Links<a class="headerlink" href="#quick-links" title="Permanent link">&para;</a></h2>
 <div class="grid cards">
 <ul>

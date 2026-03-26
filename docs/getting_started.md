@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through your first simulation in under 5 minutes.
+This guide walks you through a simple simulation.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ pip install -e .
 
 ## Your First Simulation
 
-This example creates a rectangular waveguide, runs an FEM frequency sweep, reduces it via POD, and plots S-parameters.
+This example creates a rectangular waveguide, runs an FEM frequency sweep, reduces it via proper orthogonal decomposition (POD), and plots S-parameters.
 
 ### Step 1: Create the Geometry
 
@@ -30,7 +30,12 @@ proj = EMProject(name='my_first_sim', base_dir='./simulations')
 
 # Define a rectangular waveguide: 100 mm wide, 200 mm long
 wg = RectangularWaveguide(a=0.1, L=0.2, maxh=0.04)
+
+# Add the geometry to the project
 proj.geometry = wg
+
+# # Alternatively, the geometry can be created directly in the project
+# proj.create_primitive('rwg', a=0.1, L=0.2, maxh=0.04)
 ```
 
 ### Step 2: Solve the Full-Order Model (FOM)
@@ -61,18 +66,6 @@ rom.plot_s(plot_type='db')
 
 # Plot Z-parameters
 rom.plot_z(plot_type='db')
-```
-
-### Step 5: Save and Reload
-
-```python
-# Save the entire project (geometry, mesh, solver results)
-proj.save()
-
-# Later, reload without recomputation:
-proj2 = EMProject(name='my_first_sim', base_dir='./simulations')
-proj2.fds.solve(fmin=1.5, fmax=3.0, nsamples=30, rerun=False)
-# ^ Returns instantly — results are loaded from disk
 ```
 
 ## Next Steps

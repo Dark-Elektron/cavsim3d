@@ -1391,33 +1391,33 @@
 <hr />
 <h2 id="1-maxwells-equations">1. Maxwell's Equations<a class="headerlink" href="#1-maxwells-equations" title="Permanent link">&para;</a></h2>
 <p>In the frequency domain, assuming an <span class="arithmatex">\(\exp(j\omega t)\)</span> time dependence:</p>
-<p>[
+<div class="arithmatex">\[
 \nabla \times \mathbf{E} = -j\omega \mu \mathbf{H}
-]
-[
-\nabla \times \mathbf{H} = j\omega \epsilon^* \mathbf{E} + \mathbf{J}_e
-]</p>
+$$
+$$
+\nabla \times \mathbf{H} = j\omega \varepsilon^* \mathbf{E} + \mathbf{J}_e
+\]</div>
 <p>where:</p>
 <ul>
 <li><span class="arithmatex">\(\omega = 2\pi f\)</span> is the angular frequency</li>
 <li><span class="arithmatex">\(\mu\)</span> is the magnetic permeability</li>
-<li><span class="arithmatex">\(\epsilon^* = \epsilon - j\sigma/\omega\)</span> is the complex permittivity (incorporating conductive losses)</li>
+<li><span class="arithmatex">\(\varepsilon^* = \varepsilon - j\sigma/\omega\)</span> is the complex permittivity (incorporating conductive losses)</li>
 <li><span class="arithmatex">\(\mathbf{J}_e\)</span> is the impressed electric current density</li>
 </ul>
 <h3 id="vector-wave-equation">Vector Wave Equation<a class="headerlink" href="#vector-wave-equation" title="Permanent link">&para;</a></h3>
 <p>Taking the curl of the first equation and substituting yields the second-order equation for <span class="arithmatex">\(\mathbf{E}\)</span>:</p>
 <div class="arithmatex">\[
-\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \epsilon_r^* \mathbf{E} = -j\omega \mu_0 \mathbf{J}_e
+\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \varepsilon_r^* \mathbf{E} = -j\omega \mu_0 \mathbf{J}_e
 \]</div>
-<p>where <span class="arithmatex">\(k_0 = \omega\sqrt{\mu_0\epsilon_0}\)</span> is the free-space wavenumber. This is the core equation solved by <strong>FrequencyDomainSolver</strong>.</p>
+<p>where <span class="arithmatex">\(k_0 = \omega\sqrt{\mu_0\varepsilon_0}\)</span> is the free-space wavenumber. This is the core equation solved by <strong>FrequencyDomainSolver</strong>.</p>
 <hr />
 <h2 id="2-variational-formulation">2. Variational Formulation<a class="headerlink" href="#2-variational-formulation" title="Permanent link">&para;</a></h2>
 <p>To solve numerically via FEM, we multiply by a test function <span class="arithmatex">\(\mathbf{v} \in H(\text{curl})\)</span> and integrate over the volume <span class="arithmatex">\(\Omega\)</span>:</p>
 <div class="arithmatex">\[
-\int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{E}) \cdot (\nabla \times \mathbf{v}) \, d\Omega
-- k_0^2 \int_\Omega \epsilon_r^* \mathbf{E} \cdot \mathbf{v} \, d\Omega
-+ j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, ds
-= \text{(source)}
+\int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{E}) \cdot (\nabla \times \mathbf{v}) \, \mathrm{d}\Omega
+- k_0^2 \int_\Omega \varepsilon_r^* \mathbf{E} \cdot \mathbf{v} \, \mathrm{d}\Omega
++ j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, \mathrm{d}s
+= \int_\Omega -j\omega \mu_0 \mathbf{J}_e \, {d}\Omega
 \]</div>
 <p>The surface integral naturally imposes boundary conditions:</p>
 <table>
@@ -1454,7 +1454,7 @@
 <p>where:</p>
 <ul>
 <li><span class="arithmatex">\(\mathbf{K}\)</span> = stiffness matrix (from curl-curl term)</li>
-<li><span class="arithmatex">\(\mathbf{M}\)</span> = mass matrix (from <span class="arithmatex">\(\epsilon\)</span> term)</li>
+<li><span class="arithmatex">\(\mathbf{M}\)</span> = mass matrix (from <span class="arithmatex">\(\varepsilon\)</span> term)</li>
 <li><span class="arithmatex">\(\mathbf{B}\)</span> = port excitation matrix</li>
 <li><span class="arithmatex">\(\mathbf{a}\)</span> = incident wave amplitudes</li>
 </ul>

@@ -1,6 +1,6 @@
 # Architecture
 
-**cavsim3d** provides four distinct analysis pathways for electromagnetic cavity simulation. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.
+**cavsim3d** provides four distinct analysis pathways for electromagnetic cavity simulation. It can function like a regular frequency domain solver, or it can be used to simulate multi component systems using concatenation of the FOMs or ROMs. The choice depends on the complexity of the geometry and the desired balance between accuracy and computational efficiency.
 
 ## Analysis Pathways Overview
 
@@ -10,7 +10,7 @@ The figure below shows the software architecture with the available analysis opt
 
 ```mermaid
 graph LR
-    A1["🔷 Single Solid Model"]:::input --> B1["⚙️ Frequency Domain Solver"]:::process --> C1["📉 Reduced Order Model"]:::output
+    A1["🔷 Single Device Model"]:::input --> B1["⚙️ Frequency Domain Solver"]:::process --> C1["📉 Reduced Order Model"]:::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
@@ -20,7 +20,7 @@ graph LR
 
 ```mermaid
 graph LR
-    A2["🔷 Multi Solid Model"]:::input --> B2["🔗 Fuse into Single Mesh"]:::fuse --> C2["⚙️ Frequency Domain Solver"]:::process --> D2["📉 Reduced Order Model"]:::output
+    A2["🔷 Multi Device Model"]:::input --> B2["🔗 Fuse into Single Mesh"]:::fuse --> C2["⚙️ Frequency Domain Solver"]:::process --> D2["📉 Reduced Order Model"]:::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef fuse fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
@@ -31,7 +31,7 @@ graph LR
 
 ```mermaid
 graph LR
-    A3["🔷 Multi Solid Model"]:::input --> B3["⚙️ Solve Each Domain"]:::process --> C3["🔗 Concatenate FOMs"]:::concat --> D3["📉 Reduced Order Model"]:::output
+    A3["🔷 Multi Device Model"]:::input --> B3["⚙️ Solve Each Domain"]:::process --> C3["🔗 Concatenate FOMs"]:::concat --> D3["📉 Reduced Order Model"]:::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
@@ -42,7 +42,7 @@ graph LR
 
 ```mermaid
 graph LR
-    A4["🔷 Multi Solid Model"]:::input --> B4["⚙️ Solve Each Domain"]:::process --> C4["📉 Reduce Each Domain"]:::reduce --> D4["🔗 Concatenate ROMs"]:::concat --> E4["📊 Solve Concatenated"]:::output
+    A4["🔷 Multi Device Model"]:::input --> B4["⚙️ Solve Each Domain"]:::process --> C4["📉 Reduce Each Domain"]:::reduce --> D4["🔗 Concatenate ROMs"]:::concat --> E4["📊 Solve Concatenated"]:::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef reduce fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000
@@ -56,7 +56,7 @@ graph LR
 
 ### Pathway 1: Single Solid Model
 
-The simplest pathway. A single geometry is meshed and solved globally. Best for small, simple cavities or waveguides.
+The simplest pathway. A single component is meshed and solved globally. Best for small, simple cavities or waveguides.
 
 | Step | Code | Description |
 |------|------|-------------|
