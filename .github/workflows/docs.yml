@@ -30,8 +30,7 @@ jobs:
         run: |
           pip install mkdocs-material \
                       "mkdocstrings[python]" \
-                      mkdocs-jupyter \
-                      jupyter_contrib_nbextensions
+                      mkdocs-jupyter
 
       - name: Build documentation
         run: mkdocs build --strict
