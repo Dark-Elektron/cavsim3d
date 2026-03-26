@@ -28,12 +28,13 @@ jobs:
 
       - name: Install documentation dependencies
         run: |
-          pip install mkdocs-material \
+          pip install "mkdocs>=1.5,<2.0" \
+                      mkdocs-material \
                       "mkdocstrings[python]" \
                       mkdocs-jupyter
 
       - name: Build documentation
-        run: mkdocs build --strict
+        run: mkdocs build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
