@@ -1,0 +1,18 @@
+/* Force Mermaid diagrams to use full container width */
+.mermaid svg {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+}
+
+/* Ensure images scale to content area */
+.md-content img {
+    max-width: 100%;
+}
+
+/* Jupyter notebook output images should fill width */
+.jp-OutputArea-output img,
+.jupyter-wrapper img {
+    max-width: 100%;
+    height: auto;
+}

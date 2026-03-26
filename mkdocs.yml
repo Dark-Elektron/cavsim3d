@@ -41,7 +41,9 @@ plugins:
             show_category_heading: true
   - mkdocs-jupyter:
       include_source: true
-      execute: false
+      execute: true
+      allow_errors: true
+      include_requirejs: true
 
 markdown_extensions:
   - toc:
@@ -65,6 +67,9 @@ markdown_extensions:
   - def_list
   - tables
   - md_in_html
+
+extra_css:
+  - stylesheets/extra.css
 
 extra_javascript:
   - javascripts/mathjax.js

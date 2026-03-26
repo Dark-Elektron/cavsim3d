@@ -6,39 +6,48 @@
 
 The figure below shows the software architecture with the available analysis options for single-segment and multi-segment assemblies.
 
+### Pathway 1 — Single Solid
+
 ```mermaid
-graph TB
-    subgraph col1["Pathway 1"]
-        A1["Single Solid<br/>Model"]:::input --> B1["Frequency Domain<br/>Solver"]:::process
-        B1 --> C1["Reduced Order<br/>Model"]:::output
-        C1 -.-> C1
-    end
-
-    subgraph col2["Pathway 2"]
-        A2["Multi Solid<br/>Model"]:::inputGreen --> B2["Frequency Domain<br/>Solver for<br/>Entire Domain"]:::process
-        B2 --> C2["Reduced Order<br/>Model"]:::output
-        C2 -.-> C2
-    end
-
-    subgraph col3["Pathway 3"]
-        A3["Multi Solid<br/>Model"]:::inputGreen --> B3["Frequency Domain<br/>Solver for<br/>Individual Solids"]:::processGreen
-        B3 --> D3["Concat. of FOM for<br/>Individual Solids"]:::process
-        D3 --> C3["Reduced<br/>Order Model"]:::output
-        C3 -.-> C3
-    end
-
-    subgraph col4["Pathway 4"]
-        A4["Multi Solid<br/>Model"]:::inputGreen --> B4["Reduced Order Model<br/>for Individual<br/>System Matrices"]:::processGreen
-        B4 --> D4["Concatenation"]:::processGreen
-        D4 --> C4["Reduced<br/>Order Model"]:::output
-        C4 -.-> C4
-    end
-
+graph LR
+    A1["🔷 Single Solid Model"]:::input --> B1["⚙️ Frequency Domain Solver"]:::process --> C1["📉 Reduced Order Model"]:::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
-    classDef inputGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
-    classDef process fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000
-    classDef processGreen fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#000
-    classDef output fill:#ffe0b2,stroke:#e65100,stroke-width:1px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+```
+
+### Pathway 2 — Global Assembly
+
+```mermaid
+graph LR
+    A2["🔷 Multi Solid Model"]:::input --> B2["🔗 Fuse into Single Mesh"]:::fuse --> C2["⚙️ Frequency Domain Solver"]:::process --> D2["📉 Reduced Order Model"]:::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef fuse fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+```
+
+### Pathway 3 — FOM Concatenation
+
+```mermaid
+graph LR
+    A3["🔷 Multi Solid Model"]:::input --> B3["⚙️ Solve Each Domain"]:::process --> C3["🔗 Concatenate FOMs"]:::concat --> D3["📉 Reduced Order Model"]:::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+```
+
+### Pathway 4 — ROM Concatenation
+
+```mermaid
+graph LR
+    A4["🔷 Multi Solid Model"]:::input --> B4["⚙️ Solve Each Domain"]:::process --> C4["📉 Reduce Each Domain"]:::reduce --> D4["🔗 Concatenate ROMs"]:::concat --> E4["📊 Solve Concatenated"]:::output
+    classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef reduce fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
 ```
 
 ---
