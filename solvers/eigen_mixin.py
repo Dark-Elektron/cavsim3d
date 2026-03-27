@@ -15,7 +15,6 @@ import scipy.linalg as sl
 from scipy.sparse.linalg import eigsh
 from core.persistence import H5Serializer
 from pathlib import Path
-import h5py
 
 
 class EigenMixinBase:
@@ -869,6 +868,8 @@ class EigenMixinBase:
             else:
                 if not self._eigenvalues_cache:
                     return
+
+        import h5py
         
         # Determine path
         if path is None:
@@ -884,7 +885,6 @@ class EigenMixinBase:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         h5_file = path / "eigenmodes.h5"
-        print(h5_file)
         
         if auto_compute:
             kwargs.pop('_auto_save', None)
@@ -1208,39 +1208,8 @@ class ConcatEigenMixin(EigenMixinBase):
                     scales = np.ones(self.n_structures, dtype=complex)
             else:
                 scales = np.ones(self.n_structures, dtype=complex)
-            
-            # --- Inline field reconstruction (was _reconstruct_field_from_vector) ---
-            # Create unified GridFunction on global FES
-            E_gf = GridFunction(self.fes, complex=True)
-
-            for struct_idx, struct in enumerate(self.structures):
-                if not struct.can_reconstruct():
-                    raise ValueError(
-                        f"Structure {struct_idx} ({struct.domain}) cannot reconstruct. "
-                        f"W: {'set' if struct.W is not None else 'MISSING'}, "
-                        f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
-                        f"fes: {'set' if struct.fes is not None else 'MISSING'}"
-                    )
-
-                # Extract this structure's reduced solution
-                start_r = self._structure_dof_offsets[struct_idx]
-                x_reduced = x_uncoupled[start_r:start_r + struct.r]
-
-                # Reconstruct full-order solution for this domain
-                x_full_local = struct.reconstruct(x_reduced)
                 
-                # Apply scaling for interface continuity
-                x_full_local = scales[struct_idx] * x_full_local
-
-                # Create per-domain GridFunction
-                E_local = GridFunction(struct.fes, complex=True)
-                E_local.vec.FV().NumPy()[:] = x_full_local
-
-                # Transfer to global GridFunction using definedon
-                domain_region = self.mesh.Materials(struct.domain)
-                E_gf.Set(E_local, definedon=domain_region)
-
-            return E_gf
+            return self._reconstruct_field_from_vector(x_uncoupled, scales)
 
         # Find the structure for this domain
         struct = None

@@ -19,7 +19,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from ngsolve import (
-    Norm, curl, BoundaryFromVolumeCF, GridFunction, HCurl, Mesh, VOL
+    Norm, curl, BoundaryFromVolumeCF, GridFunction, HCurl, Mesh
 )
 from ngsolve.webgui import Draw
 
@@ -144,13 +144,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         # Caches
         self._resonant_mode_cache = {}
-        self._interface_scale_cache = {}
-
-        # DOF mapping caches (built on first use)
-        self._domain_dofs: Optional[Dict[int, List[int]]] = None
-        self._interface_dofs: Optional[set] = None
-        self._interface_pairs: Optional[Dict[Tuple[int, int], set]] = None
-        self._local_to_global_maps: Optional[Dict[int, Dict[int, int]]] = None
 
         # Connection tracking
         self.connections: Optional[List[Conn]] = None
@@ -171,6 +164,37 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
+
+    def get_eigenmodes(self, _auto_save=True, **kwargs):
+        """
+        Compute or retrieve eigenmodes for the concatenated system.
+        """
+        res = super().get_eigenmodes(**kwargs)
+        
+        # Hierarchical save
+        if _auto_save:
+            self._auto_save_eigenmodes(res, **kwargs)
+            
+        return res
+
+    def get_eigenvalues(self, **kwargs):
+        """Compute or retrieve eigenvalues for the concatenated system."""
+        kwargs['return_eigenvalues'] = True
+        kwargs.setdefault('return_eigenvectors', False)
+        # Delegate down the MRO (bypasses _auto_save to avoid double saving/looping if only requesting values)
+        return super().get_eigenmodes(**kwargs)
+
+    def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        if self._solver_ref is None or not hasattr(self._solver_ref, '_project_path'):
+            return
+        
+        # Mirror: fds/foms/roms/concat -> eigenmode/foms/roms/concat
+        # Note: Concatenated systems are usually under roms
+        save_path = Path(self._solver_ref._project_path) / "eigenmode" / "foms" / "roms" / "concat"
+        try:
+            self.save_eigenmodes(save_path, **kwargs)
+        except Exception as e:
+            pr.warning(f"Could not auto-save eigenmodes for ConcatenatedSystem: {e}")
 
     def _resolve_mesh_and_fes(self) -> None:
         """Resolve mesh and fes from available sources."""
@@ -210,7 +234,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Try to get from first structure's fes
         for struct in self.structures:
             if struct.fes is not None:
-                order = struct.fes.globalorder
+                order = struct.fes.order
                 break
 
         # Determine Dirichlet BC label
@@ -290,86 +314,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         self._total_stacked_dofs = reduced_offset
         self._total_full_dofs = full_offset
-
-    # =========================================================================
-    # DOF Mapping for Field Reconstruction
-    # =========================================================================
-
-    def _build_domain_dof_maps(self) -> None:
-        """
-        Build and cache DOF mappings for all domains.
-        
-        Creates:
-        - _domain_dofs: dict mapping struct_idx -> list of global DOF indices
-        - _interface_dofs: set of DOFs shared between multiple domains
-        - _interface_pairs: dict mapping (i,j) -> set of shared DOFs
-        - _local_to_global_maps: dict mapping struct_idx -> {local_dof: global_dof}
-        """
-        if self._domain_dofs is not None:
-            return  # Already built
-        
-        if self.mesh is None or self.fes is None:
-            raise ValueError("Cannot build DOF maps: mesh or fes not available")
-        
-        self._domain_dofs = {}
-        self._local_to_global_maps = {}
-        all_dofs_by_domain = {}
-        
-        for struct_idx, struct in enumerate(self.structures):
-            domain_name = struct.domain
-            dofs = set()
-            local_to_global = {}
-            
-            for el in self.mesh.Elements(VOL):
-                if el.mat != domain_name:
-                    continue
-                
-                global_dofs = self.fes.GetDofNrs(el)
-                local_dofs = struct.fes.GetDofNrs(el)
-                
-                for g_dof, l_dof in zip(global_dofs, local_dofs):
-                    if g_dof >= 0:
-                        dofs.add(g_dof)
-                    if g_dof >= 0 and l_dof >= 0:
-                        if l_dof not in local_to_global:
-                            local_to_global[l_dof] = g_dof
-            
-            self._domain_dofs[struct_idx] = sorted(dofs)
-            self._local_to_global_maps[struct_idx] = local_to_global
-            all_dofs_by_domain[struct_idx] = dofs
-            pr.debug(f"    Domain {struct_idx} ({domain_name}): {len(dofs)} global DOFs, "
-                     f"{len(local_to_global)} mapped DOFs")
-        
-        # Find interface DOFs (shared between domains)
-        self._interface_dofs = set()
-        self._interface_pairs = {}
-        
-        for i in range(self.n_structures):
-            for j in range(i + 1, self.n_structures):
-                shared = all_dofs_by_domain[i] & all_dofs_by_domain[j]
-                if shared:
-                    self._interface_dofs.update(shared)
-                    self._interface_pairs[(i, j)] = shared
-                    self._interface_pairs[(j, i)] = shared
-        
-        pr.debug(f"  DOF mapping complete: {len(self._interface_dofs)} interface DOFs")
-
-    def _get_local_to_global_dof_map(self, struct_idx: int) -> Dict[int, int]:
-        """
-        Get mapping from local (structure) DOF indices to global DOF indices.
-        
-        Returns dict: local_dof -> global_dof
-        """
-        self._build_domain_dof_maps()
-        return self._local_to_global_maps[struct_idx]
-
-    def _invalidate_dof_cache(self) -> None:
-        """Invalidate DOF mapping caches."""
-        self._domain_dofs = None
-        self._interface_dofs = None
-        self._interface_pairs = None
-        self._local_to_global_maps = None
-        self._interface_scale_cache = {}
 
     # =========================================================================
     # Connection Definition
@@ -555,9 +499,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         pr.debug(f"  Connections: {self.n_connections}")
 
         if hasattr(self, '_mor_ref') and self._mor_ref:
-            self._mor_ref._A_r_global = self.A_coupled
-            self._mor_ref._B_r_global = self.B_coupled
-            self._mor_ref._W_r_global = self.W_coupled
+             self._mor_ref._A_r_global = self.A_coupled
+             self._mor_ref._B_r_global = self.B_coupled
+             self._mor_ref._W_r_global = self.W_coupled
 
         # Automatic save after state is synchronized
         if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
@@ -565,6 +509,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 self._solver_ref._project_ref.save()
 
         return self
+
 
     def calculate_resonant_modes(self, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         """Compute eigenvalues and eigenvectors for the coupled system."""
@@ -625,6 +570,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if project_path is None:
             return
 
+        # Determine path: eigenmode/foms/concat or eigenmode/fom/rom/concat etc.
+        # We look at the solver_ref to see where the FOM results are stored
+        # This is a bit heuristic but aligns with the hierarchy
         project_path = Path(project_path)
         
         # Default for ConcatenatedSystem (usually multi-solid)
@@ -642,7 +590,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         try:
             self.save_eigenmodes(save_path, **kwargs)
         except Exception as e:
-            pr.warning(f"Could not auto-save eigenmodes for ConcatenatedSystem to {save_path}: {e}")
+            print(f"Warning: Could not auto-save eigenmodes for ConcatenatedSystem: {e}")
 
     # =========================================================================
     # BaseEMSolver Interface
@@ -685,6 +633,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def save(self, path: Union[str, Path]):
         """
         Save ConcatenatedSystem data to disk.
+        
+        Saves coupled matrices (A, B, W) to separate files in matrices/
+        and S/Z parameters, snapshots, and eigenmodes to their respective folders.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
@@ -722,8 +673,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if hasattr(self, 'frequencies') and self.frequencies is not None:
                 H5Serializer.save_dataset(f, "frequencies", self.frequencies)
             if self._snapshots is not None:
-                if "coupled_snapshots" in f:
-                    del f["coupled_snapshots"]
+                # Concatenated snapshots are stored as a single array
+                if "coupled_snapshots" in f: del f["coupled_snapshots"]
                 H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
 
         # 4. Save eigenmodes
@@ -741,7 +692,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         ProjectManager.save_json(path, metadata)
 
     @classmethod
-    def load(cls, path: Union[str, Path], solver_ref=None) -> "ConcatenatedSystem":
+    def load(cls, path: Union[str, Path], solver_ref=None) -> ConcatenatedSystem:
         """Load ConcatenatedSystem from disk."""
         path = Path(path)
         with open(path / "metadata.json", "r") as f:
@@ -759,11 +710,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         
         # Initialize caches
         cs._resonant_mode_cache = {}
-        cs._interface_scale_cache = {}
-        cs._domain_dofs = None
-        cs._interface_dofs = None
-        cs._interface_pairs = None
-        cs._local_to_global_maps = None
         
         # Initialize result dicts for PlotMixin
         cs._S_dict = None
@@ -779,7 +725,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if (mat_path / "W.h5").exists():
                 with h5py.File(mat_path / "W.h5", "r") as f:
                     cs.W_coupled = H5Serializer.load_dataset(f["data"])
-        elif (path / "matrices.h5").exists():
+        elif (path / "matrices.h5").exists(): # Legacy
             with h5py.File(path / "matrices.h5", "r") as f:
                 cs.A_coupled = H5Serializer.load_dataset(f["A_coupled"])
                 cs.B_coupled = H5Serializer.load_dataset(f["B_coupled"])
@@ -791,15 +737,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         cs._S_matrix = None
         
         z_path = path / "z" / "z.h5"
-        if not z_path.exists():
-            z_path = path / "z.h5"
+        if not z_path.exists(): z_path = path / "z.h5"
         if z_path.exists():
             with h5py.File(z_path, "r") as f:
                 cs._Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
                 
         s_path = path / "s" / "s.h5"
-        if not s_path.exists():
-            s_path = path / "s.h5"
+        if not s_path.exists(): s_path = path / "s.h5"
         if s_path.exists():
             with h5py.File(s_path, "r") as f:
                 cs._S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
@@ -807,8 +751,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # 3. Load snapshots and frequencies
         cs._snapshots = {}
         snap_path = path / "snapshots" / "snapshots.h5"
-        if not snap_path.exists():
-            snap_path = path / "snapshots.h5"
+        if not snap_path.exists(): snap_path = path / "snapshots.h5"
         if snap_path.exists():
             with h5py.File(snap_path, "r") as f:
                 if cs.frequencies is None:
@@ -819,6 +762,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                     for domain in metadata.get("structure_domains", []):
                         if domain in group:
                             cs._snapshots[domain] = H5Serializer.load_dataset(group[domain])
+
+        # 4. Load eigenmodes
+        eig_path = path / "eigenmodes" / "eigenmodes.h5"
+        if eig_path.exists():
+            # We don't have a cache on CS, but we can load them if needed.
+            # For now, we mainly want them saved for the user.
+            pass
 
         return cs
 
@@ -836,6 +786,20 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     ) -> Dict:
         """
         Solve the unified coupled system over a frequency range.
+
+        Supports passing arguments directly or via a 'config' dictionary.
+        Individual keyword arguments override the config dictionary.
+
+        Parameters
+        ----------
+        fmin, fmax : float, optional
+            Frequency range [GHz]
+        nsamples : int, optional
+            Number of frequency samples
+        config : dict, optional
+            Dictionary containing solve parameters
+        **kwargs :
+            Individual solve parameters (compute_s_params, solver_type, rerun, etc.)
         """
         # 1. Merge config and kwargs
         cfg = (config or {}).copy()
@@ -846,6 +810,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         fmax = fmax if fmax is not None else cfg.get('fmax')
         nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
 
+        # Validate mandatory frequency range
         if fmin is None or fmax is None:
             raise ValueError("fmin and fmax must be provided (either directly or via config).")
 
@@ -854,6 +819,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         solver_type = cfg.get('solver_type', 'auto')
         verbose = cfg.get('verbose', False)
 
+        # Set verbosity level
         pr.set_verbosity(verbose)
 
         # 4. Initialize frequency array
@@ -868,8 +834,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         # Check disk if in-memory is missing
         if not has_results and not rerun and self._solver_ref and hasattr(self._solver_ref, '_project_path'):
+            # Concatenated results are usually in fds/foms/concat or fds/fom/rom/concat
+            # We check the most likely locations
             project_path = Path(self._solver_ref._project_path)
             
+            # Use same logic as auto_save_eigenmodes to find sub_path
             sub_path = "foms/concat"
             from rom.reduction import ModelOrderReduction
             if isinstance(self._solver_ref, ModelOrderReduction):
@@ -889,9 +858,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                         with h5py.File(s_path, "r") as f:
                             self._S_matrix = H5Serializer.load_dataset(f["data"])
                     
+                    # Load frequencies
                     snap_path = concat_dir / "snapshots" / "snapshots.h5"
-                    if not snap_path.exists():
-                        snap_path = concat_dir / "snapshots.h5"
+                    if not snap_path.exists(): snap_path = concat_dir / "snapshots.h5"
                     if snap_path.exists():
                         with h5py.File(snap_path, "r") as f:
                             self.frequencies = H5Serializer.load_dataset(f["frequencies"])
@@ -916,7 +885,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 "Z_dict": self.Z_dict,
                 "S_dict": self.S_dict if compute_s_params else None,
             }
-
         n_ext = self._n_external
         r = self.A_coupled.shape[0]
 
@@ -980,7 +948,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         num_freq = len(omegas)
         pr.running(f"  Solving {num_freq} frequencies...")
         
-        report_interval = max(1, num_freq // 10)
+        # Progress reporting logic
+        report_interval = max(1, num_freq // 10) # 10% steps
         
         for k, omega in enumerate(omegas):
             if (k + 1) % report_interval == 0 or k == 0 or k == num_freq - 1:
@@ -1005,7 +974,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return x_all
 
     # =========================================================================
-    # Field Reconstruction - Unified Structure (FIXED: Direct DOF Assignment)
+    # Field Reconstruction - Unified Structure
     # =========================================================================
 
     @property
@@ -1018,50 +987,42 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             return False
         if self.W_coupled is None:
             return False
-        if self.fes is None and self.mesh is None:
+        if self.fes is None:
+            return False
+        if self.mesh is None:
             return False
         return all(s.can_reconstruct() for s in self.structures)
 
-    def _reconstruct_field_from_vector(
+    def _reconstruct_field(
         self,
-        x_uncoupled: np.ndarray,
-        scales: np.ndarray,
-        interface_mode: str = 'average'
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0
     ) -> GridFunction:
         """
-        Reconstruct unified field using direct DOF assignment (no overwriting).
-        
-        Parameters
-        ----------
-        x_uncoupled : ndarray
-            Uncoupled stacked solution vector
-        scales : ndarray
-            Scaling factors for each structure (for interface continuity)
-        interface_mode : str
-            How to handle interface DOFs: 'average', 'first', 'last'
-            
-        Returns
-        -------
-        E_gf : GridFunction
-            Reconstructed field on global FES
+        Reconstruct the unified field over the entire structure.
         """
-        # Ensure we have mesh and fes
+        if not self.has_snapshots:
+            raise ValueError("No snapshots available. Call solve() first.")
+
         if self.mesh is None:
-            raise ValueError("No mesh available")
+            raise ValueError("No mesh available. Provide mesh to constructor.")
+
+        # Ensure we have a unified FES (create if needed)
         self._ensure_unified_fes()
-        
-        # Build DOF maps if needed
-        self._build_domain_dof_maps()
-        
+
+        # Validate excitation port
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+        col_idx = self.ports.index(excitation_port)
+
+        # Map from coupled to uncoupled stacked coordinates
+        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_uncoupled = self.W_coupled @ x_coupled
+
         # Create unified GridFunction on global FES
         E_gf = GridFunction(self.fes, complex=True)
-        global_vec = E_gf.vec.FV().NumPy()
-        global_vec[:] = 0
-        
-        # Track DOF contributions for interface handling
-        dof_values = np.zeros(self.fes.ndof, dtype=complex)
-        dof_counts = np.zeros(self.fes.ndof, dtype=int)
-        
+
         for struct_idx, struct in enumerate(self.structures):
             # Check that structure can reconstruct
             if not struct.can_reconstruct():
@@ -1071,299 +1032,23 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                     f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
                     f"fes: {'set' if struct.fes is not None else 'MISSING'}"
                 )
-            
+
             # Extract this structure's reduced solution
             start_r = self._structure_dof_offsets[struct_idx]
             x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            
+
             # Reconstruct full-order solution for this domain
             x_full_local = struct.reconstruct(x_reduced)
-            
-            # Apply scaling for interface continuity
-            x_full_scaled = scales[struct_idx] * x_full_local
-            
-            # Get local-to-global DOF mapping
-            local_to_global = self._get_local_to_global_dof_map(struct_idx)
-            
-            # Transfer using DOF mapping (no overwriting!)
-            for l_dof, g_dof in local_to_global.items():
-                if l_dof < len(x_full_scaled):
-                    dof_values[g_dof] += x_full_scaled[l_dof]
-                    dof_counts[g_dof] += 1
-        
-        # Assign values based on interface handling mode
-        n_interior = 0
-        n_interface = 0
-        
-        for dof in range(self.fes.ndof):
-            if dof_counts[dof] == 0:
-                continue
-            elif dof_counts[dof] == 1:
-                # Interior DOF - just assign
-                global_vec[dof] = dof_values[dof]
-                n_interior += 1
-            else:
-                # Interface DOF - handle according to mode
-                n_interface += 1
-                if interface_mode == 'average':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                elif interface_mode == 'first':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                elif interface_mode == 'last':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                else:
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-        
-        pr.debug(f"  Reconstruction: {n_interior} interior + {n_interface} interface DOFs")
-        
+
+            # Create per-domain GridFunction
+            E_local = GridFunction(struct.fes, complex=True)
+            E_local.vec.FV().NumPy()[:] = x_full_local
+
+            # Transfer to global GridFunction using definedon
+            domain_region = self.mesh.Materials(struct.domain)
+            E_gf.Set(E_local, definedon=domain_region)
+
         return E_gf
-
-    def _reconstruct_field(
-        self,
-        freq_idx: int,
-        excitation_port: str,
-        excitation_mode: int = 0,
-        enforce_continuity: bool = True
-    ) -> GridFunction:
-        """
-        Reconstruct the unified field over the entire structure.
-        
-        Parameters
-        ----------
-        freq_idx : int
-            Frequency index
-        excitation_port : str
-            Name of the excited port
-        excitation_mode : int
-            Mode index of excitation
-        enforce_continuity : bool
-            If True (default), scale fields to enforce continuity at interfaces.
-            
-        Returns
-        -------
-        E_gf : GridFunction
-            Reconstructed electric field over the entire unified mesh
-        """
-        if not self.has_snapshots:
-            raise ValueError("No snapshots available. Call solve() first.")
-
-        if self.mesh is None:
-            raise ValueError("No mesh available. Provide mesh to constructor.")
-
-        self._ensure_unified_fes()
-
-        if excitation_port not in self.ports:
-            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
-        col_idx = self.ports.index(excitation_port)
-
-        # Map from coupled to uncoupled stacked coordinates
-        x_coupled = self._snapshots[freq_idx, :, col_idx]
-        x_uncoupled = self.W_coupled @ x_coupled
-
-        # Compute interface scaling factors if needed
-        if enforce_continuity and self.n_structures > 1 and self.connections:
-            scales = self._compute_interface_scaling_factors(
-                freq_idx, excitation_port, excitation_mode
-            )
-            pr.debug(f"  Interface continuity scales: {[f'{abs(s):.3f}' for s in scales]}")
-        else:
-            scales = np.ones(self.n_structures, dtype=complex)
-
-        return self._reconstruct_field_from_vector(x_uncoupled, scales)
-
-    # =========================================================================
-    # Interface Scaling (DOF-based approach)
-    # =========================================================================
-
-    def _compute_interface_scaling_factors(
-        self,
-        freq_idx: int,
-        excitation_port: str,
-        excitation_mode: int = 0
-    ) -> np.ndarray:
-        """
-        Compute scaling factors to enforce field continuity at interfaces.
-        Uses DOF-based matching for robust scaling.
-        """
-        if self.n_structures == 1:
-            return np.array([1.0 + 0j])
-        
-        # Check cache
-        cache_key = (freq_idx, excitation_port, excitation_mode)
-        if cache_key in self._interface_scale_cache:
-            return self._interface_scale_cache[cache_key]
-        
-        if excitation_port not in self.ports:
-            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
-        col_idx = self.ports.index(excitation_port)
-        
-        # Get uncoupled solution
-        x_coupled = self._snapshots[freq_idx, :, col_idx]
-        x_uncoupled = self.W_coupled @ x_coupled
-        
-        # Build DOF maps
-        self._build_domain_dof_maps()
-        
-        # Reconstruct local full-order vectors for each domain (unscaled)
-        x_full_list = []
-        for struct_idx, struct in enumerate(self.structures):
-            start_r = self._structure_dof_offsets[struct_idx]
-            x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            x_full = struct.reconstruct(x_reduced)
-            x_full_list.append(x_full)
-        
-        # Propagate scales through connections
-        scales = self._propagate_interface_scales_dof(x_full_list)
-        
-        # Cache
-        self._interface_scale_cache[cache_key] = scales
-        
-        return scales
-
-    def _propagate_interface_scales_dof(self, x_full_list: List[np.ndarray]) -> np.ndarray:
-        """
-        Propagate scaling factors through connection graph using DOF matching.
-        """
-        scales = np.ones(self.n_structures, dtype=complex)
-        processed = {0}  # First structure is reference
-        
-        if not self.connections:
-            return scales
-        
-        remaining = list(enumerate(self.connections))
-        max_iter = len(self.connections) + 1
-        
-        for _ in range(max_iter):
-            if not remaining:
-                break
-            
-            made_progress = False
-            still_remaining = []
-            
-            for conn_idx, ((sA, pA), (sB, pB)) in remaining:
-                if sA in processed and sB not in processed:
-                    ref_idx, new_idx = sA, sB
-                elif sB in processed and sA not in processed:
-                    ref_idx, new_idx = sB, sA
-                elif sA in processed and sB in processed:
-                    continue
-                else:
-                    still_remaining.append((conn_idx, ((sA, pA), (sB, pB))))
-                    continue
-                
-                # Compute scale using DOF-based matching
-                scale = self._compute_dof_scale(
-                    x_full_list[ref_idx], x_full_list[new_idx],
-                    ref_idx, new_idx,
-                    scales[ref_idx]
-                )
-                
-                scales[new_idx] = scale
-                processed.add(new_idx)
-                made_progress = True
-                
-                pr.debug(f"  Scale {ref_idx}->{new_idx}: {abs(scale):.4f}")
-            
-            remaining = still_remaining
-            
-            if not made_progress and remaining:
-                pr.warning("Disconnected structures detected")
-                for _, ((sA, _), (sB, _)) in remaining:
-                    if sA not in processed:
-                        scales[sA] = 1.0
-                        processed.add(sA)
-                    if sB not in processed:
-                        scales[sB] = 1.0
-                        processed.add(sB)
-                break
-        
-        return scales
-
-    def _compute_dof_scale(
-        self,
-        x_full_ref: np.ndarray,
-        x_full_new: np.ndarray,
-        ref_idx: int,
-        new_idx: int,
-        cumulative_scale_ref: complex
-    ) -> complex:
-        """
-        Compute scaling factor using interface DOF values.
-        """
-        # Get interface DOFs between these two domains
-        pair_key = (min(ref_idx, new_idx), max(ref_idx, new_idx))
-        if pair_key not in self._interface_pairs:
-            pr.warning(f"No interface between domains {ref_idx} and {new_idx}")
-            return cumulative_scale_ref
-        
-        interface_global_dofs = self._interface_pairs[pair_key]
-        
-        # Get local-to-global maps
-        l2g_ref = self._local_to_global_maps[ref_idx]
-        l2g_new = self._local_to_global_maps[new_idx]
-        
-        # Invert to get global-to-local
-        g2l_ref = {g: l for l, g in l2g_ref.items()}
-        g2l_new = {g: l for l, g in l2g_new.items()}
-        
-        # Collect values at interface DOFs
-        vals_ref = []
-        vals_new = []
-        
-        for g_dof in interface_global_dofs:
-            if g_dof in g2l_ref and g_dof in g2l_new:
-                l_ref = g2l_ref[g_dof]
-                l_new = g2l_new[g_dof]
-                if l_ref < len(x_full_ref) and l_new < len(x_full_new):
-                    vals_ref.append(x_full_ref[l_ref])
-                    vals_new.append(x_full_new[l_new])
-        
-        if not vals_ref:
-            pr.warning(f"No valid interface DOF values between {ref_idx} and {new_idx}")
-            return cumulative_scale_ref
-        
-        vals_ref = np.array(vals_ref)
-        vals_new = np.array(vals_new)
-        
-        # Filter near-zero
-        mask = (np.abs(vals_ref) > 1e-12) | (np.abs(vals_new) > 1e-12)
-        if not np.any(mask):
-            return cumulative_scale_ref
-        
-        vals_ref = vals_ref[mask]
-        vals_new = vals_new[mask]
-        
-        # Apply cumulative scale to reference
-        vals_ref_scaled = cumulative_scale_ref * vals_ref
-        
-        # Least squares: scale * vals_new ≈ vals_ref_scaled
-        denom = np.vdot(vals_new, vals_new)
-        if abs(denom) < 1e-14:
-            return cumulative_scale_ref
-        
-        scale = np.vdot(vals_new, vals_ref_scaled) / denom
-        
-        return scale
-
-    def clear_interface_scale_cache(self) -> None:
-        """Clear the cached interface scaling factors."""
-        self._interface_scale_cache.clear()
-
-    def get_interface_scales(
-        self, 
-        freq_idx: int, 
-        excitation_port: str,
-        excitation_mode: int = 0
-    ) -> Dict[str, complex]:
-        """Get the interface scaling factors for a given excitation."""
-        scales = self._compute_interface_scaling_factors(
-            freq_idx, excitation_port, excitation_mode
-        )
-        return {self.domains[i]: scales[i] for i in range(self.n_structures)}
-
-    # =========================================================================
-    # Field Visualization
-    # =========================================================================
 
     def plot_field(
         self,
@@ -1374,11 +1059,27 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         field_type: Literal['E', 'H'] = 'E',
         clipping: Optional[Dict] = None,
         euler_angles: Optional[List] = [45, -45, 0],
-        enforce_continuity: bool = True,
         **kwargs
     ) -> None:
         """
         Visualize field over the entire unified structure.
+
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str, optional
+            Port used for excitation. If None, uses first port.
+        excitation_mode : int
+            Mode index for excitation
+        component : {'real', 'imag', 'abs'}
+            Field component to plot
+        field_type : {'E', 'H'}
+            Electric or magnetic field
+        clipping : dict, optional
+            Clipping plane specification
+        **kwargs
+            Additional arguments passed to Draw()
         """
         if self.frequencies is None:
             raise ValueError("No solution available. Call solve() first.")
@@ -1392,6 +1093,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         freq = self.frequencies[freq_idx]
         omega = 2 * np.pi * freq
 
+        # Default excitation
         if excitation_port is None:
             if not self.ports:
                 raise ValueError("No external ports available")
@@ -1403,13 +1105,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         pr.info(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
         pr.info(f"  Excitation: {excitation_port}, mode {excitation_mode}")
         pr.debug(f"  Unified structure with {self.n_structures} domains: {self.domains}")
-        pr.debug(f"  Interface continuity: {'enabled' if enforce_continuity else 'disabled'}")
 
-        # Reconstruct unified field WITH continuity enforcement
-        E_gf = self._reconstruct_field(
-            freq_idx, excitation_port, excitation_mode,
-            enforce_continuity=enforce_continuity
-        )
+        # Reconstruct unified field
+        E_gf = self._reconstruct_field(freq_idx, excitation_port, excitation_mode)
 
         # Select field type
         if field_type == 'E':
@@ -1439,6 +1137,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         draw_kwargs = kwargs.copy()
         if clipping:
             draw_kwargs['clipping'] = clipping
+
         if euler_angles:
             draw_kwargs['euler_angles'] = euler_angles
 
@@ -1447,6 +1146,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def plot_field_at_frequency(self, freq: float, **kwargs) -> None:
         """
         Plot field at specific frequency (Hz).
+
+        Parameters
+        ----------
+        freq : float
+            Frequency in Hz
+        **kwargs
+            Additional arguments passed to plot_field()
         """
         if self.frequencies is None:
             raise ValueError("No solution available.")
@@ -1455,153 +1161,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if abs(actual_freq - freq) / max(freq, 1e-10) > 0.01:
             pr.debug(f"  Note: Using nearest frequency {actual_freq / 1e9:.4f} GHz")
         self.plot_field(freq_idx=freq_idx, **kwargs)
-
-    # =========================================================================
-    # Eigenmode Reconstruction and Visualization
-    # =========================================================================
-
-    def reconstruct_eigenmode(
-        self,
-        mode_idx: int = 0,
-        enforce_continuity: bool = True
-    ) -> GridFunction:
-        """
-        Reconstruct eigenmode field over the entire structure.
-        
-        Parameters
-        ----------
-        mode_idx : int
-            Index of the eigenmode to reconstruct
-        enforce_continuity : bool
-            If True, scale fields to enforce continuity at interfaces
-            
-        Returns
-        -------
-        E_gf : GridFunction
-            Reconstructed eigenmode field
-        """
-        if self.A_coupled is None:
-            raise ValueError("System not coupled. Call couple() first.")
-        
-        if self.mesh is None:
-            raise ValueError("No mesh available.")
-        
-        self._ensure_unified_fes()
-        
-        # Compute eigenmodes of coupled system
-        eigenvalues, eigenvectors = np.linalg.eigh(self.A_coupled)
-        
-        # Filter positive eigenvalues
-        valid_idx = eigenvalues > 1e-6
-        eigenvalues = eigenvalues[valid_idx]
-        eigenvectors = eigenvectors[:, valid_idx]
-        
-        if mode_idx >= eigenvectors.shape[1]:
-            raise ValueError(f"mode_idx {mode_idx} out of range (max {eigenvectors.shape[1]-1})")
-        
-        # Get the coupled eigenvector
-        x_coupled = eigenvectors[:, mode_idx]
-        
-        # Map to uncoupled coordinates
-        x_uncoupled = self.W_coupled @ x_coupled
-        
-        # Compute scaling factors
-        if enforce_continuity and self.n_structures > 1 and self.connections:
-            scales = self._compute_eigenmode_scales(x_uncoupled)
-            pr.debug(f"  Eigenmode scales: {[f'{abs(s):.3f}' for s in scales]}")
-        else:
-            scales = np.ones(self.n_structures, dtype=complex)
-        
-        return self._reconstruct_field_from_vector(x_uncoupled, scales)
-
-    def _compute_eigenmode_scales(self, x_uncoupled: np.ndarray) -> np.ndarray:
-        """Compute scaling factors for eigenmode reconstruction."""
-        self._build_domain_dof_maps()
-        
-        # Reconstruct local full-order vectors
-        x_full_list = []
-        for struct_idx, struct in enumerate(self.structures):
-            start_r = self._structure_dof_offsets[struct_idx]
-            x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            x_full = struct.reconstruct(x_reduced)
-            x_full_list.append(x_full)
-        
-        return self._propagate_interface_scales_dof(x_full_list)
-
-    def plot_eigenmode(
-        self,
-        mode_idx: int = 0,
-        component: Literal['real', 'imag', 'abs'] = 'abs',
-        field_type: Literal['E', 'H'] = 'E',
-        clipping: Optional[Dict] = None,
-        euler_angles: Optional[List] = [45, -45, 0],
-        enforce_continuity: bool = True,
-        **kwargs
-    ) -> None:
-        """
-        Visualize eigenmode over the entire unified structure.
-        
-        Parameters
-        ----------
-        mode_idx : int
-            Index of the eigenmode to plot
-        component : {'real', 'imag', 'abs'}
-            Field component to plot
-        field_type : {'E', 'H'}
-            Electric or magnetic field
-        clipping : dict, optional
-            Clipping plane specification
-        euler_angles : list, optional
-            View orientation
-        enforce_continuity : bool
-            If True, scale fields for interface continuity
-        """
-        # Get eigenvalue for frequency
-        eigenvalues, _ = np.linalg.eigh(self.A_coupled)
-        valid_idx = eigenvalues > 1e-6
-        eigenvalues = eigenvalues[valid_idx]
-        
-        if mode_idx >= len(eigenvalues):
-            raise ValueError(f"mode_idx {mode_idx} out of range (max {len(eigenvalues)-1})")
-        
-        freq = np.sqrt(eigenvalues[mode_idx]) / (2 * np.pi)
-        omega = 2 * np.pi * freq
-        
-        pr.info(f"\nEigenmode {mode_idx} at f = {freq / 1e9:.4f} GHz")
-        
-        # Reconstruct field
-        E_gf = self.reconstruct_eigenmode(mode_idx, enforce_continuity=enforce_continuity)
-        
-        # Select field type
-        if field_type == 'E':
-            field_cf = E_gf
-            field_label = "E"
-        elif field_type == 'H':
-            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
-            field_label = "H"
-        else:
-            raise ValueError(f"Invalid field_type: {field_type}")
-        
-        # Select component
-        if component == 'abs':
-            cf_plot = Norm(field_cf)
-            plot_name = f"|{field_label}| mode {mode_idx}"
-        elif component == 'real':
-            cf_plot = field_cf.real
-            plot_name = f"Re({field_label}) mode {mode_idx}"
-        elif component == 'imag':
-            cf_plot = field_cf.imag
-            plot_name = f"Im({field_label}) mode {mode_idx}"
-        else:
-            raise ValueError(f"Invalid component: {component}")
-        
-        draw_kwargs = kwargs.copy()
-        if clipping:
-            draw_kwargs['clipping'] = clipping
-        if euler_angles:
-            draw_kwargs['euler_angles'] = euler_angles
-        
-        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
 
     def get_reconstruction_info(self) -> Dict:
         """Get information about field reconstruction capability."""
@@ -1644,7 +1203,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             eigs = eigs[:n_modes]
         return eigs
 
-    def get_eigenvalues_filtered(
+    def get_eigenvalues(
         self,
         domain: str = None,
         filter_static: bool = True,
@@ -1680,7 +1239,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         else:
             min_eigenvalue = self.DEFAULT_MIN_EIGENVALUE if filter_static else None
 
-        eigs = self.get_eigenvalues_filtered(
+        eigs = self.get_eigenvalues(
             filter_static=filter_static,
             min_eigenvalue=min_eigenvalue
         )
@@ -1827,10 +1386,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         print("=" * 60)
 
 
-# =============================================================================
-# ReducedConcatenatedSystem - Further POD reduction of concatenated system
-# =============================================================================
-
 class ReducedConcatenatedSystem(ConcatenatedSystem):
     """
     Further-reduced unified system via POD.
@@ -1846,7 +1401,6 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         W_reduction: np.ndarray,
         singular_values: np.ndarray,
     ):
-        # Don't call parent __init__, manually copy state
         BaseEMSolver.__init__(self)
 
         # Copy all parent state
@@ -1899,24 +1453,441 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         self._reduction_level = getattr(parent, "_reduction_level", 0) + 1
         self._parent_coupled_dofs = parent.A_coupled.shape[0] if parent.A_coupled is not None else None
 
-        # Initialize caches
-        self._resonant_mode_cache = {}
-        self._interface_scale_cache = {}
-        
-        # DOF mapping caches (will be built on first use)
-        self._domain_dofs = None
-        self._interface_dofs = None
-        self._interface_pairs = None
-        self._local_to_global_maps = None
-
         # Snapshot storage (populated by solve())
         self._snapshots = None
-        
-        # Initialize result matrices
-        self._Z_matrix = None
-        self._S_matrix = None
-        self.frequencies = None
 
+        # Cache for interface scaling factors
+        self._interface_scale_cache: Dict[Tuple[int, str, int], np.ndarray] = {}
+
+    def _compute_interface_scaling_factors(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0
+    ) -> np.ndarray:
+        """
+        Compute scaling factors to enforce field continuity at interfaces.
+        
+        Domain 0 is the reference (scale = 1). For each connection, we compute
+        a scaling factor that makes the field magnitude continuous at the 
+        shared interface. Scales are applied cumulatively along the chain.
+        
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index in the solution snapshots
+        excitation_port : str
+            Name of the excited port
+        excitation_mode : int
+            Mode index of excitation
+            
+        Returns
+        -------
+        scales : ndarray of shape (n_structures,)
+            Complex scaling factors for each structure. Structure 0 has scale=1.
+        """
+        from ngsolve import Integrate, BoundaryFromVolumeCF, Norm, InnerProduct, Conj
+        
+        if self.n_structures == 1:
+            return np.array([1.0 + 0j])
+        
+        # Check cache
+        cache_key = (freq_idx, excitation_port, excitation_mode)
+        if cache_key in self._interface_scale_cache:
+            return self._interface_scale_cache[cache_key]
+        
+        # Validate excitation port
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+        col_idx = self.ports.index(excitation_port)
+        
+        # Get uncoupled solution
+        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_uncoupled = self.W_coupled @ x_coupled
+        
+        scales = self._compute_vector_scaling_factors(x_uncoupled)
+        
+        # Cache the result
+        self._interface_scale_cache[cache_key] = scales
+        
+        return scales
+        
+    def _compute_vector_scaling_factors(self, x_uncoupled: np.ndarray) -> np.ndarray:
+        """Compute interface scaling factors for a specific uncoupled vector."""
+        if self.n_structures == 1:
+            return np.array([1.0 + 0j])
+            
+        gf_list = []
+        x_full_list = []
+        x_reduced_list = []
+        for struct_idx, struct in enumerate(self.structures):
+            start_r = self._structure_dof_offsets[struct_idx]
+            x_reduced = x_uncoupled[start_r:start_r + struct.r]
+            x_reduced_list.append(x_reduced)
+            
+            x_full = struct.reconstruct(x_reduced)
+            x_full_list.append(x_full)
+            
+            gf = GridFunction(struct.fes, complex=True)
+            gf.vec.FV().NumPy()[:] = x_full
+            gf_list.append(gf)
+        
+        # Initialize scales: first structure is reference
+        scales = np.ones(self.n_structures, dtype=complex)
+        processed = {0}
+        
+        # Process connections to propagate scaling through the chain
+        # Handle general graph traversal (not just sequential)
+        remaining_connections = list(enumerate(self.connections))
+        max_iterations = len(self.connections) + 1
+        
+        for _ in range(max_iterations):
+            if not remaining_connections:
+                break
+                
+            made_progress = False
+            still_remaining = []
+            
+            for conn_idx, ((sA, pA), (sB, pB)) in remaining_connections:
+                # Determine which structure is reference (already processed)
+                if sA in processed and sB not in processed:
+                    ref_idx, new_idx = sA, sB
+                    ref_port, new_port = pA, pB
+                elif sB in processed and sA not in processed:
+                    ref_idx, new_idx = sB, sA
+                    ref_port, new_port = pB, pA
+                elif sA in processed and sB in processed:
+                    # Both already processed - skip
+                    continue
+                else:
+                    # Neither processed yet - defer to next iteration
+                    still_remaining.append((conn_idx, ((sA, pA), (sB, pB))))
+                    continue
+                
+                # Compute scaling factor at this interface
+                alpha = self._compute_single_interface_scale(
+                    x_reduced_list[ref_idx], 
+                    x_reduced_list[new_idx],
+                    self.structures[ref_idx], 
+                    self.structures[new_idx],
+                    ref_port, 
+                    new_port,
+                    scales[ref_idx]  # Pass current cumulative scale of reference
+                )
+                
+                # Apply cumulative scaling
+                scales[new_idx] = alpha
+                processed.add(new_idx)
+                made_progress = True
+                
+                pr.debug(f"  Interface {ref_idx}({ref_port}) <-> {new_idx}({new_port}): "
+                        f"scale = {abs(alpha):.4f}")
+            
+            remaining_connections = still_remaining
+            
+            if not made_progress and remaining_connections:
+                # Disconnected structures - set remaining to 1
+                pr.warning("Some structures are not connected - using scale=1 for disconnected parts")
+                for conn_idx, ((sA, pA), (sB, pB)) in remaining_connections:
+                    if sA not in processed:
+                        scales[sA] = 1.0
+                        processed.add(sA)
+                    if sB not in processed:
+                        scales[sB] = 1.0
+                        processed.add(sB)
+                break
+        
+        return scales
+
+
+    def _compute_single_interface_scale(
+        self,
+        x_ref: np.ndarray,
+        x_new: np.ndarray,
+        struct_ref: 'ReducedStructure',
+        struct_new: 'ReducedStructure',
+        port_ref: str,
+        port_new: str,
+        cumulative_scale_ref: complex = 1.0
+    ) -> complex:
+        """
+        Compute scaling factor for a single interface to enforce continuity.
+        
+        Uses the port projection operator (B_rd) analytically to calculate the precise 
+        amplitude ratio preserving magnitude and relative sign.
+        
+        Parameters
+        ----------
+        x_ref : ndarray
+            Reduced state vector for reference domain
+        x_new : ndarray
+            Reduced state vector for new domain
+        struct_ref, struct_new : ReducedStructure
+            Structure objects containing projection info
+        port_ref, port_new : str
+            Port names (boundary labels) for the shared interface
+        cumulative_scale_ref : complex
+            Cumulative scaling already applied to reference domain
+            
+        Returns
+        -------
+        alpha : complex
+            Scaling factor for the new domain
+        """
+        try:
+            # Obtain port modes indices for fundamental mode 0
+            col_ref = struct_ref.get_port_mode_column(port_ref, mode=0)
+            col_new = struct_new.get_port_mode_column(port_new, mode=0)
+            
+            # Calculate algebraic port coupling amplitude
+            # V = B_rd^T @ x_reduced
+            amp_ref = np.dot(struct_ref.Brd[:, col_ref], x_ref)
+            amp_new = np.dot(struct_new.Brd[:, col_new], x_new)
+            
+            if abs(amp_new) > 1e-14:
+                # We scale E_new so that its native amplitude equals E_ref's scaled amplitude.
+                # If amp_new naturally differs in sign (e.g. out of phase normal vectors),
+                # this ratio natively captures and flips it.
+                alpha_local = cumulative_scale_ref * (amp_ref / amp_new)
+                return alpha_local
+            else:
+                pr.warning(f"New field amplitude too small at interface ({abs(amp_new):.2e}); retaining previous scale.")
+                return cumulative_scale_ref
+                
+        except Exception as e:
+            pr.warning(f"Could not compute interface scale for {port_ref}<->{port_new}: {e}")
+            return cumulative_scale_ref
+
+
+    def _reconstruct_field(
+        self,
+        freq_idx: int,
+        excitation_port: str,
+        excitation_mode: int = 0,
+        enforce_continuity: bool = True
+    ) -> GridFunction:
+        """
+        Reconstruct the unified field over the entire structure.
+        
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str
+            Name of the excited port
+        excitation_mode : int
+            Mode index of excitation
+        enforce_continuity : bool
+            If True (default), scale fields to enforce continuity at interfaces.
+            This corrects for magnitude differences caused by independent POD 
+            reductions of each domain.
+            
+        Returns
+        -------
+        E_gf : GridFunction
+            Reconstructed electric field over the entire unified mesh
+        """
+        if not self.has_snapshots:
+            raise ValueError("No snapshots available. Call solve() first.")
+
+        if self.mesh is None:
+            raise ValueError("No mesh available. Provide mesh to constructor.")
+
+        # Ensure we have a unified FES (create if needed)
+        self._ensure_unified_fes()
+
+        # Validate excitation port
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+        col_idx = self.ports.index(excitation_port)
+
+        # Map from coupled to uncoupled stacked coordinates
+        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_uncoupled = self.W_coupled @ x_coupled
+
+        if enforce_continuity and self.n_structures > 1 and self.connections:
+            scales = self._compute_interface_scaling_factors(
+                freq_idx, excitation_port, excitation_mode
+            )
+            pr.debug(f"  Interface continuity scales: {[f'{abs(s):.3f}' for s in scales]}")
+        else:
+            scales = np.ones(self.n_structures, dtype=complex)
+
+        return self._reconstruct_field_from_vector(x_uncoupled, scales)
+        
+    def _reconstruct_field_from_vector(
+        self,
+        x_uncoupled: np.ndarray,
+        scales: np.ndarray
+    ): # -> GridFunction
+        """
+        Reconstruct unified field across domains from an uncoupled vector array and apply scales. Returns a GridFunction.
+        """
+        from ngsolve import GridFunction
+        
+        # Create unified GridFunction on global FES
+        E_gf = GridFunction(self.fes, complex=True)
+
+        for struct_idx, struct in enumerate(self.structures):
+            # Check that structure can reconstruct
+            if not struct.can_reconstruct():
+                raise ValueError(
+                    f"Structure {struct_idx} ({struct.domain}) cannot reconstruct. "
+                    f"W: {'set' if struct.W is not None else 'MISSING'}, "
+                    f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
+                    f"fes: {'set' if struct.fes is not None else 'MISSING'}"
+                )
+
+            # Extract this structure's reduced solution
+            start_r = self._structure_dof_offsets[struct_idx]
+            x_reduced = x_uncoupled[start_r:start_r + struct.r]
+
+            # Reconstruct full-order solution for this domain
+            x_full_local = struct.reconstruct(x_reduced)
+            
+            # Apply scaling for interface continuity
+            x_full_local = scales[struct_idx] * x_full_local
+
+            # Create per-domain GridFunction
+            E_local = GridFunction(struct.fes, complex=True)
+            E_local.vec.FV().NumPy()[:] = x_full_local
+
+            # Transfer to global GridFunction using definedon
+            domain_region = self.mesh.Materials(struct.domain)
+            E_gf.Set(E_local, definedon=domain_region)
+
+        return E_gf
+
+
+    def plot_field(
+        self,
+        freq_idx: int = 0,
+        excitation_port: Optional[str] = None,
+        excitation_mode: int = 0,
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+        field_type: Literal['E', 'H'] = 'E',
+        clipping: Optional[Dict] = None,
+        euler_angles: Optional[List] = [45, -45, 0],
+        enforce_continuity: bool = True,  # NEW PARAMETER
+        **kwargs
+    ) -> None:
+        """
+        Visualize field over the entire unified structure.
+
+        Parameters
+        ----------
+        freq_idx : int
+            Frequency index
+        excitation_port : str, optional
+            Port used for excitation. If None, uses first port.
+        excitation_mode : int
+            Mode index for excitation
+        component : {'real', 'imag', 'abs'}
+            Field component to plot
+        field_type : {'E', 'H'}
+            Electric or magnetic field
+        clipping : dict, optional
+            Clipping plane specification
+        euler_angles : list, optional
+            Euler angles for view orientation
+        enforce_continuity : bool
+            If True (default), scale fields to enforce continuity at interfaces.
+        **kwargs
+            Additional arguments passed to Draw()
+        """
+        # ... existing validation code ...
+        
+        if self.frequencies is None:
+            raise ValueError("No solution available. Call solve() first.")
+
+        if freq_idx >= len(self.frequencies):
+            raise ValueError(f"freq_idx {freq_idx} out of range [0, {len(self.frequencies) - 1}]")
+
+        if self._snapshots is None:
+            raise ValueError("No snapshots available.")
+
+        freq = self.frequencies[freq_idx]
+        omega = 2 * np.pi * freq
+
+        # Default excitation
+        if excitation_port is None:
+            if not self.ports:
+                raise ValueError("No external ports available")
+            excitation_port = self.ports[0]
+
+        if excitation_port not in self.ports:
+            raise ValueError(f"Port '{excitation_port}' not found. Available: {self.ports}")
+
+        pr.info(f"\nField visualization at f = {freq / 1e9:.4f} GHz")
+        pr.info(f"  Excitation: {excitation_port}, mode {excitation_mode}")
+        pr.debug(f"  Unified structure with {self.n_structures} domains: {self.domains}")
+        pr.debug(f"  Interface continuity: {'enabled' if enforce_continuity else 'disabled'}")
+
+        # Reconstruct unified field WITH continuity enforcement
+        E_gf = self._reconstruct_field(
+            freq_idx, excitation_port, excitation_mode,
+            enforce_continuity=enforce_continuity
+        )
+
+        # ... rest of plotting code unchanged ...
+        # Select field type
+        if field_type == 'E':
+            field_cf = E_gf
+            field_label = "E"
+        elif field_type == 'H':
+            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            field_label = "H"
+        else:
+            raise ValueError(f"Invalid field_type: {field_type}")
+
+        # Select component
+        if component == 'abs':
+            cf_plot = Norm(field_cf)
+            plot_name = f"|{field_label}|"
+        elif component == 'real':
+            cf_plot = field_cf.real
+            plot_name = f"Re({field_label})"
+        elif component == 'imag':
+            cf_plot = field_cf.imag
+            plot_name = f"Im({field_label})"
+        else:
+            raise ValueError(f"Invalid component: {component}")
+
+        pr.debug(f"  Plotting: {plot_name}")
+
+        draw_kwargs = kwargs.copy()
+        if clipping:
+            draw_kwargs['clipping'] = clipping
+        if euler_angles:
+            draw_kwargs['euler_angles'] = euler_angles
+
+        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
+
+
+    def clear_interface_scale_cache(self) -> None:
+        """Clear the cached interface scaling factors."""
+        self._interface_scale_cache.clear()
+
+
+    def get_interface_scales(
+        self, 
+        freq_idx: int, 
+        excitation_port: str,
+        excitation_mode: int = 0
+    ) -> Dict[str, complex]:
+        """
+        Get the interface scaling factors for a given excitation.
+        
+        Returns
+        -------
+        scales : dict
+            Mapping from domain name to scaling factor
+        """
+        scales = self._compute_interface_scaling_factors(
+            freq_idx, excitation_port, excitation_mode
+        )
+        return {self.domains[i]: scales[i] for i in range(self.n_structures)}
+    
     @property
     def singular_values(self) -> np.ndarray:
         return self._singular_values
@@ -1934,7 +1905,7 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         pr.debug(f"\nReduction:")
         pr.debug(f"  Parent coupled DOFs: {self._parent_coupled_dofs}")
         pr.debug(f"  This level DOFs: {self.coupled_dofs}")
-        if self._parent_coupled_dofs and self._parent_coupled_dofs > 0:
+        if self._parent_coupled_dofs > 0:
             compression = (1 - self.coupled_dofs / self._parent_coupled_dofs) * 100
             pr.debug(f"  Compression: {compression:.1f}%")
 
@@ -1944,7 +1915,7 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         if len(self._singular_values) > 5:
             print(f"  ... ({len(self._singular_values)} total)")
 
-        print(f"\nField reconstruction: {'Ready' if self.can_reconstruct() else 'Not available'}")
+        print(f"Field reconstruction: {'Ready' if self.can_reconstruct() else 'Not available'}")
 
         if self.frequencies is not None:
             print(f"\nSolution:")
@@ -1953,10 +1924,6 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
 
         print("=" * 60)
 
-
-# =============================================================================
-# POD Reduction Function
-# =============================================================================
 
 def reduce_concatenated_system(
     concat: ConcatenatedSystem,
