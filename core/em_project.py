@@ -63,6 +63,7 @@ class EMProject:
         self._fds: Optional[FrequencyDomainSolver] = None
         self._order = 3
         self._n_port_modes = 1
+        self._loading = False  # Guard flag to prevent save() during _initial_load()
         
         # Automatic Loading or Creation
         if self.project_path.exists():
@@ -83,6 +84,8 @@ class EMProject:
         metadata_file = self.project_path / "project.json"
         if not metadata_file.exists():
             return
+
+        self._loading = True  # Prevent save() from being triggered during load
 
         with open(metadata_file, "r") as f:
             metadata = json.load(f)
@@ -138,6 +141,8 @@ class EMProject:
                     fes = pm.load_ngs_fes(self.fds_path)
                     if fes:
                         self._fds._fes_global = fes
+
+        self._loading = False  # Re-enable save()
 
     @property
     def geo(self) -> Optional[BaseGeometry]:
@@ -324,8 +329,8 @@ class EMProject:
         if self._fds:
             self._fds.mesh = value
         
-        # Auto-save mesh to disk if it exists
-        if value is not None:
+        # Auto-save mesh to disk if it exists (but NOT during _initial_load)
+        if value is not None and not getattr(self, '_loading', False):
             self.save()
 
     @property

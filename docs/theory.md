@@ -11,6 +11,7 @@ In the frequency domain, assuming an $\exp(j\omega t)$ time dependence:
 $$
 \nabla \times \mathbf{E} = -j\omega \mu \mathbf{H}
 $$
+
 $$
 \nabla \times \mathbf{H} = j\omega \varepsilon^* \mathbf{E} + \mathbf{J}_e
 $$

@@ -7,31 +7,31 @@
 The figure below shows the software architecture with the available analysis options for single-segment and multi-segment assemblies.
 
 ### Pathway 1 — Single Solid
-
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A1["🔷 Single Device Model"]:::input --> B1["⚙️ Frequency Domain Solver"]:::process --> C1["📉 Reduced Order Model"]:::output
+    A1("🔷 Single Device<br/>Model"):::input --> B1("⚙️ Frequency<br/>Domain Solver"):::process --> C1("📉 Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
 ```
 
 ### Pathway 2 — Global Assembly
-
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A2["🔷 Multi Device Model"]:::input --> B2["🔗 Fuse into Single Mesh"]:::fuse --> C2["⚙️ Frequency Domain Solver"]:::process --> D2["📉 Reduced Order Model"]:::output
+    A2("🔷 Multi Device<br/>Model"):::input --> B2("🔗 Fuse into<br/>Single Mesh"):::concat --> C2("⚙️ Frequency<br/>Domain Solver"):::process --> D2("📉 Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
-    classDef fuse fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
 ```
 
 ### Pathway 3 — FOM Concatenation
-
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A3["🔷 Multi Device Model"]:::input --> B3["⚙️ Solve Each Domain"]:::process --> C3["🔗 Concatenate FOMs"]:::concat --> D3["📉 Reduced Order Model"]:::output
+    A3("🔷 Multi Device<br/>Model"):::input --> B3("⚙️ Solve Each<br/>Domain"):::process --> C3("🔗 Concatenate<br/>FOMs"):::concat --> D3("📉 Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
@@ -39,18 +39,15 @@ graph LR
 ```
 
 ### Pathway 4 — ROM Concatenation
-
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A4["🔷 Multi Device Model"]:::input --> B4["⚙️ Solve Each Domain"]:::process --> C4["📉 Reduce Each Domain"]:::reduce --> D4["🔗 Concatenate ROMs"]:::concat --> E4["📊 Solve Concatenated"]:::output
+    A4("🔷 Multi Device<br/>Model"):::input --> B4("⚙️ Solve Each<br/>Domain"):::process --> C4("📉 Reduce Each<br/>Domain"):::output --> D4("🔗 Concatenate<br/>ROMs"):::concat --> E4("📊 Solve<br/>Concatenated"):::process
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
-    classDef reduce fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000
-    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
 ```
-
----
 
 ## Pathway Details
 

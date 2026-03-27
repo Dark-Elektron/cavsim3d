@@ -204,6 +204,7 @@ class FOMResult(PlotMixin):
             return None
         if self.domain == 'global':
             return getattr(self._solver_ref, 'M_global', None)
+        return getattr(self._solver_ref, 'M_global', None)
         return getattr(self._solver_ref, 'M', {}).get(self.domain)
 
     @property
@@ -273,11 +274,14 @@ class FOMResult(PlotMixin):
 
         Delegates to the underlying FrequencyDomainSolver.
         """
-        if self._solver_ref is not None and hasattr(self._solver_ref, 'calculate_resonant_modes'):
-            res = self._solver_ref.calculate_resonant_modes(**kwargs)
+        if self._solver_ref is not None and hasattr(self._solver_ref, 'get_eigenmodes'):
+            kwargs['return_eigenvalues'] = True
+            kwargs.setdefault('return_eigenvectors', False)
+            domain = self.domain if self.domain != 'global' else None
+            res = self._solver_ref.get_eigenmodes(domain=domain, **kwargs)
             if isinstance(res, dict):
-                return {k: v[0] for k, v in res.items()}
-            return res[0]
+                return {k: v[0] if isinstance(v, tuple) else v for k, v in res.items()}
+            return res[0] if isinstance(res, tuple) else res
         raise RuntimeError("Eigenvalues not available for this FOMResult.")
 
     def get_resonant_frequencies(self, **kwargs):
@@ -293,6 +297,19 @@ class FOMResult(PlotMixin):
             # Delegate to solver, but filter for this domain if not global
             domain = self.domain if self.domain != 'global' else None
             res = self._solver_ref.calculate_resonant_modes(domain=domain, **kwargs)
+            
+            # Populate the solver's eigen caches so save_eigenmodes can find them
+            if hasattr(self._solver_ref, '_init_eigen_cache'):
+                self._solver_ref._init_eigen_cache()
+                if isinstance(res, dict):
+                    for d, (eigs, vecs) in res.items():
+                        self._solver_ref._eigenvalues_cache[d] = eigs
+                        self._solver_ref._eigenvectors_cache[d] = vecs
+                else:
+                    eigs, vecs = res
+                    cache_key = domain or 'global'
+                    self._solver_ref._eigenvalues_cache[cache_key] = eigs
+                    self._solver_ref._eigenvectors_cache[cache_key] = vecs
             
             # Hierarchical save if possible
             if _auto_save:
@@ -387,17 +404,13 @@ class FOMResult(PlotMixin):
                 H5Serializer.save_dataset(f, "field_snapshots", self._solver_ref.snapshots[self.domain])
 
         # 4. Save eigenmodes if available
-        if self._solver_ref is not None and hasattr(self._solver_ref, '_resonant_mode_cache'):
-            # Search for relevant cache entries
-            domain_key = self.domain if self.domain else 'global'
-            relevant_cache = {k: v for k, v in self._solver_ref._resonant_mode_cache.items() if k.startswith(domain_key)}
-            if relevant_cache:
-                eig_file = f"eigenmodes_{self.domain}.h5" if self.domain else "eigenmodes.h5"
-                with h5py.File(eig_path / eig_file, "a") as f:
-                    for k, (eigs, vecs) in relevant_cache.items():
-                        group = f.create_group(k)
-                        H5Serializer.save_dataset(group, "eigenvalues", eigs)
-                        H5Serializer.save_dataset(group, "eigenvectors", vecs)
+        if self._solver_ref is not None:
+            # We pass the domain to save_eigenmodes to keep it granular
+            # The solver's save_eigenmodes knows how to handle paths
+            try:
+                self._solver_ref.save_eigenmodes(path=eig_path, domain=self.domain)
+            except Exception as e:
+                print(f"Note: Could not save FOM eigenmodes for {self.domain}: {e}")
 
         # 5. Save metadata
         metadata = {
@@ -493,6 +506,9 @@ class FOMResult(PlotMixin):
                                 setattr(_solver_ref, f"{mname}_global", data)
                             else:
                                 getattr(_solver_ref, mname)[domain] = data
+
+        if _solver_ref is not None:
+            _solver_ref.load_eigenmodes(path / "eigenmodes")
 
         # Build Z/S dicts if matrices are loaded
         res = cls(
@@ -676,7 +692,7 @@ class FOMCollection(PlotMixin):
         Access the cached per-domain ROMs.
 
         Returns the ROM collection only if it has already been computed
-        via ``foms.reduce()`` or loaded from disk.  Does **not** trigger
+        via ``foms.reduce()`` or loaded from disk. Does **not** trigger
         reduction automatically.
 
         Raises
@@ -973,18 +989,9 @@ class FOMCollection(PlotMixin):
                 if fom._solver_ref is not None and domain in getattr(fom._solver_ref, 'snapshots', {}):
                     H5Serializer.save_dataset(fsnap, "field_snapshots", fom._solver_ref.snapshots[domain])
 
-        # 4. Save eigenmodes if available in solver reference
-        if self._fds_ref is not None and hasattr(self._fds_ref, '_resonant_mode_cache'):
-            for fom in self._foms:
-                domain = fom.domain
-                relevant_cache = {k: v for k, v in self._fds_ref._resonant_mode_cache.items() if k.startswith(domain)}
-                if relevant_cache:
-                    eig_file = f"eigenmodes_{domain}.h5"
-                    with h5py.File(eig_path / eig_file, "a") as f:
-                        for k, (eigs, vecs) in relevant_cache.items():
-                            group = f.require_group(k)
-                            H5Serializer.save_dataset(group, "eigenvalues", eigs)
-                            H5Serializer.save_dataset(group, "eigenvectors", vecs)
+        # 4. Save eigenmodes
+        if self._fds_ref is not None:
+            self._fds_ref.save_eigenmodes(eig_path)
 
         # Metadata
         metadata = {
@@ -1064,6 +1071,8 @@ class FOMCollection(PlotMixin):
                             if "K" in fm[domain]: _fds_ref.K[domain] = H5Serializer.load_sparse_csr(fm[f"{domain}/K"])
                             if "M" in fm[domain]: _fds_ref.M[domain] = H5Serializer.load_sparse_csr(fm[f"{domain}/M"])
                             if "B" in fm[domain]: _fds_ref.B[domain] = H5Serializer.load_dataset(fm[f"{domain}/B"])
+            # Restore eigenmodes into _fds_ref if available
+            _fds_ref.load_eigenmodes(path / "eigenmodes")
 
         # 3. Iterate through domains to build FOMResult objects
         for solid_meta in metadata["solids"]:
@@ -1101,17 +1110,6 @@ class FOMCollection(PlotMixin):
                     residual_data = H5Serializer.load_dataset(fs["residual_data"]) if "residual_data" in fs else None
                     field_snapshots = H5Serializer.load_dataset(fs["field_snapshots"]) if "field_snapshots" in fs else None
 
-            # Load eigenmodes into _fds_ref
-            if _fds_ref is not None and hasattr(_fds_ref, '_resonant_mode_cache'):
-                eig_path = path / "eigenmodes" / f"eigenmodes_{domain}.h5"
-                if eig_path.exists():
-                    with h5py.File(eig_path, "r") as f:
-                        for k in f.keys():
-                            group = f[k]
-                            eigs = H5Serializer.load_dataset(group["eigenvalues"])
-                            vecs = H5Serializer.load_dataset(group["eigenvectors"])
-                            _fds_ref._resonant_mode_cache[k] = (eigs, vecs)
-
             fom = FOMResult(
                 domain=domain,
                 frequencies=frequencies,
@@ -1132,8 +1130,8 @@ class FOMCollection(PlotMixin):
                     _fds_ref._residuals = {}
                 if residual_data is not None: _fds_ref._residuals[domain] = residual_data
                 if field_snapshots is not None: _fds_ref.snapshots[domain] = field_snapshots
-                if Z_matrix is not None: _fds_ref._Z_per_domain[domain] = fom.Z_dict
-                if S_matrix is not None: _fds_ref._S_per_domain[domain] = fom.S_dict
+                if Z_matrix is not None: _fds_ref._Z_per_domain[domain] = Z_matrix
+                if S_matrix is not None: _fds_ref._S_per_domain[domain] = S_matrix
                 if frequencies is not None: _fds_ref.frequencies = frequencies
 
             fom_list.append(fom)
@@ -1155,6 +1153,16 @@ class FOMCollection(PlotMixin):
             
             return res
         raise RuntimeError("Eigenmodes not available for this FOMCollection.")
+
+    def get_eigenvalues(self, **kwargs):
+        """
+        Compute or retrieve eigenvalues for all domains in the collection.
+        """
+        if self._fds_ref is not None and hasattr(self._fds_ref, 'get_eigenmodes'):
+            kwargs['return_eigenvalues'] = True
+            kwargs.setdefault('return_eigenvectors', False)
+            return self._fds_ref.get_eigenmodes(domain=None, **kwargs)
+        raise RuntimeError("Eigenvalues not available for this FOMCollection.")
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
         if self._fds_ref is None or not hasattr(self._fds_ref, '_project_path'):

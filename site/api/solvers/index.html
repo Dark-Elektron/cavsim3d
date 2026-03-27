@@ -1,1964 +1,481 @@
-
 <!doctype html>
 <html lang="en" class="no-js">
-  <head>
-    
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width,initial-scale=1">
-      
-        <meta name="description" content="3D Cavity Simulation and Model Order Reduction">
-      
-      
-      
-        <link rel="canonical" href="https://dark-elektron.github.io/cavsim3d/api/solvers/">
-      
-      
-        <link rel="prev" href="../geometry/">
-      
-      
-        <link rel="next" href="../rom/">
-      
-      
-        
-      
-      
-      <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
-    
-    
-      
-        <title>Solvers - cavsim3d</title>
-      
-    
-    
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
-      
-        
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
-      
-      
+
+<head>
+
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+
+  <meta name="description" content="3D Cavity Simulation and Model Order Reduction">
 
 
-    
-    
-      
-    
-    
-      
-        
-        
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
-        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-      
-    
-    
-      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
-    
-      <link rel="stylesheet" href="../../stylesheets/extra.css">
-    
-    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
-    
-      
 
-    
-    
-  </head>
-  
-  
-    
-    
-      
-    
-    
-    
-    
-    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
-  
-    
-    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
-    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
-    <label class="md-overlay" for="__drawer"></label>
-    <div data-md-component="skip">
-      
-        
-        <a href="#solvers" class="md-skip">
-          Skip to content
-        </a>
-      
-    </div>
-    <div data-md-component="announce">
-      
-    </div>
-    
-    
-      
+  <link rel="canonical" href="https://dark-elektron.github.io/cavsim3d/api/solvers/">
 
-<header class="md-header" data-md-component="header">
-  <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="../.." title="cavsim3d" class="md-header__button md-logo" aria-label="cavsim3d" data-md-component="logo">
-      
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
 
+  <link rel="prev" href="../geometry/">
+
+
+  <link rel="next" href="../rom/">
+
+
+
+
+
+  <link rel="icon" href="../../assets/images/favicon.png">
+  <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+
+
+
+  <title>Solvers - cavsim3d</title>
+
+
+
+  <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+
+
+  <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+
+
+
+
+
+
+
+
+
+
+
+
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+  <style>
+    :root {
+      --md-text-font: "Roboto";
+      --md-code-font: "Roboto Mono"
+    }
+  </style>
+
+
+
+  <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+
+  <link rel="stylesheet" href="../../stylesheets/extra.css">
+
+  <script>__md_scope = new URL("../..", location), __md_hash = e => [...e].reduce(((e, _) => (e << 5) - e + _.charCodeAt(0)), 0), __md_get = (e, _ = localStorage, t = __md_scope) => JSON.parse(_.getItem(t.pathname + "." + e)), __md_set = (e, _, t = localStorage, a = __md_scope) => { try { t.setItem(a.pathname + "." + e, JSON.stringify(_)) } catch (e) { } }</script>
+
+
+
+
+
+</head>
+
+
+
+
+
+
+
+
+
+<body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+
+
+  <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+  <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+  <label class="md-overlay" for="__drawer"></label>
+  <div data-md-component="skip">
+
+
+    <a href="#solvers" class="md-skip">
+      Skip to content
     </a>
-    <label class="md-header__button md-icon" for="__drawer">
-      
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
-    </label>
-    <div class="md-header__title" data-md-component="header-title">
-      <div class="md-header__ellipsis">
-        <div class="md-header__topic">
-          <span class="md-ellipsis">
-            cavsim3d
-          </span>
-        </div>
-        <div class="md-header__topic" data-md-component="header-topic">
-          <span class="md-ellipsis">
-            
-              Solvers
-            
-          </span>
-        </div>
-      </div>
-    </div>
-    
-      
-        <form class="md-header__option" data-md-component="palette">
-  
-    
-    
-    
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
-    
-      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+
+  </div>
+  <div data-md-component="announce">
+
+  </div>
+
+
+
+
+  <header class="md-header" data-md-component="header">
+    <nav class="md-header__inner md-grid" aria-label="Header">
+      <a href="../.." title="cavsim3d" class="md-header__button md-logo" aria-label="cavsim3d" data-md-component="logo">
+
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path
+            d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54" />
+        </svg>
+
+      </a>
+      <label class="md-header__button md-icon" for="__drawer">
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z" />
+        </svg>
       </label>
-    
-  
-    
-    
-    
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
-    
-      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
-      </label>
-    
-  
-</form>
-      
-    
-    
-      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
-    
-    
-    
-      
-      
-        <label class="md-header__button md-icon" for="__search">
-          
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
-        </label>
-        <div class="md-search" data-md-component="search" role="dialog">
-  <label class="md-search__overlay" for="__search"></label>
-  <div class="md-search__inner" role="search">
-    <form class="md-search__form" name="search">
-      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
-      <label class="md-search__icon md-icon" for="__search">
-        
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
-        
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
-      </label>
-      <nav class="md-search__options" aria-label="Search">
-        
-        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
-          
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-        </button>
-      </nav>
-      
-    </form>
-    <div class="md-search__output">
-      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
-        <div class="md-search-result" data-md-component="search-result">
-          <div class="md-search-result__meta">
-            Initializing search
+      <div class="md-header__title" data-md-component="header-title">
+        <div class="md-header__ellipsis">
+          <div class="md-header__topic">
+            <span class="md-ellipsis">
+              cavsim3d
+            </span>
           </div>
-          <ol class="md-search-result__list" role="presentation"></ol>
+          <div class="md-header__topic" data-md-component="header-topic">
+            <span class="md-ellipsis">
+
+              Solvers
+
+            </span>
+          </div>
         </div>
       </div>
-    </div>
-  </div>
-</div>
-      
-    
-    
-      <div class="md-header__source">
-        <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source" data-md-component="source">
-  <div class="md-source__icon md-icon">
-    
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
-  </div>
-  <div class="md-source__repository">
-    Dark-Elektron/cavsim3d
-  </div>
-</a>
-      </div>
-    
-  </nav>
-  
-</header>
-    
-    <div class="md-container" data-md-component="container">
-      
-      
-        
-          
-            
-<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
-  <div class="md-grid">
-    <ul class="md-tabs__list">
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../.." class="md-tabs__link">
-        
-  
-  
-    
-  
-  Home
 
-      </a>
-    </li>
-  
 
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../../getting_started/" class="md-tabs__link">
-        
-  
-  
-    
-  
-  Getting Started
+      <form class="md-header__option" data-md-component="palette">
 
-      </a>
-    </li>
-  
 
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../../architecture/" class="md-tabs__link">
-        
-  
-  
-    
-  
-  Architecture
 
-      </a>
-    </li>
-  
 
-      
-        
-  
-  
-  
-  
-    
-    
-      <li class="md-tabs__item">
-        <a href="../../tutorials/pathway1_single_solid/" class="md-tabs__link">
-          
-  
-  
-  Tutorials
+        <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default"
+          data-md-color-primary="indigo" data-md-color-accent="indigo" aria-label="Switch to dark mode" type="radio"
+          name="__palette" id="__palette_0">
 
-        </a>
-      </li>
-    
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../../theory/" class="md-tabs__link">
-        
-  
-  
-    
-  
-  Mathematical Theory
-
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-    
-  
-  
-    
-    
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../project/" class="md-tabs__link">
-          
-  
-  
-  API Reference
-
-        </a>
-      </li>
-    
-  
-
-      
-        
-  
-  
-  
-  
-    
-    
-      <li class="md-tabs__item">
-        <a href="../../viewing_locally/" class="md-tabs__link">
-          
-  
-  
-  Developers
-
-        </a>
-      </li>
-    
-  
-
-      
-    </ul>
-  </div>
-</nav>
-          
-        
-      
-      <main class="md-main" data-md-component="main">
-        <div class="md-main__inner md-grid">
-          
-            
-              
-              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
-                <div class="md-sidebar__scrollwrap">
-                  <div class="md-sidebar__inner">
-                    
-
-
-  
-
-
-<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
-  <label class="md-nav__title" for="__drawer">
-    <a href="../.." title="cavsim3d" class="md-nav__button md-logo" aria-label="cavsim3d" data-md-component="logo">
-      
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
-
-    </a>
-    cavsim3d
-  </label>
-  
-    <div class="md-nav__source">
-      <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source" data-md-component="source">
-  <div class="md-source__icon md-icon">
-    
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
-  </div>
-  <div class="md-source__repository">
-    Dark-Elektron/cavsim3d
-  </div>
-</a>
-    </div>
-  
-  <ul class="md-nav__list" data-md-scrollfix>
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../.." class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Home
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../getting_started/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Getting Started
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../architecture/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Architecture
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    
-    
-    
-    
-      
-      
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
-        
-          
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
-        
-          
-          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Tutorials
-  
-
-    
-  </span>
-  
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_4">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    Tutorials
-  
-
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/pathway1_single_solid/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pathway 1: Single Solid Analysis
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/pathway2_global_assembly/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pathway 2: Multi-Solid Global Assembly
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/pathway3_fom_concatenation/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pathway 3: FOM Concatenation
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/pathway4_rom_concatenation/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pathway 4: ROM Concatenation
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/importing_cad/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Importing CAD Files
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/persistence/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Persistence
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-          </ul>
-        </nav>
-      
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../theory/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Mathematical Theory
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-    
-  
-  
-  
-    
-    
-    
-    
-      
-        
-        
-      
-      
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
-      
-        
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
-        
-          
-          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    API Reference
-  
-
-    
-  </span>
-  
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
-          <label class="md-nav__title" for="__nav_6">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    API Reference
-  
-
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../project/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Project Management
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../geometry/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Geometry & Assembly
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-    
-  
-  
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Solvers
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
+        <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path
+              d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z" />
+          </svg>
         </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Solvers
-  
 
-    
-  </span>
-  
-  
 
-      </a>
-      
-        
 
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#frequency-domain-solver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Frequency Domain Solver
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        FrequencyDomainSolver
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="FrequencyDomainSolver">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Examples
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Single domain solve
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compound structure with coupled method (default, most accurate)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compound structure with cascade method (faster, less accurate)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Per-domain results only (for ROM training)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compare both methods
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver-functions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Functions
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Functions">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        __init__
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        solve
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="solve">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        plot_s_parameters
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="plot_s_parameters">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        plot_z_parameters
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="plot_z_parameters">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#concatenation-solver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Concatenation Solver
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ConcatenatedSystem
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="ConcatenatedSystem">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Coupling Formulation
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Examples
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--create-from-roms" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Create from ROMs
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Concatenate into unified structure
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Solve and visualize unified field
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem-functions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Functions
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Functions">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.__init__" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        __init__
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.couple" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        couple
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="couple">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.couple--returns" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Returns
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        solve
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="solve">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.solve--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
-    </li>
-  
 
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../rom/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Model Reduction
-  
 
-    
-  </span>
-  
-  
+        <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate"
+          data-md-color-primary="indigo" data-md-color-accent="indigo" aria-label="Switch to light mode" type="radio"
+          name="__palette" id="__palette_1">
 
-      </a>
-    </li>
-  
+        <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path
+              d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z" />
+          </svg>
+        </label>
 
-              
-            
-          </ul>
-        </nav>
-      
-    </li>
-  
 
-    
-      
-      
-  
-  
-  
-  
-    
-    
-    
-    
-      
-      
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
-        
-          
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
-        
-          
-          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Developers
-  
+      </form>
 
-    
-  </span>
-  
-  
 
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_7">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    Developers
-  
 
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../viewing_locally/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Viewing Locally
-  
+      <script>var palette = __md_get("__palette"); if (palette && palette.color) { if ("(prefers-color-scheme)" === palette.color.media) { var media = matchMedia("(prefers-color-scheme: light)"), input = document.querySelector(media.matches ? "[data-md-color-media='(prefers-color-scheme: light)']" : "[data-md-color-media='(prefers-color-scheme: dark)']"); palette.color.media = input.getAttribute("data-md-color-media"), palette.color.scheme = input.getAttribute("data-md-color-scheme"), palette.color.primary = input.getAttribute("data-md-color-primary"), palette.color.accent = input.getAttribute("data-md-color-accent") } for (var [key, value] of Object.entries(palette.color)) document.body.setAttribute("data-md-color-" + key, value) }</script>
 
-    
-  </span>
-  
-  
 
-      </a>
-    </li>
-  
 
-              
-            
-          </ul>
-        </nav>
-      
-    </li>
-  
 
-    
-  </ul>
-</nav>
-                  </div>
+
+      <label class="md-header__button md-icon" for="__search">
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path
+            d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5" />
+        </svg>
+      </label>
+      <div class="md-search" data-md-component="search" role="dialog">
+        <label class="md-search__overlay" for="__search"></label>
+        <div class="md-search__inner" role="search">
+          <form class="md-search__form" name="search">
+            <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search"
+              autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
+              data-md-component="search-query" required>
+            <label class="md-search__icon md-icon" for="__search">
+
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path
+                  d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5" />
+              </svg>
+
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z" />
+              </svg>
+            </label>
+            <nav class="md-search__options" aria-label="Search">
+
+              <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                  <path
+                    d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+                </svg>
+              </button>
+            </nav>
+
+          </form>
+          <div class="md-search__output">
+            <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+              <div class="md-search-result" data-md-component="search-result">
+                <div class="md-search-result__meta">
+                  Initializing search
                 </div>
+                <ol class="md-search-result__list" role="presentation"></ol>
               </div>
-            
-            
-              
-              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
-                <div class="md-sidebar__scrollwrap">
-                  <div class="md-sidebar__inner">
-                    
+            </div>
+          </div>
+        </div>
+      </div>
 
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#frequency-domain-solver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Frequency Domain Solver
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        FrequencyDomainSolver
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="FrequencyDomainSolver">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Examples
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Single domain solve
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compound structure with coupled method (default, most accurate)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compound structure with cascade method (faster, less accurate)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Per-domain results only (for ROM training)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Compare both methods
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver-functions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Functions
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Functions">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        __init__
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        solve
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="solve">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
+
+
+      <div class="md-header__source">
+        <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source"
+          data-md-component="source">
+          <div class="md-source__icon md-icon">
+
+            <svg xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.-->
+              <path
+                d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4" />
+            </svg>
+          </div>
+          <div class="md-source__repository">
+            Dark-Elektron/cavsim3d
+          </div>
+        </a>
+      </div>
+
     </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        plot_s_parameters
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="plot_s_parameters">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
+
+  </header>
+
+  <div class="md-container" data-md-component="container">
+
+
+
+
+
+    <nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+      <div class="md-grid">
+        <ul class="md-tabs__list">
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../.." class="md-tabs__link">
+
+
+
+
+
+              Home
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../../getting_started/" class="md-tabs__link">
+
+
+
+
+
+              Getting Started
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../../architecture/" class="md-tabs__link">
+
+
+
+
+
+              Architecture
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../../tutorials/pathway1_single_solid/" class="md-tabs__link">
+
+
+
+              Tutorials
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../../theory/" class="md-tabs__link">
+
+
+
+
+
+              Mathematical Theory
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item md-tabs__item--active">
+            <a href="../project/" class="md-tabs__link">
+
+
+
+              API Reference
+
+            </a>
+          </li>
+
+
+
+
+
+
+
+
+
+
+
+          <li class="md-tabs__item">
+            <a href="../../viewing_locally/" class="md-tabs__link">
+
+
+
+              Developers
+
+            </a>
+          </li>
+
+
+
+
+        </ul>
+      </div>
     </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        plot_z_parameters
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="plot_z_parameters">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#concatenation-solver" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Concatenation Solver
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ConcatenatedSystem
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="ConcatenatedSystem">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Coupling Formulation
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Examples
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--create-from-roms" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Create from ROMs
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Concatenate into unified structure
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Solve and visualize unified field
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem-functions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Functions
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Functions">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.__init__" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        __init__
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.couple" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        couple
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="couple">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.couple--returns" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Returns
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.solve" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        solve
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="solve">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#solvers.concatenation.ConcatenatedSystem.solve--parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameters
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-                  </div>
+
+
+
+    <main class="md-main" data-md-component="main">
+      <div class="md-main__inner md-grid">
+
+
+
+        <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+          <div class="md-sidebar__scrollwrap">
+            <div class="md-sidebar__inner">
+
+
+
+
+
+
+              <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+                <label class="md-nav__title" for="__drawer">
+                  <a href="../.." title="cavsim3d" class="md-nav__button md-logo" aria-label="cavsim3d"
+                    data-md-component="logo">
+
+
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                      <path
+                        d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54" />
+                    </svg>
+
+                  </a>
+                  cavsim3d
+                </label>
+
+                <div class="md-nav__source">
+                  <a href="https://github.com/Dark-Elektron/cavsim3d" title="Go to repository" class="md-source"
+                    data-md-component="source">
+                    <div class="md-source__icon md-icon">
+
+                      <svg xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.-->
+                        <path
+                          d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4" />
+                      </svg>
+                    </div>
+                    <div class="md-source__repository">
+                      Dark-Elektron/cavsim3d
+                    </div>
+                  </a>
                 </div>
-              </div>
-            
-          
-          
-            <div class="md-content" data-md-component="content">
-              
-              <article class="md-content__inner md-typeset">
-                
-                  
 
-
-  
-  
-
-
-<h1 id="solvers">Solvers<a class="headerlink" href="#solvers" title="Permanent link">&para;</a></h1>
-<h2 id="frequency-domain-solver">Frequency Domain Solver<a class="headerlink" href="#frequency-domain-solver" title="Permanent link">&para;</a></h2>
-
-
-<div class="doc doc-object doc-class">
+                <ul class="md-nav__list" data-md-scrollfix>
 
 
 
-<h2 id="solvers.frequency_domain.FrequencyDomainSolver" class="doc doc-heading">
-            <code>solvers.frequency_domain.FrequencyDomainSolver</code>
-
-
-<a href="#solvers.frequency_domain.FrequencyDomainSolver" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents first">
-            <p class="doc doc-class-bases">
-              Bases: <code><span title="solvers.base.BaseEMSolver">BaseEMSolver</span></code>, <code><span title="solvers.eigen_mixin.FDSEigenMixin">FDSEigenMixin</span></code></p>
 
 
 
-        <p>Frequency-domain solver for electromagnetic problems.</p>
-<p>text
-Handles both single-domain and compound (multi-domain) structures.
-For compound structures, two methods are available for computing
-global S/Z-parameters:</p>
-<ol>
-<li>
-<p><strong>Coupled</strong> (default): Solves the full system with all domains coupled.
-Most accurate, captures all inter-domain reflections and resonances.</p>
-</li>
-<li>
-<p><strong>Cascade</strong>: Solves each domain independently, then cascades S-matrices.
-Faster but assumes negligible reflections at internal ports.</p>
-</li>
-</ol>
-<p>Conventions:
-- Time convention: exp(+jωt)
-- Z-parameters: V_n = Σ_m Z_nm * I_m
-- Modes normalized to ∫|E_t|² dS = 1</p>
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver--parameters">Parameters<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--parameters" title="Permanent link">&para;</a></h4>
-<p>geometry : BaseGeometry
-    Geometry object with mesh
-order : int
-    Polynomial order for finite elements
-bc : str, optional
-    Boundary condition specification. If None, uses geometry.bc
-use_wave_impedance : bool
-    Whether to use frequency-dependent wave impedance for S-parameters</p>
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver--examples">Examples<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--examples" title="Permanent link">&para;</a></h4>
-<blockquote>
-<blockquote>
-<blockquote>
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve">Single domain solve<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve" title="Permanent link">&para;</a></h3>
-<p>fds = FrequencyDomainSolver(geometry, order=3)
-fds.assemble_matrices(nportmodes=1)
-fds.solve(1, 10, 100)
-fds.plot_s_parameters()</p>
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate">Compound structure with coupled method (default, most accurate)<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate" title="Permanent link">&para;</a></h3>
-<p>fds = FrequencyDomainSolver(compound_geometry, order=3)
-fds.solve(1, 10, 100, global_method='coupled')</p>
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate">Compound structure with cascade method (faster, less accurate)<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate" title="Permanent link">&para;</a></h3>
-<p>fds.solve(1, 10, 100, global_method='cascade')</p>
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training">Per-domain results only (for ROM training)<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training" title="Permanent link">&para;</a></h3>
-<p>fds.solve(1, 10, 100, per_domain=True, global_method=None)</p>
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods">Compare both methods<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods" title="Permanent link">&para;</a></h3>
-<p>comparison = fds.compare_methods(1, 10, 100)</p>
-</blockquote>
-</blockquote>
-</blockquote>
+
+                  <li class="md-nav__item">
+                    <a href="../.." class="md-nav__link">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Home
+
+
+
+                      </span>
+
+
+
+                    </a>
+                  </li>
 
 
 
@@ -1967,9 +484,1611 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 
 
 
-              <details class="mkdocstrings-source">
-                <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
-                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-31">  31</a></span>
+
+                  <li class="md-nav__item">
+                    <a href="../../getting_started/" class="md-nav__link">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Getting Started
+
+
+
+                      </span>
+
+
+
+                    </a>
+                  </li>
+
+
+
+
+
+
+
+
+
+                  <li class="md-nav__item">
+                    <a href="../../architecture/" class="md-nav__link">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Architecture
+
+
+
+                      </span>
+
+
+
+                    </a>
+                  </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                  <li class="md-nav__item md-nav__item--nested">
+
+
+
+
+
+                    <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4">
+
+
+                    <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Tutorials
+
+
+
+                      </span>
+
+
+
+                      <span class="md-nav__icon md-icon"></span>
+                    </label>
+
+                    <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+                      <label class="md-nav__title" for="__nav_4">
+                        <span class="md-nav__icon md-icon"></span>
+
+
+                        Tutorials
+
+
+                      </label>
+                      <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/pathway1_single_solid/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Pathway 1: Single Solid Analysis
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/pathway2_global_assembly/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Pathway 2: Multi-Solid Global Assembly
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/pathway3_fom_concatenation/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Pathway 3: FOM Concatenation
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/pathway4_rom_concatenation/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Pathway 4: ROM Concatenation
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/importing_cad/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Importing CAD Files
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../tutorials/persistence/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Persistence
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+                      </ul>
+                    </nav>
+
+                  </li>
+
+
+
+
+
+
+
+
+
+                  <li class="md-nav__item">
+                    <a href="../../theory/" class="md-nav__link">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Mathematical Theory
+
+
+
+                      </span>
+
+
+
+                    </a>
+                  </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                  <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+
+
+
+                    <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+
+
+                    <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        API Reference
+
+
+
+                      </span>
+
+
+
+                      <span class="md-nav__icon md-icon"></span>
+                    </label>
+
+                    <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+                      <label class="md-nav__title" for="__nav_6">
+                        <span class="md-nav__icon md-icon"></span>
+
+
+                        API Reference
+
+
+                      </label>
+                      <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../project/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Project Management
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../geometry/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Geometry & Assembly
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item md-nav__item--active">
+
+                          <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+
+
+
+
+
+                          <label class="md-nav__link md-nav__link--active" for="__toc">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Solvers
+
+
+
+                            </span>
+
+
+
+                            <span class="md-nav__icon md-icon"></span>
+                          </label>
+
+                          <a href="./" class="md-nav__link md-nav__link--active">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Solvers
+
+
+
+                            </span>
+
+
+
+                          </a>
+
+
+
+                          <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+
+
+
+
+
+
+                            <label class="md-nav__title" for="__toc">
+                              <span class="md-nav__icon md-icon"></span>
+                              Table of contents
+                            </label>
+                            <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+                              <li class="md-nav__item">
+                                <a href="#frequency-domain-solver" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    Frequency Domain Solver
+
+                                  </span>
+                                </a>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.frequency_domain.FrequencyDomainSolver" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    FrequencyDomainSolver
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="FrequencyDomainSolver">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--examples"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Examples
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Single domain solve
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Compound structure with coupled method (default, most accurate)
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Compound structure with cascade method (faster, less accurate)
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Per-domain results only (for ROM training)
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Compare both methods
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver-functions"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Functions
+
+                                        </span>
+                                      </a>
+
+                                      <nav class="md-nav" aria-label="Functions">
+                                        <ul class="md-nav__list">
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                __init__
+
+                                              </span>
+                                            </a>
+
+                                          </li>
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                solve
+
+                                              </span>
+                                            </a>
+
+                                            <nav class="md-nav" aria-label="solve">
+                                              <ul class="md-nav__list">
+
+                                                <li class="md-nav__item">
+                                                  <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters"
+                                                    class="md-nav__link">
+                                                    <span class="md-ellipsis">
+
+                                                      Parameters
+
+                                                    </span>
+                                                  </a>
+
+                                                </li>
+
+                                              </ul>
+                                            </nav>
+
+                                          </li>
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                plot_s_parameters
+
+                                              </span>
+                                            </a>
+
+                                            <nav class="md-nav" aria-label="plot_s_parameters">
+                                              <ul class="md-nav__list">
+
+                                                <li class="md-nav__item">
+                                                  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters"
+                                                    class="md-nav__link">
+                                                    <span class="md-ellipsis">
+
+                                                      Parameters
+
+                                                    </span>
+                                                  </a>
+
+                                                </li>
+
+                                              </ul>
+                                            </nav>
+
+                                          </li>
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                plot_z_parameters
+
+                                              </span>
+                                            </a>
+
+                                            <nav class="md-nav" aria-label="plot_z_parameters">
+                                              <ul class="md-nav__list">
+
+                                                <li class="md-nav__item">
+                                                  <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters"
+                                                    class="md-nav__link">
+                                                    <span class="md-ellipsis">
+
+                                                      Parameters
+
+                                                    </span>
+                                                  </a>
+
+                                                </li>
+
+                                              </ul>
+                                            </nav>
+
+                                          </li>
+
+                                        </ul>
+                                      </nav>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#concatenation-solver" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    Concatenation Solver
+
+                                  </span>
+                                </a>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.concatenation.ConcatenatedSystem" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    ConcatenatedSystem
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="ConcatenatedSystem">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Coupling Formulation
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--examples"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Examples
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--create-from-roms"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Create from ROMs
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Concatenate into unified structure
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Solve and visualize unified field
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem-functions"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Functions
+
+                                        </span>
+                                      </a>
+
+                                      <nav class="md-nav" aria-label="Functions">
+                                        <ul class="md-nav__list">
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.concatenation.ConcatenatedSystem.__init__"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                __init__
+
+                                              </span>
+                                            </a>
+
+                                          </li>
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.concatenation.ConcatenatedSystem.couple"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                couple
+
+                                              </span>
+                                            </a>
+
+                                            <nav class="md-nav" aria-label="couple">
+                                              <ul class="md-nav__list">
+
+                                                <li class="md-nav__item">
+                                                  <a href="#solvers.concatenation.ConcatenatedSystem.couple--returns"
+                                                    class="md-nav__link">
+                                                    <span class="md-ellipsis">
+
+                                                      Returns
+
+                                                    </span>
+                                                  </a>
+
+                                                </li>
+
+                                              </ul>
+                                            </nav>
+
+                                          </li>
+
+                                          <li class="md-nav__item">
+                                            <a href="#solvers.concatenation.ConcatenatedSystem.solve"
+                                              class="md-nav__link">
+                                              <span class="md-ellipsis">
+
+                                                solve
+
+                                              </span>
+                                            </a>
+
+                                            <nav class="md-nav" aria-label="solve">
+                                              <ul class="md-nav__list">
+
+                                                <li class="md-nav__item">
+                                                  <a href="#solvers.concatenation.ConcatenatedSystem.solve--parameters"
+                                                    class="md-nav__link">
+                                                    <span class="md-ellipsis">
+
+                                                      Parameters
+
+                                                    </span>
+                                                  </a>
+
+                                                </li>
+
+                                              </ul>
+                                            </nav>
+
+                                          </li>
+
+                                        </ul>
+                                      </nav>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                            </ul>
+
+                          </nav>
+
+                        </li>
+
+
+
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../rom/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Model Reduction
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+                      </ul>
+                    </nav>
+
+                  </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                  <li class="md-nav__item md-nav__item--nested">
+
+
+
+
+
+                    <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7">
+
+
+                    <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+
+
+
+                      <span class="md-ellipsis">
+
+
+                        Developers
+
+
+
+                      </span>
+
+
+
+                      <span class="md-nav__icon md-icon"></span>
+                    </label>
+
+                    <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+                      <label class="md-nav__title" for="__nav_7">
+                        <span class="md-nav__icon md-icon"></span>
+
+
+                        Developers
+
+
+                      </label>
+                      <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+                        <li class="md-nav__item">
+                          <a href="../../viewing_locally/" class="md-nav__link">
+
+
+
+                            <span class="md-ellipsis">
+
+
+                              Viewing Locally
+
+
+
+                            </span>
+
+
+
+                          </a>
+                        </li>
+
+
+
+
+                      </ul>
+                    </nav>
+
+                  </li>
+
+
+
+                </ul>
+              </nav>
+            </div>
+          </div>
+        </div>
+
+
+
+        <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+          <div class="md-sidebar__scrollwrap">
+            <div class="md-sidebar__inner">
+
+
+              <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+
+
+
+
+
+
+                <label class="md-nav__title" for="__toc">
+                  <span class="md-nav__icon md-icon"></span>
+                  Table of contents
+                </label>
+                <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+                  <li class="md-nav__item">
+                    <a href="#frequency-domain-solver" class="md-nav__link">
+                      <span class="md-ellipsis">
+
+                        Frequency Domain Solver
+
+                      </span>
+                    </a>
+
+                  </li>
+
+                  <li class="md-nav__item">
+                    <a href="#solvers.frequency_domain.FrequencyDomainSolver" class="md-nav__link">
+                      <span class="md-ellipsis">
+
+                        FrequencyDomainSolver
+
+                      </span>
+                    </a>
+
+                    <nav class="md-nav" aria-label="FrequencyDomainSolver">
+                      <ul class="md-nav__list">
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--parameters" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Parameters
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--examples" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Examples
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Single domain solve
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Compound structure with coupled method (default, most accurate)
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Compound structure with cascade method (faster, less accurate)
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Per-domain results only (for ROM training)
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Compare both methods
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.frequency_domain.FrequencyDomainSolver-functions" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Functions
+
+                            </span>
+                          </a>
+
+                          <nav class="md-nav" aria-label="Functions">
+                            <ul class="md-nav__list">
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    __init__
+
+                                  </span>
+                                </a>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    solve
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="solve">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters"
+                                  class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    plot_s_parameters
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="plot_s_parameters">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters"
+                                  class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    plot_z_parameters
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="plot_z_parameters">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                            </ul>
+                          </nav>
+
+                        </li>
+
+                      </ul>
+                    </nav>
+
+                  </li>
+
+                  <li class="md-nav__item">
+                    <a href="#concatenation-solver" class="md-nav__link">
+                      <span class="md-ellipsis">
+
+                        Concatenation Solver
+
+                      </span>
+                    </a>
+
+                  </li>
+
+                  <li class="md-nav__item">
+                    <a href="#solvers.concatenation.ConcatenatedSystem" class="md-nav__link">
+                      <span class="md-ellipsis">
+
+                        ConcatenatedSystem
+
+                      </span>
+                    </a>
+
+                    <nav class="md-nav" aria-label="ConcatenatedSystem">
+                      <ul class="md-nav__list">
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Coupling Formulation
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--parameters" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Parameters
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--examples" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Examples
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--create-from-roms" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Create from ROMs
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Concatenate into unified structure
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field"
+                            class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Solve and visualize unified field
+
+                            </span>
+                          </a>
+
+                        </li>
+
+                        <li class="md-nav__item">
+                          <a href="#solvers.concatenation.ConcatenatedSystem-functions" class="md-nav__link">
+                            <span class="md-ellipsis">
+
+                              Functions
+
+                            </span>
+                          </a>
+
+                          <nav class="md-nav" aria-label="Functions">
+                            <ul class="md-nav__list">
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.concatenation.ConcatenatedSystem.__init__" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    __init__
+
+                                  </span>
+                                </a>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.concatenation.ConcatenatedSystem.couple" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    couple
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="couple">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem.couple--returns"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Returns
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                              <li class="md-nav__item">
+                                <a href="#solvers.concatenation.ConcatenatedSystem.solve" class="md-nav__link">
+                                  <span class="md-ellipsis">
+
+                                    solve
+
+                                  </span>
+                                </a>
+
+                                <nav class="md-nav" aria-label="solve">
+                                  <ul class="md-nav__list">
+
+                                    <li class="md-nav__item">
+                                      <a href="#solvers.concatenation.ConcatenatedSystem.solve--parameters"
+                                        class="md-nav__link">
+                                        <span class="md-ellipsis">
+
+                                          Parameters
+
+                                        </span>
+                                      </a>
+
+                                    </li>
+
+                                  </ul>
+                                </nav>
+
+                              </li>
+
+                            </ul>
+                          </nav>
+
+                        </li>
+
+                      </ul>
+                    </nav>
+
+                  </li>
+
+                </ul>
+
+              </nav>
+            </div>
+          </div>
+        </div>
+
+
+
+        <div class="md-content" data-md-component="content">
+
+          <article class="md-content__inner md-typeset">
+
+
+
+
+
+
+
+
+            <h1 id="solvers">Solvers<a class="headerlink" href="#solvers" title="Permanent link">&para;</a></h1>
+            <h2 id="frequency-domain-solver">Frequency Domain Solver<a class="headerlink"
+                href="#frequency-domain-solver" title="Permanent link">&para;</a></h2>
+
+
+            <div class="doc doc-object doc-class">
+
+
+
+              <h2 id="solvers.frequency_domain.FrequencyDomainSolver" class="doc doc-heading">
+                <code>solvers.frequency_domain.FrequencyDomainSolver</code>
+
+
+                <a href="#solvers.frequency_domain.FrequencyDomainSolver" class="headerlink"
+                  title="Permanent link">&para;</a>
+              </h2>
+
+
+              <div class="doc doc-contents first">
+                <p class="doc doc-class-bases">
+                  Bases: <code><span title="solvers.base.BaseEMSolver">BaseEMSolver</span></code>,
+                  <code><span title="solvers.eigen_mixin.FDSEigenMixin">FDSEigenMixin</span></code></p>
+
+
+
+                <p>Frequency-domain solver for electromagnetic problems.</p>
+                <p>text
+                  Handles both single-domain and compound (multi-domain) structures.
+                  For compound structures, two methods are available for computing
+                  global S/Z-parameters:</p>
+                <ol>
+                  <li>
+                    <p><strong>Coupled</strong> (default): Solves the full system with all domains coupled.
+                      Most accurate, captures all inter-domain reflections and resonances.</p>
+                  </li>
+                  <li>
+                    <p><strong>Cascade</strong>: Solves each domain independently, then cascades S-matrices.
+                      Faster but assumes negligible reflections at internal ports.</p>
+                  </li>
+                </ol>
+                <p>Conventions:
+                  - Time convention: exp(+jωt)
+                  - Z-parameters: V_n = Σ_m Z_nm * I_m
+                  - Modes normalized to ∫|E_t|² dS = 1</p>
+                <h4 id="solvers.frequency_domain.FrequencyDomainSolver--parameters">Parameters<a class="headerlink"
+                    href="#solvers.frequency_domain.FrequencyDomainSolver--parameters" title="Permanent link">&para;</a>
+                </h4>
+                <p>geometry : BaseGeometry
+                  Geometry object with mesh
+                  order : int
+                  Polynomial order for finite elements
+                  bc : str, optional
+                  Boundary condition specification. If None, uses geometry.bc
+                  use_wave_impedance : bool
+                  Whether to use frequency-dependent wave impedance for S-parameters</p>
+                <h4 id="solvers.frequency_domain.FrequencyDomainSolver--examples">Examples<a class="headerlink"
+                    href="#solvers.frequency_domain.FrequencyDomainSolver--examples" title="Permanent link">&para;</a>
+                </h4>
+                <blockquote>
+                  <blockquote>
+                    <blockquote>
+                      <h3 id="solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve">Single domain solve<a
+                          class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver--single-domain-solve"
+                          title="Permanent link">&para;</a></h3>
+                      <p>fds = FrequencyDomainSolver(geometry, order=3)
+                        fds.assemble_matrices(nportmodes=1)
+                        fds.solve(1, 10, 100)
+                        fds.plot_s_parameters()</p>
+                      <h3
+                        id="solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate">
+                        Compound structure with coupled method (default, most accurate)<a class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-coupled-method-default-most-accurate"
+                          title="Permanent link">&para;</a></h3>
+                      <p>fds = FrequencyDomainSolver(compound_geometry, order=3)
+                        fds.solve(1, 10, 100, global_method='coupled')</p>
+                      <h3
+                        id="solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate">
+                        Compound structure with cascade method (faster, less accurate)<a class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver--compound-structure-with-cascade-method-faster-less-accurate"
+                          title="Permanent link">&para;</a></h3>
+                      <p>fds.solve(1, 10, 100, global_method='cascade')</p>
+                      <h3 id="solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training">
+                        Per-domain results only (for ROM training)<a class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver--per-domain-results-only-for-rom-training"
+                          title="Permanent link">&para;</a></h3>
+                      <p>fds.solve(1, 10, 100, per_domain=True, global_method=None)</p>
+                      <h3 id="solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods">Compare both
+                        methods<a class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver--compare-both-methods"
+                          title="Permanent link">&para;</a></h3>
+                      <p>comparison = fds.compare_methods(1, 10, 100)</p>
+                    </blockquote>
+                  </blockquote>
+                </blockquote>
+
+
+
+
+
+
+
+
+                <details class="mkdocstrings-source">
+                  <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
+                  <div class="language-python highlight">
+                    <table class="highlighttable">
+                      <tr>
+                        <td class="linenos">
+                          <div class="linenodiv">
+                            <pre><span></span><span class="normal"><a href="#__codelineno-0-31">  31</a></span>
 <span class="normal"><a href="#__codelineno-0-32">  32</a></span>
 <span class="normal"><a href="#__codelineno-0-33">  33</a></span>
 <span class="normal"><a href="#__codelineno-0-34">  34</a></span>
@@ -6142,7 +6261,12 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 <span class="normal"><a href="#__codelineno-0-4201">4201</a></span>
 <span class="normal"><a href="#__codelineno-0-4202">4202</a></span>
 <span class="normal"><a href="#__codelineno-0-4203">4203</a></span>
-<span class="normal"><a href="#__codelineno-0-4204">4204</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31"></a><span class="k">class</span><span class="w"> </span><span class="nc">FrequencyDomainSolver</span><span class="p">(</span><span class="n">BaseEMSolver</span><span class="p">,</span> <span class="n">FDSEigenMixin</span><span class="p">):</span>
+<span class="normal"><a href="#__codelineno-0-4204">4204</a></span></pre>
+                          </div>
+                        </td>
+                        <td class="code">
+                          <div>
+                            <pre><span></span><code><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31"></a><span class="k">class</span><span class="w"> </span><span class="nc">FrequencyDomainSolver</span><span class="p">(</span><span class="n">BaseEMSolver</span><span class="p">,</span> <span class="n">FDSEigenMixin</span><span class="p">):</span>
 </span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 </span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33"></a><span class="sd">    Frequency-domain solver for electromagnetic problems.</span>
 </span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34"></a>
@@ -10316,12 +10440,17 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 </span><span id="__span-0-4202"><a id="__codelineno-0-4202" name="__codelineno-0-4202"></a>                        <span class="sa">f</span><span class="s2">&quot;method=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_global_method</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span><span id="__span-0-4203"><a id="__codelineno-0-4203" name="__codelineno-0-4203"></a>
 </span><span id="__span-0-4204"><a id="__codelineno-0-4204" name="__codelineno-0-4204"></a>        <span class="k">return</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">status</span><span class="p">)</span>
-</span></code></pre></div></td></tr></table></div>
-              </details>
+</span></code></pre>
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+                </details>
 
 
 
-<div class="doc doc-children">
+                <div class="doc doc-children">
 
 
 
@@ -10330,23 +10459,33 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 
 
 
-<h3 id="solvers.frequency_domain.FrequencyDomainSolver-functions">Functions<a href="#solvers.frequency_domain.FrequencyDomainSolver-functions" class="headerlink" title="Permanent link">&para;</a></h3>
+                  <h3 id="solvers.frequency_domain.FrequencyDomainSolver-functions">Functions<a
+                      href="#solvers.frequency_domain.FrequencyDomainSolver-functions" class="headerlink"
+                      title="Permanent link">&para;</a></h3>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver.__init__" class="doc doc-heading">
-            <code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">geometry</span><span class="p">,</span> <span class="n">order</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">bc</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">use_wave_impedance</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></code>
-
-<a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__" class="headerlink" title="Permanent link">&para;</a></h4>
+                  <div class="doc doc-object doc-function">
 
 
-    <div class="doc doc-contents ">
+                    <h4 id="solvers.frequency_domain.FrequencyDomainSolver.__init__" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">geometry</span><span class="p">,</span> <span class="n">order</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">bc</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">use_wave_impedance</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></code>
+
+                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.__init__" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-93"> 93</a></span>
+                    <div class="doc doc-contents ">
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-93"> 93</a></span>
 <span class="normal"><a href="#__codelineno-0-94"> 94</a></span>
 <span class="normal"><a href="#__codelineno-0-95"> 95</a></span>
 <span class="normal"><a href="#__codelineno-0-96"> 96</a></span>
@@ -10428,7 +10567,12 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 <span class="normal"><a href="#__codelineno-0-172">172</a></span>
 <span class="normal"><a href="#__codelineno-0-173">173</a></span>
 <span class="normal"><a href="#__codelineno-0-174">174</a></span>
-<span class="normal"><a href="#__codelineno-0-175">175</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-93"><a id="__codelineno-0-93" name="__codelineno-0-93"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-175">175</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-93"><a id="__codelineno-0-93" name="__codelineno-0-93"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
 </span><span id="__span-0-94"><a id="__codelineno-0-94" name="__codelineno-0-94"></a>    <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-95"><a id="__codelineno-0-95" name="__codelineno-0-95"></a>    <span class="n">geometry</span><span class="p">,</span>
 </span><span id="__span-0-96"><a id="__codelineno-0-96" name="__codelineno-0-96"></a>    <span class="n">order</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
@@ -10511,42 +10655,57 @@ fds.solve(1, 10, 100, global_method='coupled')</p>
 </span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>
 </span><span id="__span-0-174"><a id="__codelineno-0-174" name="__codelineno-0-174"></a>    <span class="c1"># Validate boundary conditions</span>
 </span><span id="__span-0-175"><a id="__codelineno-0-175" name="__codelineno-0-175"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_validate_boundary_conditions</span><span class="p">()</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
+                  </div>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver.solve" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">solve</span><span class="p">(</span><span class="n">fmin</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fmax</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">nsamples</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
-
-<a href="#solvers.frequency_domain.FrequencyDomainSolver.solve" class="headerlink" title="Permanent link">&para;</a></h4>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Solve frequency sweep.</p>
-<p>Supports passing arguments directly or via a 'config' dictionary.
-Individual keyword arguments override the config dictionary.</p>
-<h6 id="solvers.frequency_domain.FrequencyDomainSolver.solve--parameters">Parameters<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters" title="Permanent link">&para;</a></h6>
-<p>fmin : float, optional
-    Minimum frequency in GHz
-fmax : float, optional
-    Maximum frequency in GHz
-nsamples : int, optional
-    Number of frequency samples
-config : dict, optional
-    Dictionary containing solve parameters
-**kwargs :
-    Individual solve parameters (order, nportmodes, store_snapshots, etc.)</p>
+                  <div class="doc doc-object doc-function">
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-773">773</a></span>
+                    <h4 id="solvers.frequency_domain.FrequencyDomainSolver.solve" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="n">solve</span><span class="p">(</span><span class="n">fmin</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fmax</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">nsamples</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.solve" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
+
+
+                    <div class="doc doc-contents ">
+
+                      <p>Solve frequency sweep.</p>
+                      <p>Supports passing arguments directly or via a 'config' dictionary.
+                        Individual keyword arguments override the config dictionary.</p>
+                      <h6 id="solvers.frequency_domain.FrequencyDomainSolver.solve--parameters">Parameters<a
+                          class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver.solve--parameters"
+                          title="Permanent link">&para;</a></h6>
+                      <p>fmin : float, optional
+                        Minimum frequency in GHz
+                        fmax : float, optional
+                        Maximum frequency in GHz
+                        nsamples : int, optional
+                        Number of frequency samples
+                        config : dict, optional
+                        Dictionary containing solve parameters
+                        **kwargs :
+                        Individual solve parameters (order, nportmodes, store_snapshots, etc.)</p>
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-773">773</a></span>
 <span class="normal"><a href="#__codelineno-0-774">774</a></span>
 <span class="normal"><a href="#__codelineno-0-775">775</a></span>
 <span class="normal"><a href="#__codelineno-0-776">776</a></span>
@@ -10757,7 +10916,12 @@ config : dict, optional
 <span class="normal"><a href="#__codelineno-0-981">981</a></span>
 <span class="normal"><a href="#__codelineno-0-982">982</a></span>
 <span class="normal"><a href="#__codelineno-0-983">983</a></span>
-<span class="normal"><a href="#__codelineno-0-984">984</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-773"><a id="__codelineno-0-773" name="__codelineno-0-773"></a><span class="k">def</span><span class="w"> </span><span class="nf">solve</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-984">984</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-773"><a id="__codelineno-0-773" name="__codelineno-0-773"></a><span class="k">def</span><span class="w"> </span><span class="nf">solve</span><span class="p">(</span>
 </span><span id="__span-0-774"><a id="__codelineno-0-774" name="__codelineno-0-774"></a>        <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-775"><a id="__codelineno-0-775" name="__codelineno-0-775"></a>        <span class="n">fmin</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-776"><a id="__codelineno-0-776" name="__codelineno-0-776"></a>        <span class="n">fmax</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -10969,48 +11133,64 @@ config : dict, optional
 </span><span id="__span-0-982"><a id="__codelineno-0-982" name="__codelineno-0-982"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
 </span><span id="__span-0-983"><a id="__codelineno-0-983" name="__codelineno-0-983"></a>
 </span><span id="__span-0-984"><a id="__codelineno-0-984" name="__codelineno-0-984"></a>    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_results_dict</span><span class="p">(</span><span class="n">compute_s_params</span><span class="p">,</span> <span class="n">per_domain</span><span class="p">,</span> <span class="n">global_method</span><span class="p">)</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
+                  </div>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">plot_s_parameters</span><span class="p">(</span><span class="n">db</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">show_phase</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s1">&#39;global&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
-
-<a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="headerlink" title="Permanent link">&para;</a></h4>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Plot S-parameters.</p>
-<h6 id="solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters">Parameters<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters" title="Permanent link">&para;</a></h6>
-<p>db : bool
-    Plot magnitude in dB
-show_phase : bool
-    Include phase plot
-params : list, optional
-    Specific parameters to plot, e.g., ['S11', 'S21'].
-    If None, plots all.
-figsize : tuple
-    Figure size
-title : str, optional
-    Plot title
-source : {'global', 'coupled', 'cascade'}
-    Which results to plot:
-    - 'global': Current global results
-    - 'coupled': Cached coupled results
-    - 'cascade': Cached cascade results
-**kwargs
-    Additional arguments passed to plot functions</p>
+                  <div class="doc doc-object doc-function">
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-3643">3643</a></span>
+                    <h4 id="solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="n">plot_s_parameters</span><span class="p">(</span><span class="n">db</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">show_phase</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s1">&#39;global&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
+
+
+                    <div class="doc doc-contents ">
+
+                      <p>Plot S-parameters.</p>
+                      <h6 id="solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters">Parameters<a
+                          class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver.plot_s_parameters--parameters"
+                          title="Permanent link">&para;</a></h6>
+                      <p>db : bool
+                        Plot magnitude in dB
+                        show_phase : bool
+                        Include phase plot
+                        params : list, optional
+                        Specific parameters to plot, e.g., ['S11', 'S21'].
+                        If None, plots all.
+                        figsize : tuple
+                        Figure size
+                        title : str, optional
+                        Plot title
+                        source : {'global', 'coupled', 'cascade'}
+                        Which results to plot:
+                        - 'global': Current global results
+                        - 'coupled': Cached coupled results
+                        - 'cascade': Cached cascade results
+                        **kwargs
+                        Additional arguments passed to plot functions</p>
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-3643">3643</a></span>
 <span class="normal"><a href="#__codelineno-0-3644">3644</a></span>
 <span class="normal"><a href="#__codelineno-0-3645">3645</a></span>
 <span class="normal"><a href="#__codelineno-0-3646">3646</a></span>
@@ -11115,7 +11295,12 @@ source : {'global', 'coupled', 'cascade'}
 <span class="normal"><a href="#__codelineno-0-3745">3745</a></span>
 <span class="normal"><a href="#__codelineno-0-3746">3746</a></span>
 <span class="normal"><a href="#__codelineno-0-3747">3747</a></span>
-<span class="normal"><a href="#__codelineno-0-3748">3748</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-3643"><a id="__codelineno-0-3643" name="__codelineno-0-3643"></a><span class="k">def</span><span class="w"> </span><span class="nf">plot_s_parameters</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-3748">3748</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-3643"><a id="__codelineno-0-3643" name="__codelineno-0-3643"></a><span class="k">def</span><span class="w"> </span><span class="nf">plot_s_parameters</span><span class="p">(</span>
 </span><span id="__span-0-3644"><a id="__codelineno-0-3644" name="__codelineno-0-3644"></a>    <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-3645"><a id="__codelineno-0-3645" name="__codelineno-0-3645"></a>    <span class="n">db</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
 </span><span id="__span-0-3646"><a id="__codelineno-0-3646" name="__codelineno-0-3646"></a>    <span class="n">show_phase</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
@@ -11221,43 +11406,59 @@ source : {'global', 'coupled', 'cascade'}
 </span><span id="__span-0-3746"><a id="__codelineno-0-3746" name="__codelineno-0-3746"></a>
 </span><span id="__span-0-3747"><a id="__codelineno-0-3747" name="__codelineno-0-3747"></a>    <span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
 </span><span id="__span-0-3748"><a id="__codelineno-0-3748" name="__codelineno-0-3748"></a>    <span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
+                  </div>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">plot_z_parameters</span><span class="p">(</span><span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">show_imag</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s1">&#39;global&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
-
-<a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="headerlink" title="Permanent link">&para;</a></h4>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Plot Z-parameters.</p>
-<h6 id="solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters">Parameters<a class="headerlink" href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters" title="Permanent link">&para;</a></h6>
-<p>params : list, optional
-    Specific parameters to plot, e.g., ['Z11', 'Z21'].
-    If None, plots all.
-show_imag : bool
-    Plot imaginary part (reactance)
-figsize : tuple
-    Figure size
-title : str, optional
-    Plot title
-source : {'global', 'coupled', 'cascade'}
-    Which results to plot
-**kwargs
-    Additional arguments passed to plot functions</p>
+                  <div class="doc doc-object doc-function">
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-3750">3750</a></span>
+                    <h4 id="solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="n">plot_z_parameters</span><span class="p">(</span><span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">show_imag</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">6</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="s1">&#39;global&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+                      <a href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
+
+
+                    <div class="doc doc-contents ">
+
+                      <p>Plot Z-parameters.</p>
+                      <h6 id="solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters">Parameters<a
+                          class="headerlink"
+                          href="#solvers.frequency_domain.FrequencyDomainSolver.plot_z_parameters--parameters"
+                          title="Permanent link">&para;</a></h6>
+                      <p>params : list, optional
+                        Specific parameters to plot, e.g., ['Z11', 'Z21'].
+                        If None, plots all.
+                        show_imag : bool
+                        Plot imaginary part (reactance)
+                        figsize : tuple
+                        Figure size
+                        title : str, optional
+                        Plot title
+                        source : {'global', 'coupled', 'cascade'}
+                        Which results to plot
+                        **kwargs
+                        Additional arguments passed to plot functions</p>
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\frequency_domain.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-3750">3750</a></span>
 <span class="normal"><a href="#__codelineno-0-3751">3751</a></span>
 <span class="normal"><a href="#__codelineno-0-3752">3752</a></span>
 <span class="normal"><a href="#__codelineno-0-3753">3753</a></span>
@@ -11350,7 +11551,12 @@ source : {'global', 'coupled', 'cascade'}
 <span class="normal"><a href="#__codelineno-0-3840">3840</a></span>
 <span class="normal"><a href="#__codelineno-0-3841">3841</a></span>
 <span class="normal"><a href="#__codelineno-0-3842">3842</a></span>
-<span class="normal"><a href="#__codelineno-0-3843">3843</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-3750"><a id="__codelineno-0-3750" name="__codelineno-0-3750"></a><span class="k">def</span><span class="w"> </span><span class="nf">plot_z_parameters</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-3843">3843</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-3750"><a id="__codelineno-0-3750" name="__codelineno-0-3750"></a><span class="k">def</span><span class="w"> </span><span class="nf">plot_z_parameters</span><span class="p">(</span>
 </span><span id="__span-0-3751"><a id="__codelineno-0-3751" name="__codelineno-0-3751"></a>    <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-3752"><a id="__codelineno-0-3752" name="__codelineno-0-3752"></a>    <span class="n">params</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-3753"><a id="__codelineno-0-3753" name="__codelineno-0-3753"></a>    <span class="n">show_imag</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
@@ -11444,102 +11650,130 @@ source : {'global', 'coupled', 'cascade'}
 </span><span id="__span-0-3841"><a id="__codelineno-0-3841" name="__codelineno-0-3841"></a>
 </span><span id="__span-0-3842"><a id="__codelineno-0-3842" name="__codelineno-0-3842"></a>    <span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
 </span><span id="__span-0-3843"><a id="__codelineno-0-3843" name="__codelineno-0-3843"></a>    <span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div><h2 id="concatenation-solver">Concatenation Solver<a class="headerlink" href="#concatenation-solver" title="Permanent link">&para;</a></h2>
-
-
-<div class="doc doc-object doc-class">
+                  </div>
 
 
 
-<h2 id="solvers.concatenation.ConcatenatedSystem" class="doc doc-heading">
-            <code>solvers.concatenation.ConcatenatedSystem</code>
+                </div>
+
+              </div>
+
+            </div>
+            <h2 id="concatenation-solver">Concatenation Solver<a class="headerlink" href="#concatenation-solver"
+                title="Permanent link">&para;</a></h2>
 
 
-<a href="#solvers.concatenation.ConcatenatedSystem" class="headerlink" title="Permanent link">&para;</a></h2>
-
-
-    <div class="doc doc-contents first">
-            <p class="doc doc-class-bases">
-              Bases: <code><span title="solvers.base.BaseEMSolver">BaseEMSolver</span></code>, <code><span title="solvers.eigen_mixin.ConcatEigenMixin">ConcatEigenMixin</span></code>, <code><span title="utils.plot_mixin.PlotMixin">PlotMixin</span></code></p>
-
-
-
-        <p>Unified structure formed by coupling multiple reduced-order models.</p>
-<p>This class represents the concatenation of multiple ROMs as a SINGLE
-structure. After coupling, the system has only external ports - internal
-connections are eliminated via Kirchhoff constraints.</p>
-<p>Field reconstruction produces fields over the ENTIRE unified mesh,
-not individual sub-structures.</p>
-<h4 id="solvers.concatenation.ConcatenatedSystem--coupling-formulation">Coupling Formulation<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation" title="Permanent link">&para;</a></h4>
-<p>Each ReducedStructure has:
-    (A - ω² I) x = ω B u
-    Z = j B^T x</p>
-
-
-<details class="concatenation-couples-internal-ports-via" open>
-  <summary>Concatenation couples internal ports via</summary>
-  <p>F^T B_int^T x = 0</p>
-</details>        <p>where F is an incidence matrix encoding the connection topology.</p>
-<h4 id="solvers.concatenation.ConcatenatedSystem--parameters">Parameters<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--parameters" title="Permanent link">&para;</a></h4>
-<p>structures : list of ReducedStructure
-    The reduced-order models to concatenate. Each must have:
-    - Ard, Brd: reduced system matrices
-    - W, Q_L_inv: reconstruction matrices
-    - fes: per-domain FEM space
-    - domain: domain name matching mesh material region
-mesh : Mesh
-    The unified mesh for the entire structure (required for field plots)
-fes : HCurl
-    The unified FEM space covering entire mesh (required for field plots)
-port_impedance_func : callable, optional
-    Function (port, mode, freq) -&gt; impedance
-solver_ref : object, optional
-    Reference to original solver</p>
-<h4 id="solvers.concatenation.ConcatenatedSystem--examples">Examples<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--examples" title="Permanent link">&para;</a></h4>
-<blockquote>
-<blockquote>
-<blockquote>
-<h3 id="solvers.concatenation.ConcatenatedSystem--create-from-roms">Create from ROMs<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--create-from-roms" title="Permanent link">&para;</a></h3>
-<p>rom = ModelOrderReduction(solver)
-rom.reduce(tol=1e-6)
-structures = rom.get_all_structures()</p>
-<h3 id="solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure">Concatenate into unified structure<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure" title="Permanent link">&para;</a></h3>
-<p>concat = ConcatenatedSystem(
-...     structures,
-...     mesh=solver.mesh,
-...     fes=solver._fes_global
-... )
-concat.define_connections([((0, 'port2'), (1, 'port1'))])
-concat.couple()</p>
-<h3 id="solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field">Solve and visualize unified field<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field" title="Permanent link">&para;</a></h3>
-<p>concat.solve(fmin=1, fmax=10, nsamples=100)
-concat.plot_field(freq_idx=50)  # Shows entire structure</p>
-</blockquote>
-</blockquote>
-</blockquote>
+            <div class="doc doc-object doc-class">
 
 
 
+              <h2 id="solvers.concatenation.ConcatenatedSystem" class="doc doc-heading">
+                <code>solvers.concatenation.ConcatenatedSystem</code>
+
+
+                <a href="#solvers.concatenation.ConcatenatedSystem" class="headerlink" title="Permanent link">&para;</a>
+              </h2>
+
+
+              <div class="doc doc-contents first">
+                <p class="doc doc-class-bases">
+                  Bases: <code><span title="solvers.base.BaseEMSolver">BaseEMSolver</span></code>,
+                  <code><span title="solvers.eigen_mixin.ConcatEigenMixin">ConcatEigenMixin</span></code>,
+                  <code><span title="utils.plot_mixin.PlotMixin">PlotMixin</span></code></p>
+
+
+
+                <p>Unified structure formed by coupling multiple reduced-order models.</p>
+                <p>This class represents the concatenation of multiple ROMs as a SINGLE
+                  structure. After coupling, the system has only external ports - internal
+                  connections are eliminated via Kirchhoff constraints.</p>
+                <p>Field reconstruction produces fields over the ENTIRE unified mesh,
+                  not individual sub-structures.</p>
+                <h4 id="solvers.concatenation.ConcatenatedSystem--coupling-formulation">Coupling Formulation<a
+                    class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--coupling-formulation"
+                    title="Permanent link">&para;</a></h4>
+                <p>Each ReducedStructure has:
+                  (A - ω² I) x = ω B u
+                  Z = j B^T x</p>
+
+
+                <details class="concatenation-couples-internal-ports-via" open>
+                  <summary>Concatenation couples internal ports via</summary>
+                  <p>F^T B_int^T x = 0</p>
+                </details>
+                <p>where F is an incidence matrix encoding the connection topology.</p>
+                <h4 id="solvers.concatenation.ConcatenatedSystem--parameters">Parameters<a class="headerlink"
+                    href="#solvers.concatenation.ConcatenatedSystem--parameters" title="Permanent link">&para;</a></h4>
+                <p>structures : list of ReducedStructure
+                  The reduced-order models to concatenate. Each must have:
+                  - Ard, Brd: reduced system matrices
+                  - W, Q_L_inv: reconstruction matrices
+                  - fes: per-domain FEM space
+                  - domain: domain name matching mesh material region
+                  mesh : Mesh
+                  The unified mesh for the entire structure (required for field plots)
+                  fes : HCurl
+                  The unified FEM space covering entire mesh (required for field plots)
+                  port_impedance_func : callable, optional
+                  Function (port, mode, freq) -&gt; impedance
+                  solver_ref : object, optional
+                  Reference to original solver</p>
+                <h4 id="solvers.concatenation.ConcatenatedSystem--examples">Examples<a class="headerlink"
+                    href="#solvers.concatenation.ConcatenatedSystem--examples" title="Permanent link">&para;</a></h4>
+                <blockquote>
+                  <blockquote>
+                    <blockquote>
+                      <h3 id="solvers.concatenation.ConcatenatedSystem--create-from-roms">Create from ROMs<a
+                          class="headerlink" href="#solvers.concatenation.ConcatenatedSystem--create-from-roms"
+                          title="Permanent link">&para;</a></h3>
+                      <p>rom = ModelOrderReduction(solver)
+                        rom.reduce(tol=1e-6)
+                        structures = rom.get_all_structures()</p>
+                      <h3 id="solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure">Concatenate
+                        into unified structure<a class="headerlink"
+                          href="#solvers.concatenation.ConcatenatedSystem--concatenate-into-unified-structure"
+                          title="Permanent link">&para;</a></h3>
+                      <p>concat = ConcatenatedSystem(
+                        ... structures,
+                        ... mesh=solver.mesh,
+                        ... fes=solver._fes_global
+                        ... )
+                        concat.define_connections([((0, 'port2'), (1, 'port1'))])
+                        concat.couple()</p>
+                      <h3 id="solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field">Solve and
+                        visualize unified field<a class="headerlink"
+                          href="#solvers.concatenation.ConcatenatedSystem--solve-and-visualize-unified-field"
+                          title="Permanent link">&para;</a></h3>
+                      <p>concat.solve(fmin=1, fmax=10, nsamples=100)
+                        concat.plot_field(freq_idx=50) # Shows entire structure</p>
+                    </blockquote>
+                  </blockquote>
+                </blockquote>
 
 
 
 
 
-              <details class="mkdocstrings-source">
-                <summary>Source code in <code>solvers\concatenation.py</code></summary>
-                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-44">  44</a></span>
+
+
+
+                <details class="mkdocstrings-source">
+                  <summary>Source code in <code>solvers\concatenation.py</code></summary>
+                  <div class="language-python highlight">
+                    <table class="highlighttable">
+                      <tr>
+                        <td class="linenos">
+                          <div class="linenodiv">
+                            <pre><span></span><span class="normal"><a href="#__codelineno-0-44">  44</a></span>
 <span class="normal"><a href="#__codelineno-0-45">  45</a></span>
 <span class="normal"><a href="#__codelineno-0-46">  46</a></span>
 <span class="normal"><a href="#__codelineno-0-47">  47</a></span>
@@ -12873,7 +13107,12 @@ concat.plot_field(freq_idx=50)  # Shows entire structure</p>
 <span class="normal"><a href="#__codelineno-0-1375">1375</a></span>
 <span class="normal"><a href="#__codelineno-0-1376">1376</a></span>
 <span class="normal"><a href="#__codelineno-0-1377">1377</a></span>
-<span class="normal"><a href="#__codelineno-0-1378">1378</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44"></a><span class="k">class</span><span class="w"> </span><span class="nc">ConcatenatedSystem</span><span class="p">(</span><span class="n">BaseEMSolver</span><span class="p">,</span> <span class="n">ConcatEigenMixin</span><span class="p">,</span> <span class="n">PlotMixin</span><span class="p">):</span>
+<span class="normal"><a href="#__codelineno-0-1378">1378</a></span></pre>
+                          </div>
+                        </td>
+                        <td class="code">
+                          <div>
+                            <pre><span></span><code><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44"></a><span class="k">class</span><span class="w"> </span><span class="nc">ConcatenatedSystem</span><span class="p">(</span><span class="n">BaseEMSolver</span><span class="p">,</span> <span class="n">ConcatEigenMixin</span><span class="p">,</span> <span class="n">PlotMixin</span><span class="p">):</span>
 </span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 </span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46"></a><span class="sd">    Unified structure formed by coupling multiple reduced-order models.</span>
 </span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47"></a>
@@ -14208,12 +14447,17 @@ concat.plot_field(freq_idx=50)  # Shows entire structure</p>
 </span><span id="__span-0-1376"><a id="__codelineno-0-1376" name="__codelineno-0-1376"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Samples: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequencies</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span><span id="__span-0-1377"><a id="__codelineno-0-1377" name="__codelineno-0-1377"></a>
 </span><span id="__span-0-1378"><a id="__codelineno-0-1378" name="__codelineno-0-1378"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=&quot;</span> <span class="o">*</span> <span class="mi">60</span><span class="p">)</span>
-</span></code></pre></div></td></tr></table></div>
-              </details>
+</span></code></pre>
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+                </details>
 
 
 
-<div class="doc doc-children">
+                <div class="doc doc-children">
 
 
 
@@ -14222,23 +14466,33 @@ concat.plot_field(freq_idx=50)  # Shows entire structure</p>
 
 
 
-<h3 id="solvers.concatenation.ConcatenatedSystem-functions">Functions<a href="#solvers.concatenation.ConcatenatedSystem-functions" class="headerlink" title="Permanent link">&para;</a></h3>
+                  <h3 id="solvers.concatenation.ConcatenatedSystem-functions">Functions<a
+                      href="#solvers.concatenation.ConcatenatedSystem-functions" class="headerlink"
+                      title="Permanent link">&para;</a></h3>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.concatenation.ConcatenatedSystem.__init__" class="doc doc-heading">
-            <code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">structures</span><span class="p">,</span> <span class="n">mesh</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fes</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">port_impedance_func</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">solver_ref</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
-
-<a href="#solvers.concatenation.ConcatenatedSystem.__init__" class="headerlink" title="Permanent link">&para;</a></h4>
+                  <div class="doc doc-object doc-function">
 
 
-    <div class="doc doc-contents ">
+                    <h4 id="solvers.concatenation.ConcatenatedSystem.__init__" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">structures</span><span class="p">,</span> <span class="n">mesh</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fes</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">port_impedance_func</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">solver_ref</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+                      <a href="#solvers.concatenation.ConcatenatedSystem.__init__" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\concatenation.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-107">107</a></span>
+                    <div class="doc doc-contents ">
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\concatenation.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-107">107</a></span>
 <span class="normal"><a href="#__codelineno-0-108">108</a></span>
 <span class="normal"><a href="#__codelineno-0-109">109</a></span>
 <span class="normal"><a href="#__codelineno-0-110">110</a></span>
@@ -14297,7 +14551,12 @@ concat.plot_field(freq_idx=50)  # Shows entire structure</p>
 <span class="normal"><a href="#__codelineno-0-163">163</a></span>
 <span class="normal"><a href="#__codelineno-0-164">164</a></span>
 <span class="normal"><a href="#__codelineno-0-165">165</a></span>
-<span class="normal"><a href="#__codelineno-0-166">166</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-107"><a id="__codelineno-0-107" name="__codelineno-0-107"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-166">166</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-107"><a id="__codelineno-0-107" name="__codelineno-0-107"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
 </span><span id="__span-0-108"><a id="__codelineno-0-108" name="__codelineno-0-108"></a>    <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-109"><a id="__codelineno-0-109" name="__codelineno-0-109"></a>    <span class="n">structures</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">ReducedStructure</span><span class="p">],</span>
 </span><span id="__span-0-110"><a id="__codelineno-0-110" name="__codelineno-0-110"></a>    <span class="n">mesh</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Mesh</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -14357,34 +14616,49 @@ concat.plot_field(freq_idx=50)  # Shows entire structure</p>
 </span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a>
 </span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a>    <span class="c1"># Snapshot storage (populated by solve())</span>
 </span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_snapshots</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
+                  </div>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.concatenation.ConcatenatedSystem.couple" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">couple</span><span class="p">(</span><span class="n">rcond_pinv</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">,</span> <span class="n">rcond_null</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">)</span></code>
-
-<a href="#solvers.concatenation.ConcatenatedSystem.couple" class="headerlink" title="Permanent link">&para;</a></h4>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Perform structure coupling via null-space projection.</p>
-<p>This creates the unified system by eliminating internal ports
-through Kirchhoff constraints.</p>
-<h6 id="solvers.concatenation.ConcatenatedSystem.couple--returns">Returns<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem.couple--returns" title="Permanent link">&para;</a></h6>
-<p>self : ConcatenatedSystem
-    For method chaining.</p>
+                  <div class="doc doc-object doc-function">
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\concatenation.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-437">437</a></span>
+                    <h4 id="solvers.concatenation.ConcatenatedSystem.couple" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="n">couple</span><span class="p">(</span><span class="n">rcond_pinv</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">,</span> <span class="n">rcond_null</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">)</span></code>
+
+                      <a href="#solvers.concatenation.ConcatenatedSystem.couple" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
+
+
+                    <div class="doc doc-contents ">
+
+                      <p>Perform structure coupling via null-space projection.</p>
+                      <p>This creates the unified system by eliminating internal ports
+                        through Kirchhoff constraints.</p>
+                      <h6 id="solvers.concatenation.ConcatenatedSystem.couple--returns">Returns<a class="headerlink"
+                          href="#solvers.concatenation.ConcatenatedSystem.couple--returns"
+                          title="Permanent link">&para;</a></h6>
+                      <p>self : ConcatenatedSystem
+                        For method chaining.</p>
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\concatenation.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-437">437</a></span>
 <span class="normal"><a href="#__codelineno-0-438">438</a></span>
 <span class="normal"><a href="#__codelineno-0-439">439</a></span>
 <span class="normal"><a href="#__codelineno-0-440">440</a></span>
@@ -14451,7 +14725,12 @@ through Kirchhoff constraints.</p>
 <span class="normal"><a href="#__codelineno-0-501">501</a></span>
 <span class="normal"><a href="#__codelineno-0-502">502</a></span>
 <span class="normal"><a href="#__codelineno-0-503">503</a></span>
-<span class="normal"><a href="#__codelineno-0-504">504</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-437"><a id="__codelineno-0-437" name="__codelineno-0-437"></a><span class="k">def</span><span class="w"> </span><span class="nf">couple</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rcond_pinv</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e-12</span><span class="p">,</span> <span class="n">rcond_null</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e-12</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;ConcatenatedSystem&quot;</span><span class="p">:</span>
+<span class="normal"><a href="#__codelineno-0-504">504</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-437"><a id="__codelineno-0-437" name="__codelineno-0-437"></a><span class="k">def</span><span class="w"> </span><span class="nf">couple</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rcond_pinv</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e-12</span><span class="p">,</span> <span class="n">rcond_null</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e-12</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;ConcatenatedSystem&quot;</span><span class="p">:</span>
 </span><span id="__span-0-438"><a id="__codelineno-0-438" name="__codelineno-0-438"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 </span><span id="__span-0-439"><a id="__codelineno-0-439" name="__codelineno-0-439"></a><span class="sd">    Perform structure coupling via null-space projection.</span>
 </span><span id="__span-0-440"><a id="__codelineno-0-440" name="__codelineno-0-440"></a>
@@ -14519,40 +14798,55 @@ through Kirchhoff constraints.</p>
 </span><span id="__span-0-502"><a id="__codelineno-0-502" name="__codelineno-0-502"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">_solver_ref</span><span class="o">.</span><span class="n">_project_ref</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
 </span><span id="__span-0-503"><a id="__codelineno-0-503" name="__codelineno-0-503"></a>
 </span><span id="__span-0-504"><a id="__codelineno-0-504" name="__codelineno-0-504"></a>    <span class="k">return</span> <span class="bp">self</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
+                  </div>
 
-<div class="doc doc-object doc-function">
-
-
-<h4 id="solvers.concatenation.ConcatenatedSystem.solve" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">solve</span><span class="p">(</span><span class="n">fmin</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fmax</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">nsamples</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
-
-<a href="#solvers.concatenation.ConcatenatedSystem.solve" class="headerlink" title="Permanent link">&para;</a></h4>
-
-
-    <div class="doc doc-contents ">
-
-        <p>Solve the unified coupled system over a frequency range.</p>
-<p>Supports passing arguments directly or via a 'config' dictionary.
-Individual keyword arguments override the config dictionary.</p>
-<h6 id="solvers.concatenation.ConcatenatedSystem.solve--parameters">Parameters<a class="headerlink" href="#solvers.concatenation.ConcatenatedSystem.solve--parameters" title="Permanent link">&para;</a></h6>
-<p>fmin, fmax : float, optional
-    Frequency range [GHz]
-nsamples : int, optional
-    Number of frequency samples
-config : dict, optional
-    Dictionary containing solve parameters
-**kwargs :
-    Individual solve parameters (compute_s_params, solver_type, rerun, etc.)</p>
+                  <div class="doc doc-object doc-function">
 
 
-            <details class="mkdocstrings-source">
-              <summary>Source code in <code>solvers\concatenation.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-771">771</a></span>
+                    <h4 id="solvers.concatenation.ConcatenatedSystem.solve" class="doc doc-heading">
+                      <code
+                        class="highlight language-python"><span class="n">solve</span><span class="p">(</span><span class="n">fmin</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fmax</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">nsamples</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+                      <a href="#solvers.concatenation.ConcatenatedSystem.solve" class="headerlink"
+                        title="Permanent link">&para;</a>
+                    </h4>
+
+
+                    <div class="doc doc-contents ">
+
+                      <p>Solve the unified coupled system over a frequency range.</p>
+                      <p>Supports passing arguments directly or via a 'config' dictionary.
+                        Individual keyword arguments override the config dictionary.</p>
+                      <h6 id="solvers.concatenation.ConcatenatedSystem.solve--parameters">Parameters<a
+                          class="headerlink" href="#solvers.concatenation.ConcatenatedSystem.solve--parameters"
+                          title="Permanent link">&para;</a></h6>
+                      <p>fmin, fmax : float, optional
+                        Frequency range [GHz]
+                        nsamples : int, optional
+                        Number of frequency samples
+                        config : dict, optional
+                        Dictionary containing solve parameters
+                        **kwargs :
+                        Individual solve parameters (compute_s_params, solver_type, rerun, etc.)</p>
+
+
+                      <details class="mkdocstrings-source">
+                        <summary>Source code in <code>solvers\concatenation.py</code></summary>
+                        <div class="language-python highlight">
+                          <table class="highlighttable">
+                            <tr>
+                              <td class="linenos">
+                                <div class="linenodiv">
+                                  <pre><span></span><span class="normal"><a href="#__codelineno-0-771">771</a></span>
 <span class="normal"><a href="#__codelineno-0-772">772</a></span>
 <span class="normal"><a href="#__codelineno-0-773">773</a></span>
 <span class="normal"><a href="#__codelineno-0-774">774</a></span>
@@ -14698,7 +14992,12 @@ config : dict, optional
 <span class="normal"><a href="#__codelineno-0-914">914</a></span>
 <span class="normal"><a href="#__codelineno-0-915">915</a></span>
 <span class="normal"><a href="#__codelineno-0-916">916</a></span>
-<span class="normal"><a href="#__codelineno-0-917">917</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-771"><a id="__codelineno-0-771" name="__codelineno-0-771"></a><span class="k">def</span><span class="w"> </span><span class="nf">solve</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-917">917</a></span></pre>
+                                </div>
+                              </td>
+                              <td class="code">
+                                <div>
+                                  <pre><span></span><code><span id="__span-0-771"><a id="__codelineno-0-771" name="__codelineno-0-771"></a><span class="k">def</span><span class="w"> </span><span class="nf">solve</span><span class="p">(</span>
 </span><span id="__span-0-772"><a id="__codelineno-0-772" name="__codelineno-0-772"></a>    <span class="bp">self</span><span class="p">,</span>
 </span><span id="__span-0-773"><a id="__codelineno-0-773" name="__codelineno-0-773"></a>    <span class="n">fmin</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-774"><a id="__codelineno-0-774" name="__codelineno-0-774"></a>    <span class="n">fmax</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -14845,83 +15144,92 @@ config : dict, optional
 </span><span id="__span-0-915"><a id="__codelineno-0-915" name="__codelineno-0-915"></a>        <span class="s2">&quot;Z_dict&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">Z_dict</span><span class="p">,</span>
 </span><span id="__span-0-916"><a id="__codelineno-0-916" name="__codelineno-0-916"></a>        <span class="s2">&quot;S_dict&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">S_dict</span> <span class="k">if</span> <span class="n">compute_s_params</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-917"><a id="__codelineno-0-917" name="__codelineno-0-917"></a>    <span class="p">}</span>
-</span></code></pre></div></td></tr></table></div>
-            </details>
-    </div>
+</span></code></pre>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                      </details>
+                    </div>
 
-</div>
-
-
-
-  </div>
-
-    </div>
-
-</div>
+                  </div>
 
 
 
+                </div>
 
+              </div>
 
-
-
-
-
-
-
-
-                
-              </article>
             </div>
-          
-          
-<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+          </article>
         </div>
-        
-          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
-  Back to top
-</button>
-        
-      </main>
-      
-        <footer class="md-footer">
-  
-  <div class="md-footer-meta md-typeset">
-    <div class="md-footer-meta__inner md-grid">
-      <div class="md-copyright">
-  
-  
-    Made with
-    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
-      Material for MkDocs
-    </a>
-  
-</div>
-      
-    </div>
+
+
+        <script>var target = document.getElementById(location.hash.slice(1)); target && target.name && (target.checked = target.name.startsWith("__tabbed_"))</script>
+      </div>
+
+      <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z" />
+        </svg>
+        Back to top
+      </button>
+
+    </main>
+
+    <footer class="md-footer">
+
+      <div class="md-footer-meta md-typeset">
+        <div class="md-footer-meta__inner md-grid">
+          <div class="md-copyright">
+
+
+            Made with
+            <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+              Material for MkDocs
+            </a>
+
+          </div>
+
+        </div>
+      </div>
+    </footer>
+
   </div>
-</footer>
-      
-    </div>
-    <div class="md-dialog" data-md-component="dialog">
-      <div class="md-dialog__inner md-typeset"></div>
-    </div>
-    
-    
-    
-      
-      
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
-    
-    
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
-      
-        <script src="../../javascripts/mathjax.js"></script>
-      
-        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-      
-    
-  </body>
+  <div class="md-dialog" data-md-component="dialog">
+    <div class="md-dialog__inner md-typeset"></div>
+  </div>
+
+
+
+
+
+  <script id="__config"
+    type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+
+
+  <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+
+  <script src="../../javascripts/mathjax.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+
+</body>
+
 </html>

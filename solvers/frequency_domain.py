@@ -5,11 +5,12 @@ if TYPE_CHECKING:
 import warnings
 from datetime import datetime
 import numpy as np
+import copy
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 import scipy.linalg as sl
 from solvers.eigen_mixin import FDSEigenMixin
-
+from utils.io_utils import deep_diff, strip_keys, check_source_files
 from ngsolve import (
 HCurl, BilinearForm, LinearForm, GridFunction, BND,
 Integrate, InnerProduct, TaskManager, curl, dx, ds,
@@ -826,8 +827,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         pr.set_verbosity(verbose)
 
         # --- Config comparison ---
+        diffs = []  # Initialize outside the block so it's always defined
         if self._loaded_config and not rerun:
-            diffs = []
             # Check frequencies if they were previously solved
             if self._loaded_config.get('fmin') is not None:
                 if not np.isclose(fmin, self._loaded_config['fmin']):
@@ -843,34 +844,63 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if nportmodes is not None and nportmodes != self._loaded_config.get('n_modes_per_port'):
                 diffs.append(f"nportmodes: {self._loaded_config.get('n_modes_per_port')} -> {nportmodes}")
             
-            # Check geometry history
             current_history = getattr(self.geometry, '_history', [])
             loaded_history = self._loaded_config.get('geometry_history', [])
-            if current_history != loaded_history:
-                diffs.append("geometry/history has changed")
+            component_sources = self._loaded_config.get('component_sources', {})
 
+            # 1. Strip timestamps AND filepaths — filepaths are checked separately via hash
+            keys_to_ignore = {'timestamp', 'filepath'}
+            current_clean = strip_keys(current_history, keys_to_ignore)
+            loaded_clean = strip_keys(loaded_history, keys_to_ignore)
+
+            # 2. Compare the rest of the history (parameters, ops, mesh settings, etc.)
+            if current_clean != loaded_clean:
+                history_diffs = deep_diff(loaded_clean, current_clean, path="geometry_history")
+                diffs.append("geometry/history has changed:")
+                for d in history_diffs:
+                    diffs.append(f"  {d}")
+
+            # 3. Separately check if actual source files have changed via content hash
+            source_diffs = check_source_files(component_sources, geometry_dir="geometry")
+            if source_diffs:
+                diffs.append("geometry source file(s) have changed:")
+                for d in source_diffs:
+                    diffs.append(f"  {d}")
+
+            # 4. Report
             if diffs:
                 msg = "\n  [WARNING] Simulation configuration has changed since last save/load:\n"
                 for d in diffs:
                     msg += f"    - {d}\n"
                 msg += "  Existing results may be invalid. Use rerun=True to recompute."
-                warnings.warn(msg, UserWarning, stacklevel=2)
+                pr.warning(msg)
 
         # --- Rerun protection ---
         has_results = (
-            self._Z_global_coupled is not None
-            or self._Z_per_domain
+            (self._S_matrix is not None and self._Z_matrix is not None)
+            or bool(self._S_per_domain)
+            or self._Z_global_coupled is not None
+            or self._foms_cache is not None
             or self._fom_cache is not None
         )
+        # Result exists only if frequencies are also present
+        if has_results and (self.frequencies is None or len(self.frequencies) == 0):
+            has_results = False
+
         if has_results and not rerun:
-            if not (self._loaded_config and diffs): # Don't double-warn if we already warned about diffs
-                warnings.warn(
-                    "Results already exist for this solver. "
-                    "To overwrite, call solve(..., rerun=True).",
-                    UserWarning,
-                    stacklevel=2,
-                )
+            if diffs:
+                pr.warning("  Valid results found, but configuration changed since last save/load! Returning previous results anyway because rerun=False.")
+            else:
+                pr.info("  Valid simulation results found matching current config. Returning previous results. (Use rerun=True to force recompute)")
             return self._build_results_dict(compute_s_params, per_domain, global_method)
+        elif not has_results and not rerun:
+            pr.info(
+                f"  No valid results found. Forcing compute. "
+                f"(Z_coupled={self._Z_global_coupled is not None}, "
+                f"foms={self._foms_cache is not None}, "
+                f"fmin={self._loaded_config.get('fmin') if self._loaded_config else None})"
+            )
+
 
         # --- Mesh synchronization and validation ---
         if self.mesh is None and self.geometry and self.geometry.mesh:
@@ -1580,6 +1610,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if hasattr(self._foms_cache, '_roms_cache') and self._foms_cache._roms_cache is not None:
                 self._foms_cache._roms_cache.save(foms_path / "roms")
 
+        # 3. Save eigenmodes
+        self.save_eigenmodes()
+
         pr.info(f"FrequencyDomainSolver saved to {fds_path}")
         return fds_path
 
@@ -1648,45 +1681,55 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._global_matrices_assembled = config.get("global_matrices_assembled", False)
         self._per_domain_matrices_assembled = config.get("per_domain_matrices_assembled", False)
         self._current_global_method = config.get("current_global_method", None)
+        
+        # Robustly reconstitute frequencies from metadata right away
+        f_min, f_max, n_samp = config.get("fmin"), config.get("fmax"), config.get("nsamples")
+        if f_min is not None and f_max is not None and n_samp is not None:
+            self.frequencies = np.linspace(f_min, f_max, n_samp) * 1e9
+            
         # Determine the target result folder (fom or foms) INSIDE the fds directory
-        fom_root = path / ("foms" if self.is_compound else "fom")
+        fom_root_single = path / "fom"
+        fom_root_compound = path / "foms"
 
         # 1. Result caches (Mirroring the hierarchy)
-        # For single domain structures, fom_root is project/fom
-        # For compound structures, fom_root is project/foms
-        if fom_root.exists():
-            if self.is_compound:
-                from solvers.results import FOMCollection
-                try:
-                    # FOMCollection.load handles matrix loading into self (the _fds_ref)
-                    self._foms_cache = FOMCollection.load(fom_root, _fds_ref=self)
-                    if self._foms_cache:
-                        self.frequencies = self._foms_cache.frequencies
-                    
-                    # Nested ROMs inside foms/roms
-                    roms_path = fom_root / "roms"
-                    if roms_path.exists():
-                        from rom.reduction import ModelOrderReduction
-                        from solvers.results import ROMCollection
-                        mor_loaded = ModelOrderReduction.load(roms_path, solver=self)
-                        self._foms_cache._roms_cache = ROMCollection(_fds_ref=self, _mor_ref=mor_loaded)
-                except Exception as e:
-                    warnings.warn(f"Could not load FOM collection from {fom_root}: {e}")
-            else:
-                from solvers.results import FOMResult
-                try:
-                    # FOMResult.load handles matrix loading into self (the _solver_ref)
-                    self._fom_cache = FOMResult.load(fom_root, _solver_ref=self)
-                    self._Z_global_coupled = self._fom_cache._Z_matrix
-                    self._S_global_coupled = self._fom_cache._S_matrix
+        # Load per-domain results for compound systems
+        if fom_root_compound.exists() and self.is_compound:
+            from solvers.results import FOMCollection
+            try:
+                # FOMCollection.load handles matrix loading into self (the _fds_ref)
+                self._foms_cache = FOMCollection.load(fom_root_compound, _fds_ref=self)
+                if self._foms_cache:
+                    self.frequencies = self._foms_cache.frequencies
+                
+                # Nested ROMs inside foms/roms
+                roms_path = fom_root_compound / "roms"
+                if roms_path.exists():
+                    from rom.reduction import ModelOrderReduction
+                    from solvers.results import ROMCollection
+                    mor_loaded = ModelOrderReduction.load(roms_path, solver=self)
+                    self._foms_cache._roms_cache = ROMCollection(_fds_ref=self, _mor_ref=mor_loaded)
+            except Exception as e:
+                warnings.warn(f"Could not load FOM collection from {fom_root_compound}: {e}")
+                
+        # Load global 'fom' results (exists for single structures AND compound structures with global solve)
+        if fom_root_single.exists():
+            from solvers.results import FOMResult
+            try:
+                # FOMResult.load handles matrix loading into self (the _solver_ref)
+                self._fom_cache = FOMResult.load(fom_root_single, _solver_ref=self)
+                if self._fom_cache:
+                    if self.frequencies is None:
+                        self.frequencies = self._fom_cache.frequencies
+                self._Z_global_coupled = self._fom_cache._Z_matrix
+                self._S_global_coupled = self._fom_cache._S_matrix
 
-                    # Nested ROM inside fom/rom
-                    rom_path = fom_root / "rom"
-                    if rom_path.exists():
-                        from rom.reduction import ModelOrderReduction
-                        self._fom_cache._rom_cache = ModelOrderReduction.load(rom_path, solver=self)
-                except Exception as e:
-                    print(f"Warning: Could not load FOM result: {e}")
+                # Nested ROM inside fom/rom
+                rom_path = fom_root_single / "rom"
+                if rom_path.exists():
+                    from rom.reduction import ModelOrderReduction
+                    self._fom_cache._rom_cache = ModelOrderReduction.load(rom_path, solver=self)
+            except Exception as e:
+                print(f"Warning: Could not load FOM result: {e}")
 
         # ------------------------------------------------------------------
         # 2. Port modes
@@ -1715,7 +1758,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     # Set convenience references
                     self.port_modes = self.port_solver.port_modes
                     self.port_basis = self.port_solver.port_basis
-
             except Exception as e:
                 # NgException (vector size mismatch) or other pickle errors
                 warnings.warn(
@@ -1727,7 +1769,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 self.port_solver = None
                 self.port_modes = None
                 self.port_basis = None
-
+        
         elif port_dir.exists() and self.mesh is None:
             warnings.warn(
                 "Port modes found but no mesh available to load them into. "
@@ -1736,11 +1778,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 stacklevel=2
             )
 
+        # 3. Load eigenmodes
+        self.load_eigenmodes()
+
         # ------------------------------------------------------------------
         # 3. Snapshots (Legacy and Per-Domain)
         # ------------------------------------------------------------------
         # Legacy aggregated snapshots
-        snap_path = fom_root / "snapshots.h5"
+        snap_path = path / "snapshots.h5"
         if snap_path.exists():
             with h5py.File(snap_path, "r") as fh:
                 if "snapshots" in fh:
@@ -1750,7 +1795,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Per-domain snapshots (loaded via FOMCollection.load/FOMResult.load usually,
         # but we ensure they are covered here if missed or for direct access)
         for domain in self.domains:
-            d_snap_path = fom_root / f"snapshots_{domain}.h5"
+            d_snap_path = path / f"snapshots_{domain}.h5"
             if d_snap_path.exists():
                 with h5py.File(d_snap_path, "r") as fh:
                     if "field_snapshots" in fh:
@@ -2912,6 +2957,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             
             res = process_modes(raw_eigs, raw_vecs)
             self._resonant_mode_cache[cache_key] = res
+            
+            # Sync with standard eigen cache so save_eigenmodes works
+            if len(res) == 2:
+                self._init_eigen_cache()
+                self._eigenvalues_cache[domain] = res[0]
+                self._eigenvectors_cache[domain] = res[1]
+                try:
+                    self.save_eigenmodes(auto_compute=False)
+                except Exception:
+                    pass
+
             return res
 
         # Return all available
@@ -2927,6 +2983,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if has_global and self._fes_global is not None:
             raw_eigs, raw_vecs = compute_eigs(self.M_global, self.K_global, self._fes_global, 'global')
             results['global'] = process_modes(raw_eigs, raw_vecs)
+
+        # Sync all with standard eigen cache and save
+        self._init_eigen_cache()
+        for d, res in results.items():
+            if len(res) == 2:
+                self._eigenvalues_cache[d] = res[0]
+                self._eigenvectors_cache[d] = res[1]
+        try:
+            self.save_eigenmodes(auto_compute=False)
+        except Exception:
+            pass
 
         return results
 

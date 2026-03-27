@@ -4,7 +4,10 @@
     width: 100% !important;
     height: auto !important;
 }
-
+.mermaid svg rect {
+  rx: 100;
+  ry: 100;
+}
 /* Ensure images scale to content area */
 .md-content img {
     max-width: 100%;

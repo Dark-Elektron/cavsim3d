@@ -69,6 +69,21 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     # above, use iterative (GMRES handles large/sparse systems better).
     ITERATIVE_SIZE_THRESHOLD = 500
 
+    @property
+    def project_sub_path(self) -> Path:
+        """Relative path from project root: fds/foms/roms or fds/fom/rom."""
+        parent_path = self.solver.project_sub_path
+        if self.n_domains > 1:
+            return parent_path / "roms"
+        return parent_path / "rom"
+
+    @property
+    def _project_path(self) -> Optional[str]:
+        """Proxy project path from parent solver."""
+        if self.solver is not None:
+            return getattr(self.solver, '_project_path', None)
+        return None
+
     def __init__(self, solver):
         """
         Initialize from FrequencyDomainSolver.
@@ -77,6 +92,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         self.solver = solver
         self.mesh = solver.mesh
+        self.order = getattr(solver, 'order', 3)
         self.domains = solver.domains
         self._all_ports = solver.all_ports
         self._external_ports = solver.external_ports
@@ -483,22 +499,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         return res
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
-        if self.solver is None or not hasattr(self.solver, '_project_path'):
+        if not hasattr(self, 'solver') or not getattr(self.solver, '_project_path', None):
             return
         
-        # Determine path based on single vs multi domain
-        project_path = Path(self.solver._project_path)
-        if self.n_domains == 1:
-            # fds/fom/rom -> fds/fom/rom/eigenmodes
-            save_path = project_path / "fds" / "fom" / "rom" / "eigenmodes"
-        else:
-            # fds/foms/roms -> fds/foms/roms/eigenmodes
-            save_path = project_path / "fds" / "foms" / "roms" / "eigenmodes"
-            
+        save_path = Path(self.solver._project_path) / self.project_sub_path / "eigenmodes"
         try:
             self.save_eigenmodes(save_path, **kwargs)
         except Exception as e:
-            print(f"Warning: Could not auto-save eigenmodes for ModelOrderReduction: {e}")
+            pr.warning(f"Could not auto-save eigenmodes for ModelOrderReduction to {save_path}: {e}")
 
     # =========================================================================
     # Model Reduction
@@ -823,30 +831,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 for domain, snapshots_data in self._x_r_snapshots.items():
                     H5Serializer.save_dataset(group, domain, snapshots_data)
 
-        # 4. Save eigenmodes ONLY if already computed (passive)
-        cache = getattr(self, '_resonant_mode_cache', {})
-        if cache:
-            # Find a 'source=all' or 'source=auto' result if possible
-            modes = None
-            for key, val in self._resonant_mode_cache.items():
-                if isinstance(val, dict):
-                    modes = val
-                    break
-            if modes is None:
-                # Just use whatever is there if it's a single tuple
-                pass 
-                
-            if modes:
-                try:
-                    eig_file = "eigenmodes.h5"
-                    if self.n_domains == 1: eig_file = f"eigenmodes_{self.domains[0]}.h5"
-                    with h5py.File(eig_path_dir / eig_file, "a") as f:
-                        for domain, (eigs, vecs) in modes.items():
-                            group = f.require_group(domain)
-                            H5Serializer.save_dataset(group, "eigenvalues", eigs)
-                            H5Serializer.save_dataset(group, "eigenvectors", vecs)
-                except Exception as e:
-                    print(f"Note: Could not save reduced eigenmodes: {e}")
+        # 4. Save eigenmodes
+        self.save_eigenmodes()
         
         # 5. Save metadata
         metadata = {
@@ -999,7 +985,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     if rom._S_matrix is None and "S_matrix" in f:
                         rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
 
-        # 4. Load concatenated system if it exists
+        # 4. Load eigenmodes
+        rom.load_eigenmodes()
+
+        # 5. Load concatenated system if it exists
         concat_path = path / "concat"
         rom._concatenated = None
         if concat_path.exists():
@@ -1214,7 +1203,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             structures=structures,
             mesh=self.mesh,
             port_impedance_func=self._port_impedance_func,
-            solver_ref=self.solver,
+            solver_ref=self,
         )
         concat.define_connections(connections)
         concat.couple()

@@ -15,6 +15,7 @@ import scipy.linalg as sl
 from scipy.sparse.linalg import eigsh
 from core.persistence import H5Serializer
 from pathlib import Path
+import h5py
 
 
 class EigenMixinBase:
@@ -426,6 +427,11 @@ class EigenMixinBase:
                 )
             eigs, vecs = compute_for_domain(domain)
 
+            # Populate cache for save_eigenmodes
+            self._init_eigen_cache()
+            self._eigenvalues_cache[domain] = eigs
+            self._eigenvectors_cache[domain] = vecs
+
             if return_eigenvalues:
                 return eigs, vecs
             return vecs
@@ -439,6 +445,10 @@ class EigenMixinBase:
                 eigs, vecs = compute_for_domain(d)
                 results_eigs[d] = eigs
                 results_vecs[d] = vecs
+                # Populate cache for save_eigenmodes
+                self._init_eigen_cache()
+                self._eigenvalues_cache[d] = eigs
+                self._eigenvectors_cache[d] = vecs
             except Exception as e:
                 print(f"Warning: Could not compute eigenvectors for {d}: {e}")
 
@@ -768,11 +778,12 @@ class EigenMixinBase:
         for d in available_domains:
             if d not in self._eigenvalues_cache:
                 try:
-                    eigs, _ = self.get_eigenvectors(
+                    eigs, _ = self.get_eigenmodes(
                         domain=d,
                         filter_static=True,
                         n_modes=50,
-                        return_eigenvalues=True
+                        return_eigenvalues=True,
+                        _auto_save=True
                     )
                     self._eigenvalues_cache[d] = eigs
                 except Exception as e:
@@ -795,11 +806,12 @@ class EigenMixinBase:
         for d in available_domains:
             if d not in self._eigenvectors_cache:
                 try:
-                    _, vecs = self.get_eigenvectors(
+                    _, vecs = self.get_eigenmodes(
                         domain=d,
                         filter_static=True,
                         n_modes=50,
-                        return_eigenvalues=True
+                        return_eigenvalues=True,
+                        _auto_save=True
                     )
                     self._eigenvectors_cache[d] = vecs
                 except Exception as e:
@@ -807,52 +819,143 @@ class EigenMixinBase:
 
         return self._eigenvectors_cache.copy()
 
-    def get_eigenmodes(self, **kwargs) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
+    def get_eigenmodes(self, _auto_save: bool = True, **kwargs) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]]:
         """
         Standardized API for retrieving eigenvalues and eigenvectors.
         
         Returns (eigenvalues, eigenvectors).
         """
         kwargs.setdefault('return_eigenvalues', True)
+        res = self.get_eigenvectors(**kwargs)
+        if _auto_save:
+            try:
+                # Cache is already populated by get_eigenvectors, just flush to disk
+                self.save_eigenmodes(auto_compute=False)
+            except Exception as e:
+                pr.warning(f"Failed to auto-save eigenmodes: {e}")
+        return res
+
+    def get_eigenvalues(self, **kwargs) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Standardized API for retrieving only eigenvalues.
+        
+        Returns eigenvalues for specified domain or dict of all available domains.
+        """
+        kwargs['return_eigenvalues'] = True
+        kwargs['return_eigenvectors'] = False
         return self.get_eigenvectors(**kwargs)
 
-    def save_eigenmodes(self, path: Union[str, Path], domain: str = None, **kwargs):
+    def save_eigenmodes(self, path: Union[str, Path, None] = None, domain: str = None, auto_compute: bool = False, **kwargs):
         """
         Save computed eigenmodes to disk in HDF5 format.
         
         Parameters
         ----------
-        path : Path
-            Directory to save 'eigenmodes.h5' into.
+        path : Path, optional
+            Directory to save 'eigenmodes.h5' into. If None, uses project path if available.
         domain : str, optional
             Specific domain to save. If None, saves all computed domains.
+        auto_compute : bool, optional
+            If False (default), only saves if eigenmodes are already cached.
         **kwargs
             Arguments passed to get_eigenmodes (e.g., n_modes)
         """
-        import h5py
+        self._init_eigen_cache()
+        if not auto_compute:
+            # Check if any eigenmodes exist for the given domain(s)
+            if domain is not None:
+                if domain not in self._eigenvalues_cache:
+                    return
+            else:
+                if not self._eigenvalues_cache:
+                    return
+        
+        # Determine path
+        if path is None:
+            if hasattr(self, '_project_path') and self._project_path:
+                base = Path(self._project_path)
+                if hasattr(self, 'is_compound') and self.is_compound:
+                    path = base / "fds" / "foms" / "eigenmodes"
+                else:
+                    path = base / "fds" / "fom" / "eigenmodes"
+            else:
+                raise ValueError("No path provided and no project_path available.")
+        
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
+        h5_file = path / "eigenmodes.h5"
+        print(h5_file)
         
-        # Strip _auto_save from kwargs if present (handled by results wrappers)
-        kwargs.pop('_auto_save', None)
-        res = self.get_eigenmodes(domain=domain, **kwargs)
-        
-        # get_eigenmodes returns either (eigs, vecs) or (dict_eigs, dict_vecs)
-        if isinstance(res[0], dict):
-            eigs_dict, vecs_dict = res
+        if auto_compute:
+            kwargs.pop('_auto_save', None)
+            res = self.get_eigenmodes(domain=domain, **kwargs)
+            if isinstance(res[0], dict):
+                eigs_dict, vecs_dict = res
+            else:
+                d_name = domain or (self._get_available_eigen_domains()[0] if self._get_available_eigen_domains() else 'global')
+                eigs_dict = {d_name: res[0]}
+                vecs_dict = {d_name: res[1]}
         else:
-            # Single domain result, wrap in dict
-            d_name = domain or self._get_available_eigen_domains()[0]
-            eigs_dict = {d_name: res[0]}
-            vecs_dict = {d_name: res[1]}
-        
-        with h5py.File(path / "eigenmodes.h5", "w") as f:
+            eigs_dict = {d: self._eigenvalues_cache[d] for d in self._eigenvalues_cache if (domain is None or d == domain)}
+            vecs_dict = {d: self._eigenvectors_cache[d] for d in self._eigenvectors_cache if (domain is None or d == domain)}
+
+        with h5py.File(h5_file, "a") as f:
             for d in vecs_dict:
-                grp = f.create_group(d)
-                H5Serializer.save_dataset(grp, "eigenvalues", eigs_dict[d])
-                H5Serializer.save_dataset(grp, "eigenvectors", vecs_dict[d])
+                if d in eigs_dict:
+                    grp = f.require_group(d)
+                    H5Serializer.save_dataset(grp, "eigenvalues", eigs_dict[d])
+                    H5Serializer.save_dataset(grp, "eigenvectors", vecs_dict[d])
         
-        print(f"Eigenmodes saved to {path / 'eigenmodes.h5'}")
+        # pr.debug(f"Eigenmodes saved to {h5_file}")
+
+    def load_eigenmodes(self, path: Union[str, Path, None] = None):
+        """
+        Load eigenmodes from disk and populate internal cache.
+        
+        Parameters
+        ----------
+        path : Path, optional
+            Directory containing 'eigenmodes.h5'. If None, uses project path.
+        """
+        import h5py
+        
+        if path is None:
+            if hasattr(self, '_project_path') and self._project_path:
+                base = Path(self._project_path)
+                # Try standard locations
+                potential_paths = [
+                    base / "fds" / "fom" / "eigenmodes",
+                    base / "fds" / "foms" / "eigenmodes",
+                    base / "fds" / "eigenmodes",
+                    base / "eigenmodes"
+                ]
+                for p in potential_paths:
+                    if (p / "eigenmodes.h5").exists():
+                        path = p
+                        break
+                if path is None: return # Not found, silent return
+            else:
+                return # No path, silent return
+
+        path = Path(path)
+        h5_file = path / "eigenmodes.h5"
+        if not h5_file.exists():
+            return
+
+        self._init_eigen_cache()
+        
+        try:
+            with h5py.File(h5_file, "r") as f:
+                for domain in f.keys():
+                    group = f[domain]
+                    if "eigenvalues" in group and "eigenvectors" in group:
+                        eigs = H5Serializer.load_dataset(group["eigenvalues"])
+                        vecs = H5Serializer.load_dataset(group["eigenvectors"])
+                        self._eigenvalues_cache[domain] = eigs
+                        self._eigenvectors_cache[domain] = vecs
+            print(f"Eigenmodes loaded from {h5_file}")
+        except Exception as e:
+            print(f"Warning: Could not load eigenmodes from {h5_file}: {e}")
 
 
 # =============================================================================
@@ -933,6 +1036,13 @@ class ROMEigenMixin(EigenMixinBase):
     Uses reduced matrices (A_r) directly. Field reconstruction requires
     projection basis (W, Q_L_inv) and access to original FES via solver.
     """
+    def calculate_resonant_modes(self, **kwargs) -> Union[Tuple[np.ndarray, np.ndarray], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
+        """
+        Compute eigenvalues and eigenvectors of the reduced system matrix (A_r).
+        Returns either a tuple (eigenvalues, eigenvectors) for a single domain/global
+        or a dictionary mapping domain to tuples.
+        """
+        return self.get_eigenmodes(_auto_save=True, **kwargs)
 
     def _get_eigen_system_matrices(
             self,
@@ -1079,14 +1189,58 @@ class ConcatEigenMixin(EigenMixinBase):
             )
 
         from ngsolve import GridFunction
-
-        # For global eigenvector, need to project through W_coupled
-        # then through each domain's projection basis
-        # This is complex for multi-domain - for now, show first domain
+        
+        # Uncouple the global eigenvector
+        x_uncoupled = self.W_coupled @ eigenvector
 
         if domain == 'global' or domain is None:
-            print("Warning: Global eigenmode shows first domain only")
-            domain = self.domains[0]
+            # Reconstruct the continuous global field using concatenation scaling logic!
+            if self.n_structures > 1 and self.connections:
+                if hasattr(self, '_compute_vector_scaling_factors'):
+                    scales = self._compute_vector_scaling_factors(x_uncoupled)
+                else:
+                    import warnings
+                    warnings.warn(
+                        "Interface scaling not available (_compute_vector_scaling_factors missing). "
+                        "Eigenmode fields may show discontinuities at interfaces.",
+                        UserWarning, stacklevel=3
+                    )
+                    scales = np.ones(self.n_structures, dtype=complex)
+            else:
+                scales = np.ones(self.n_structures, dtype=complex)
+            
+            # --- Inline field reconstruction (was _reconstruct_field_from_vector) ---
+            # Create unified GridFunction on global FES
+            E_gf = GridFunction(self.fes, complex=True)
+
+            for struct_idx, struct in enumerate(self.structures):
+                if not struct.can_reconstruct():
+                    raise ValueError(
+                        f"Structure {struct_idx} ({struct.domain}) cannot reconstruct. "
+                        f"W: {'set' if struct.W is not None else 'MISSING'}, "
+                        f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
+                        f"fes: {'set' if struct.fes is not None else 'MISSING'}"
+                    )
+
+                # Extract this structure's reduced solution
+                start_r = self._structure_dof_offsets[struct_idx]
+                x_reduced = x_uncoupled[start_r:start_r + struct.r]
+
+                # Reconstruct full-order solution for this domain
+                x_full_local = struct.reconstruct(x_reduced)
+                
+                # Apply scaling for interface continuity
+                x_full_local = scales[struct_idx] * x_full_local
+
+                # Create per-domain GridFunction
+                E_local = GridFunction(struct.fes, complex=True)
+                E_local.vec.FV().NumPy()[:] = x_full_local
+
+                # Transfer to global GridFunction using definedon
+                domain_region = self.mesh.Materials(struct.domain)
+                E_gf.Set(E_local, definedon=domain_region)
+
+            return E_gf
 
         # Find the structure for this domain
         struct = None
@@ -1100,38 +1254,14 @@ class ConcatEigenMixin(EigenMixinBase):
         if struct is None:
             raise KeyError(f"Domain '{domain}' not found")
 
-        # Get FES from solver
-        solver = self._solver_ref
-        if hasattr(solver, '_fes') and domain in solver._fes:
-            fes = solver._fes[domain]
-        elif hasattr(solver, 'solver') and domain in solver.solver._fes:
-            fes = solver.solver._fes[domain]
-        else:
-            raise ValueError(f"Cannot find FES for domain '{domain}'")
+        # Extract this structure's reduced solution
+        start_r = self._structure_dof_offsets[struct_idx]
+        x_reduced = x_uncoupled[start_r:start_r + struct.r]
 
-        # Get projection matrices from solver (ROM)
-        if hasattr(solver, '_W') and domain in solver._W:
-            W = solver._W[domain]
-            Q_L_inv = solver._Q_L_inv[domain]
-        elif hasattr(solver, 'solver'):
-            # This is a ROM, use its projection matrices
-            raise NotImplementedError(
-                "Field reconstruction from ConcatenatedSystem requires "
-                "direct ROM reference, not nested solver"
-            )
-        else:
-            raise ValueError(f"Cannot find projection matrices for domain '{domain}'")
+        # Reconstruct native scaled field
+        x_full = struct.reconstruct(x_reduced)
 
-        # Extract portion of eigenvector for this domain
-        # (assumes sequential ordering of domains in A_coupled)
-        offset = sum(self.structures[i].r for i in range(struct_idx))
-        r_domain = struct.r
-        x_r_domain = eigenvector[offset:offset + r_domain]
-
-        # Reconstruct
-        x_full = W @ Q_L_inv @ np.real(x_r_domain)
-
-        gf = GridFunction(fes)
+        gf = GridFunction(struct.fes, complex=True)
         gf.vec.FV().NumPy()[:] = x_full
 
         return gf
