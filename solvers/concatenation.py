@@ -677,9 +677,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 if "coupled_snapshots" in f: del f["coupled_snapshots"]
                 H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
 
-        # 4. Save eigenmodes
-        self.save_eigenmodes()
-
+        # 4. Save metadata
         metadata = {
             "n_structures": self.n_structures,
             "domains": self.domains,
@@ -690,6 +688,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             "timestamp": datetime.now().isoformat()
         }
         ProjectManager.save_json(path, metadata)
+
+        # 5. Save eigenmodes
+        try:
+            self.save_eigenmodes(path=eig_path_dir)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Could not save concatenated eigenmodes to {eig_path_dir}: {e}")
 
     @classmethod
     def load(cls, path: Union[str, Path], solver_ref=None) -> ConcatenatedSystem:

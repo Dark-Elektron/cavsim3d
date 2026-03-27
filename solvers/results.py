@@ -29,6 +29,7 @@ Multi-solid
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 import warnings
 import numpy as np
+from pathlib import Path
 
 from utils.plot_mixin import PlotMixin
 from core.persistence import H5Serializer, ProjectManager
@@ -815,6 +816,18 @@ class FOMCollection(PlotMixin):
         mor.reduce(tol=tol, max_rank=max_rank)
 
         self._roms_cache = ROMCollection(_fds_ref=self._fds_ref, _mor_ref=mor)
+        
+        # Explicitly save the ROM hierarchy now that _roms_cache is set
+        # (The auto-save inside mor.reduce() fires before _roms_cache is set,
+        #  so it always skips ROM saving in the FDS save chain)
+        if hasattr(self._fds_ref, '_project_path') and self._fds_ref._project_path:
+            try:
+                roms_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "roms"
+                self._roms_cache.save(roms_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Could not save ROM hierarchy: {e}", UserWarning, stacklevel=2)
+        
         return self._roms_cache
 
     def concatenate(self):
@@ -989,11 +1002,7 @@ class FOMCollection(PlotMixin):
                 if fom._solver_ref is not None and domain in getattr(fom._solver_ref, 'snapshots', {}):
                     H5Serializer.save_dataset(fsnap, "field_snapshots", fom._solver_ref.snapshots[domain])
 
-        # 4. Save eigenmodes
-        if self._fds_ref is not None:
-            self._fds_ref.save_eigenmodes(eig_path)
-
-        # Metadata
+        # 4. Save metadata
         metadata = {
             "n_solids": len(self._foms),
             "solids": [
@@ -1008,7 +1017,15 @@ class FOMCollection(PlotMixin):
         }
         ProjectManager.save_json(path, metadata)
 
-        # Save cached concatenation if available
+        # 5. Save eigenmodes
+        if self._fds_ref is not None:
+            try:
+                self._fds_ref.save_eigenmodes(eig_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Could not save FOMCollection eigenmodes to {eig_path}: {e}")
+
+        # 6. Save cached concatenation if available
         if self._concat_cache is not None:
             self._concat_cache.save(path / "concat")
 
@@ -1277,8 +1294,19 @@ class ROMCollection(PlotMixin):
         """
         if self._mor_ref is None:
             raise RuntimeError("Cannot solve: no MOR reference available.")
-        return self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
-                                  config=config, **kwargs)
+        result = self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+                                   config=config, **kwargs)
+        
+        # Explicitly save ROM results (Z, S, snapshots) after solving
+        if hasattr(self._fds_ref, '_project_path') and self._fds_ref._project_path:
+            try:
+                roms_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "roms"
+                self.save(roms_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Could not save ROM results: {e}", UserWarning, stacklevel=2)
+        
+        return result
 
     # ------------------------------------------------------------------
     # Concatenate
@@ -1300,6 +1328,16 @@ class ROMCollection(PlotMixin):
             )
         res = self._mor_ref.concatenate()
         self._concat_cache = res
+        
+        # Explicitly save after concatenation (saves concat/ subfolder)
+        if hasattr(self._fds_ref, '_project_path') and self._fds_ref._project_path:
+            try:
+                roms_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "roms"
+                self.save(roms_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Could not save concat: {e}", UserWarning, stacklevel=2)
+        
         return res
 
     @property
