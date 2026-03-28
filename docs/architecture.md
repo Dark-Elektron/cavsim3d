@@ -8,9 +8,9 @@ The figure below shows the software architecture with the available analysis opt
 
 ### Pathway 1 — Single Solid
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px', 'primaryColor': '#ffe0b2', 'primaryBorderColor': '#e65100', 'primaryTextColor': '#000'}}}%%
 graph LR
-    A1("🔷 Single Device<br/>Model"):::input --> B1("⚙️ Frequency<br/>Domain Solver"):::process --> C1("📉 Reduced Order<br/>Model"):::output
+    A1("Single Device<br/>Model"):::input --> B1("Frequency<br/>Domain Solver"):::process --> C1("Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
@@ -20,7 +20,7 @@ graph LR
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A2("🔷 Multi Device<br/>Model"):::input --> B2("🔗 Fuse into<br/>Single Mesh"):::concat --> C2("⚙️ Frequency<br/>Domain Solver"):::process --> D2("📉 Reduced Order<br/>Model"):::output
+    A2("Multi Device<br/>Model"):::input --> B2("Fuse into<br/>Single Mesh"):::concat --> C2("Frequency<br/>Domain Solver"):::process --> D2("Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
@@ -31,7 +31,7 @@ graph LR
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A3("🔷 Multi Device<br/>Model"):::input --> B3("⚙️ Solve Each<br/>Domain"):::process --> C3("🔗 Concatenate<br/>FOMs"):::concat --> D3("📉 Reduced Order<br/>Model"):::output
+    A3("Multi Device<br/>Model"):::input --> B3("Solve Each<br/>Domain"):::process --> C3("Concatenate<br/>FOMs"):::concat --> D3("Reduced Order<br/>Model"):::output
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef concat fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000
@@ -42,7 +42,7 @@ graph LR
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A4("🔷 Multi Device<br/>Model"):::input --> B4("⚙️ Solve Each<br/>Domain"):::process --> C4("📉 Reduce Each<br/>Domain"):::output --> D4("🔗 Concatenate<br/>ROMs"):::concat --> E4("📊 Solve<br/>Concatenated"):::process
+    A4("Multi Device<br/>Model"):::input --> B4("Solve Each<br/>Domain"):::process --> C4("Reduce Each<br/>Domain"):::output --> D4("Concatenate<br/>ROMs"):::concat --> E4("Solve<br/>Concatenated"):::process
     classDef input fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
     classDef process fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
     classDef output fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
@@ -121,6 +121,7 @@ The most efficient pathway. Each domain is **first reduced** independently, then
 The following sequence diagram shows the typical interaction flow for a single-solid analysis (Pathway 1):
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'actorBkg': '#e8eaf6', 'actorBorder': '#3f51b5', 'actorTextColor': '#000', 'signalColor': '#3f51b5', 'signalTextColor': '#000', 'labelBoxBkgColor': '#e8eaf6', 'labelBoxBorderColor': '#3f51b5', 'labelTextColor': '#000', 'loopTextColor': '#000', 'noteBkgColor': '#fff9c4', 'noteBorderColor': '#f9a825', 'noteTextColor': '#000', 'activationBkgColor': '#c5cae9', 'activationBorderColor': '#3f51b5', 'sequenceNumberColor': '#fff'}}}%%
 sequenceDiagram
     participant User
     participant EMProject
@@ -146,6 +147,7 @@ sequenceDiagram
 The following shows the multi-solid concatenation flow (Pathway 3/4):
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'actorBkg': '#e8eaf6', 'actorBorder': '#3f51b5', 'actorTextColor': '#000', 'signalColor': '#3f51b5', 'signalTextColor': '#000', 'labelBoxBkgColor': '#e8eaf6', 'labelBoxBorderColor': '#3f51b5', 'labelTextColor': '#000', 'loopTextColor': '#000', 'noteBkgColor': '#fff9c4', 'noteBorderColor': '#f9a825', 'noteTextColor': '#000', 'activationBkgColor': '#c5cae9', 'activationBorderColor': '#3f51b5', 'sequenceNumberColor': '#fff'}}}%%
 sequenceDiagram
     participant User
     participant FDS as FrequencyDomainSolver

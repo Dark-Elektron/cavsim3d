@@ -176,6 +176,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._validate_boundary_conditions()
 
     @property
+    def project_sub_path(self) -> Path:
+        """Relative path from project root for this solver's data."""
+        if self.is_compound:
+            return Path("fds") / "foms"
+        return Path("fds") / "fom"
+
+    @property
     def mesh(self) -> Optional[Mesh]:
         """NGSolve Mesh object."""
         return self._mesh

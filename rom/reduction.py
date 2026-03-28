@@ -499,14 +499,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         return res
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
-        if not hasattr(self, 'solver') or not getattr(self.solver, '_project_path', None):
-            return
-        
-        save_path = Path(self.solver._project_path) / self.project_sub_path / "eigenmodes"
         try:
-            self.save_eigenmodes(save_path, **kwargs)
-        except Exception as e:
-            pr.warning(f"Could not auto-save eigenmodes for ModelOrderReduction to {save_path}: {e}")
+            self.save_eigenmodes(**kwargs)
+        except (ValueError, Exception) as e:
+            pr.warning(f"Could not auto-save eigenmodes for ModelOrderReduction: {e}")
 
     # =========================================================================
     # Model Reduction

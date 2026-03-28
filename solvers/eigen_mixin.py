@@ -874,11 +874,7 @@ class EigenMixinBase:
         # Determine path
         if path is None:
             if hasattr(self, '_project_path') and self._project_path:
-                base = Path(self._project_path)
-                if hasattr(self, 'is_compound') and self.is_compound:
-                    path = base / "fds" / "foms" / "eigenmodes"
-                else:
-                    path = base / "fds" / "fom" / "eigenmodes"
+                path = Path(self._project_path) / self.project_sub_path / "eigenmodes"
             else:
                 raise ValueError("No path provided and no project_path available.")
         
@@ -921,21 +917,11 @@ class EigenMixinBase:
         
         if path is None:
             if hasattr(self, '_project_path') and self._project_path:
-                base = Path(self._project_path)
-                # Try standard locations
-                potential_paths = [
-                    base / "fds" / "fom" / "eigenmodes",
-                    base / "fds" / "foms" / "eigenmodes",
-                    base / "fds" / "eigenmodes",
-                    base / "eigenmodes"
-                ]
-                for p in potential_paths:
-                    if (p / "eigenmodes.h5").exists():
-                        path = p
-                        break
-                if path is None: return # Not found, silent return
+                path = Path(self._project_path) / self.project_sub_path / "eigenmodes"
+                if not (path / "eigenmodes.h5").exists():
+                    return  # Not found, silent return
             else:
-                return # No path, silent return
+                return  # No path, silent return
 
         path = Path(path)
         h5_file = path / "eigenmodes.h5"

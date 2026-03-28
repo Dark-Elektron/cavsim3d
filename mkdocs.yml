@@ -93,7 +93,7 @@ nav:
   - API Reference:
       - Project Management: api/project.md
       - Geometry & Assembly: api/geometry.md
-      - Solvers: api/solvers.md
+      - Solvers & Results: api/solvers.md
       - Model Reduction: api/rom.md
   - Developers:
       - Viewing Locally: viewing_locally.md

@@ -1,21 +1,200 @@
-/* Force Mermaid diagrams to use full container width */
+/* ── Force Mermaid diagrams to use full container width ── */
 .mermaid svg {
     max-width: 100% !important;
     width: 100% !important;
     height: auto !important;
 }
 .mermaid svg rect {
-  rx: 100;
-  ry: 100;
+    rx: 12;
+    ry: 12;
 }
-/* Ensure images scale to content area */
+
+/* ── Ensure images scale to content area ── */
 .md-content img {
     max-width: 100%;
 }
 
-/* Jupyter notebook output images should fill width */
+/* ── Jupyter notebook output images should fill width ── */
 .jp-OutputArea-output img,
 .jupyter-wrapper img {
     max-width: 100%;
     height: auto;
+}
+
+/* ── Global rounded corners ── */
+
+/* Admonitions */
+.md-typeset .admonition,
+.md-typeset details {
+    border-radius: 12px;
+    overflow: hidden;
+}
+.md-typeset .admonition > .admonition-title,
+.md-typeset details > summary {
+    border-radius: 12px 12px 0 0;
+}
+
+/* Code blocks */
+.md-typeset pre > code,
+.md-typeset .highlight > pre,
+.md-typeset .highlighttable {
+    border-radius: 12px;
+}
+.md-typeset .highlighttable .linenos {
+    border-radius: 12px 0 0 12px;
+}
+.md-typeset .highlighttable .code {
+    border-radius: 0 12px 12px 0;
+}
+
+/* Tables */
+.md-typeset table:not([class]) {
+    border-radius: 12px;
+    border-collapse: separate;
+    border-spacing: 0;
+    overflow: hidden;
+    border: 1px solid var(--md-typeset-table-color);
+}
+.md-typeset table:not([class]) th:first-child {
+    border-top-left-radius: 12px;
+}
+.md-typeset table:not([class]) th:last-child {
+    border-top-right-radius: 12px;
+}
+.md-typeset table:not([class]) tr:last-child td:first-child {
+    border-bottom-left-radius: 12px;
+}
+.md-typeset table:not([class]) tr:last-child td:last-child {
+    border-bottom-right-radius: 12px;
+}
+
+/* Content tabs */
+.md-typeset .tabbed-set {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+/* Cards / grid items */
+.md-typeset .grid .card,
+.md-typeset .md-typeset .card {
+    border-radius: 12px;
+}
+
+/* ── Colorful table headers ── */
+[data-md-color-scheme="default"] .md-typeset table:not([class]) th {
+    background: linear-gradient(135deg, #5c6bc0, #7e57c2);
+    color: #fff;
+    font-weight: 600;
+}
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+    background: linear-gradient(135deg, #3949ab, #5e35b1);
+    color: #fff;
+    font-weight: 600;
+}
+
+/* Alternating row tints */
+[data-md-color-scheme="default"] .md-typeset table:not([class]) tbody tr:nth-child(even) {
+    background-color: rgba(92, 107, 192, 0.06);
+}
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tbody tr:nth-child(even) {
+    background-color: rgba(92, 107, 192, 0.10);
+}
+
+/* ── Colorful admonition accents ── */
+
+/* Note - blue */
+.md-typeset .admonition.note,
+.md-typeset details.note {
+    border-left: 4px solid #42a5f5;
+    background: linear-gradient(135deg, rgba(66, 165, 245, 0.08), rgba(66, 165, 245, 0.02));
+}
+
+/* Tip - teal */
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+    border-left: 4px solid #26a69a;
+    background: linear-gradient(135deg, rgba(38, 166, 154, 0.08), rgba(38, 166, 154, 0.02));
+}
+
+/* Warning - amber */
+.md-typeset .admonition.warning,
+.md-typeset details.warning {
+    border-left: 4px solid #ffa726;
+    background: linear-gradient(135deg, rgba(255, 167, 38, 0.08), rgba(255, 167, 38, 0.02));
+}
+
+/* Info - indigo */
+.md-typeset .admonition.info,
+.md-typeset details.info {
+    border-left: 4px solid #5c6bc0;
+    background: linear-gradient(135deg, rgba(92, 107, 192, 0.08), rgba(92, 107, 192, 0.02));
+}
+
+/* Example - purple */
+.md-typeset .admonition.example,
+.md-typeset details.example {
+    border-left: 4px solid #ab47bc;
+    background: linear-gradient(135deg, rgba(171, 71, 188, 0.08), rgba(171, 71, 188, 0.02));
+}
+
+/* Abstract / summary - cyan */
+.md-typeset .admonition.abstract,
+.md-typeset .admonition.summary,
+.md-typeset details.abstract,
+.md-typeset details.summary {
+    border-left: 4px solid #26c6da;
+    background: linear-gradient(135deg, rgba(38, 198, 218, 0.08), rgba(38, 198, 218, 0.02));
+}
+
+/* Danger - red */
+.md-typeset .admonition.danger,
+.md-typeset details.danger {
+    border-left: 4px solid #ef5350;
+    background: linear-gradient(135deg, rgba(239, 83, 80, 0.08), rgba(239, 83, 80, 0.02));
+}
+
+/* ── Colorful inline code ── */
+[data-md-color-scheme="default"] .md-typeset code {
+    background-color: rgba(92, 107, 192, 0.10);
+    border-radius: 6px;
+    color: #5c6bc0;
+}
+[data-md-color-scheme="slate"] .md-typeset code {
+    background-color: rgba(121, 134, 203, 0.15);
+    border-radius: 6px;
+    color: #9fa8da;
+}
+/* Don't override code inside code blocks */
+.md-typeset pre code {
+    background-color: transparent;
+    color: inherit;
+    border-radius: 0;
+}
+
+/* ── Colorful blockquotes ── */
+.md-typeset blockquote {
+    border-left: 4px solid #7e57c2;
+    border-radius: 0 12px 12px 0;
+    background: linear-gradient(135deg, rgba(126, 87, 194, 0.06), transparent);
+    padding: 0.8rem 1.2rem;
+}
+
+/* ── Smooth hover on table rows ── */
+.md-typeset table:not([class]) tbody tr {
+    transition: background-color 0.15s ease;
+}
+.md-typeset table:not([class]) tbody tr:hover {
+    background-color: rgba(92, 107, 192, 0.12) !important;
+}
+
+/* ── Rounded navigation tabs ── */
+.md-tabs__link--active,
+.md-tabs__link:hover {
+    border-radius: 8px 8px 0 0;
+}
+
+/* ── Jupyter cell output rounded ── */
+.jupyter-wrapper .jp-OutputArea-output,
+.jupyter-wrapper .jp-RenderedHTMLCommon {
+    border-radius: 8px;
 }

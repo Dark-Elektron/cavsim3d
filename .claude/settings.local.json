@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"save_eigenmodes\\\\|load_eigenmodes\\\\|eigenmodes.h5\" /c/Users/Soske/Documents/git_projects/cavsim3d/tests/*.py)",
+      "Bash(git checkout:*)",
+      "Bash(grep -r \"iframe\\\\|embed\\\\|notebook\" docs/ --include=*.md --include=*.css)",
+      "Bash(xargs grep:*)",
+      "Bash(python -m json.tool /c/Users/Soske/Documents/git_projects/cavsim3d/docs/tutorials/pathway1_single_solid.ipynb)",
+      "Bash(ls docs/tutorials/*.ipynb)",
+      "Bash(ls -la c:/Users/Soske/Documents/git_projects/cavsim3d/docs/tutorials/pathway*.md)",
+      "Bash(C:/Users/Soske/anaconda3/python.exe -c \":*)",
+      "Bash(wc -c c:/Users/Soske/Documents/git_projects/cavsim3d/docs/tutorials/mesh.html)",
+      "Bash(head -c 500 c:/Users/Soske/Documents/git_projects/cavsim3d/docs/tutorials/mesh.html)",
+      "Bash(C:/Users/Soske/anaconda3/envs/cavsim3d/python.exe -c \"from ngsolve.webgui import Draw; import inspect; print\\(inspect.signature\\(Draw\\)\\)\")",
+      "Bash(C:/Users/Soske/anaconda3/envs/cavsim3d/python.exe -c \"import webgui_jupyter_widgets; print\\([a for a in dir\\(webgui_jupyter_widgets\\) if not a.startswith\\(''_''\\)]\\)\")",
+      "Bash(C:/Users/Soske/anaconda3/envs/cavsim3d/python.exe -c \"from webgui_jupyter_widgets import WebGuiDocuWidget; help\\(WebGuiDocuWidget\\)\")",
+      "Bash(C:/Users/Soske/anaconda3/envs/cavsim3d/python.exe -c \":*)",
+      "Read(//dev/**)"
+    ]
+  }
+}

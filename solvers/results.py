@@ -321,20 +321,13 @@ class FOMResult(PlotMixin):
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
         """Helper to save eigenmodes to the mirrored project structure."""
-        if self._solver_ref is None or not hasattr(self._solver_ref, '_project_path'):
+        if self._solver_ref is None or not hasattr(self._solver_ref, 'save_eigenmodes'):
             return
-        
-        project_path = Path(self._solver_ref._project_path)
-        # Mirror: fds/fom -> fds/fom/eigenmodes, fds/foms/solid -> fds/foms/solid/eigenmodes
-        sub_path = "fom" if self.domain == 'global' else f"foms/{self.domain}"
-        save_path = project_path / "fds" / sub_path / "eigenmodes"
-        
         try:
-            # We need FrequencyDomainSolver to have save_eigenmodes (from mixin)
-            if hasattr(self._solver_ref, 'save_eigenmodes'):
-                self._solver_ref.save_eigenmodes(save_path, domain=(self.domain if self.domain != 'global' else None), **kwargs)
-        except Exception as e:
-            print(f"Warning: Could not auto-save eigenmodes to {save_path}: {e}")
+            domain = self.domain if self.domain != 'global' else None
+            self._solver_ref.save_eigenmodes(domain=domain, **kwargs)
+        except (ValueError, Exception) as e:
+            print(f"Warning: Could not auto-save eigenmodes: {e}")
 
     # ------------------------------------------------------------------
     # Persistence
@@ -1182,14 +1175,11 @@ class FOMCollection(PlotMixin):
         raise RuntimeError("Eigenvalues not available for this FOMCollection.")
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
-        if self._fds_ref is None or not hasattr(self._fds_ref, '_project_path'):
+        if self._fds_ref is None or not hasattr(self._fds_ref, 'save_eigenmodes'):
             return
-        
-        save_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "eigenmodes"
         try:
-            if hasattr(self._fds_ref, 'save_eigenmodes'):
-                self._fds_ref.save_eigenmodes(save_path, domain=None, **kwargs)
-        except Exception as e:
+            self._fds_ref.save_eigenmodes(domain=None, **kwargs)
+        except (ValueError, Exception) as e:
             print(f"Warning: Could not auto-save eigenmodes for collection: {e}")
 
 
@@ -1371,15 +1361,11 @@ class ROMCollection(PlotMixin):
         raise RuntimeError("Eigenmodes not available for this ROMCollection.")
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
-        if self._fds_ref is None or not hasattr(self._fds_ref, '_project_path'):
+        if self._mor_ref is None or not hasattr(self._mor_ref, 'save_eigenmodes'):
             return
-        
-        # Mirror: fds/foms/roms -> eigenmode/foms/roms
-        save_path = Path(self._fds_ref._project_path) / "eigenmode" / "foms" / "roms"
         try:
-            if hasattr(self._mor_ref, 'save_eigenmodes'):
-                self._mor_ref.save_eigenmodes(save_path, **kwargs)
-        except Exception as e:
+            self._mor_ref.save_eigenmodes(**kwargs)
+        except (ValueError, Exception) as e:
             print(f"Warning: Could not auto-save eigenmodes for ROMCollection: {e}")
 
     # ------------------------------------------------------------------
