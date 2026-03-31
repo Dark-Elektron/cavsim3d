@@ -16,6 +16,11 @@ Comprehensive tutorials and API documentation are available at:
 *   **Domain Decomposition**: Solve massive structures by breaking them into manageable subdomains and recombining via Kirchhoff coupling.
 
 ## 📦 Installation
+### Prerequisites
+
+- Python 3.9+
+- Conda environment
+
 To install `cavsim3d` from source, clone the repository and install it using `pip` in editable or normal mode:
 
 ```bash
