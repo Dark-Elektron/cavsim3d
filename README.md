@@ -1,12 +1,11 @@
-# cavsim3d
-
-[![License: LGPL](https://img.shields.io/badge/License-LGPL-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
-[![Documentation Status](https://img.shields.io/badge/docs-GitHub%20Pages-brightgreen)](https://dark-elektron.github.io/cavsim3d/)
-
 <p align="center">
   <img src="docs/assets/cavsim3d_logo_square.svg" alt="icon" width="128">
 </p>
 <h1 align="center">cavsim3d</h1>
+
+[![License: LGPL](https://img.shields.io/badge/License-LGPL-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
+[![Documentation Status](https://img.shields.io/badge/docs-GitHub%20Pages-brightgreen)](https://dark-elektron.github.io/cavsim3d/)
+
 `cavsim3d` is a Python library for **3D Electromagnetic Simulation** and **Model Order Reduction (MOR)** of RF structures. Built on the [NGSolve](https://ngsolve.org) finite element engine, it provides a streamlined workflow for analyzing complex cavity systems, waveguides, and multi-component assemblies.
 
 ## 📖 Documentation
