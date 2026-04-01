@@ -2,16 +2,19 @@
 
 This guide walks you through a simple simulation.
 
-## Prerequisites
+## 📦 Installation
+### Prerequisites
 
 - Python 3.9-3.12
-- [NGSolve](https://github.com/NGSolve/ngsolve) and [PythonOCC](https://github.com/tpaviot/pythonocc-core) installed
+- Conda environment
 
-## Installation
+To install `cavsim3d` from source, clone the repository and install it using `pip` in editable or normal mode:
 
 ```bash
-git clone https://github.com/Dark-Elektron/cavsim3d.git
+git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
+pip install --upgrade pip
+conda install -y pythonocc-core pythreejs ipywidgets --no-update-deps
 pip install -e .
 ```
 
