@@ -287,9 +287,9 @@ Solving the full system at every frequency point is expensive. **Proper Orthogon
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A["Full System<br/>N ≈ 10,000 DOFs"]:::full -->|"SVD"| B["Reduced Basis<br/>r ≈ 20 DOFs"]:::basis
-    B -->|"Project K, M, B"| C["Reduced System<br/>r × r"]:::reduced
-    C -->|"Solve at 1000s<br/>of freq points"| D["S/Z Parameters"]:::result
+    A("Full System<br/>N ≈ 10,000 DOFs"):::full -->|"SVD"| B("Reduced Basis<br/>r ≈ 20 DOFs"):::basis
+    B -->|"Project K, M, B"| C("Reduced System<br/>r × r"):::reduced
+    C -->|"Solve at 1000s<br/>of freq points"| D("S/Z Parameters"):::result
     classDef full fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
     classDef basis fill:#ce93d8,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef reduced fill:#90caf9,stroke:#1565c0,stroke-width:2px,color:#000
@@ -402,12 +402,12 @@ $$
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
     subgraph "Domain 1"
-        P1["Port 1<br/>(external)"]:::ext --> A1["A₁, B₁"]:::solver
-        A1 --> I1["Interface<br/>(internal)"]:::internal
+        P1("Port 1<br/>(external)"):::ext --> A1("A₁, B₁"):::solver
+        A1 --> I1("Interface<br/>(internal)"):::internal
     end
 
     subgraph "Domain 2"
-        I2["Interface<br/>(internal)"]:::internal --> A2["A₂, B₂"]:::solver
+        I2("Interface<br/>(internal)"):::internal --> A2("A₂, B₂"):::solver
         A2 --> P2["Port 2<br/>(external)"]:::ext
     end
 
@@ -421,9 +421,9 @@ graph LR
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    BLK["Block-Diagonal<br/>A_blk, B_blk"]:::full -->|"Null-space<br/>projection"| COUPLED["Coupled System<br/>A_coupled, B_coupled"]:::reduced
-    COUPLED -->|"Frequency<br/>sweep"| Z["Z-parameters"]:::result
-    Z -->|"Z-to-S<br/>conversion"| S["S-parameters"]:::result
+    BLK("Block-Diagonal<br/>A_blk, B_blk"):::full -->|"Null-space<br/>projection"| COUPLED("Coupled System<br/>A_coupled, B_coupled"):::reduced
+    COUPLED -->|"Frequency<br/>sweep"| Z("Z-parameters"):::result
+    Z -->|"Z-to-S<br/>conversion"| S("S-parameters"):::result
     classDef full fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
     classDef reduced fill:#90caf9,stroke:#1565c0,stroke-width:2px,color:#000
     classDef result fill:#a5d6a7,stroke:#2e7d32,stroke-width:2px,color:#000

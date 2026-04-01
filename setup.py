@@ -38,7 +38,6 @@ setup(
     ],
     extras_require={
         "full": [
-            "ngsolve",
             "ipython",
             "ipywidgets",
         ],
