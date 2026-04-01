@@ -13,21 +13,21 @@ $$
 $$
 
 $$
-\nabla \times \mathbf{H} = j\omega \varepsilon^* \mathbf{E}
+\nabla \times \mathbf{H} = j\omega \varepsilon \mathbf{E}
 $$
 
 where:
 
 - $\omega = 2\pi f$ is the angular frequency
 - $\mu$ is the magnetic permeability
-- $\varepsilon^* = \varepsilon - j\sigma/\omega$ is the complex permittivity (incorporating conductive losses)
+- $\varepsilon$ is the permittivity
 
 ### Vector Wave Equation
 
 Taking the curl of the first equation and substituting yields the second-order equation for $\mathbf{E}$:
 
 $$
-\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \varepsilon_r^* \mathbf{E} = \mathbf{0}
+\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \varepsilon_r \mathbf{E} = \mathbf{0}
 $$
 
 where $k_0 = \omega\sqrt{\mu_0\varepsilon_0}$ is the free-space wavenumber. This is the core equation solved by **FrequencyDomainSolver**.
@@ -40,7 +40,7 @@ To solve numerically via FEM, we multiply by a test function $\mathbf{v} \in H(\
 
 $$
 \int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{E}) \cdot (\nabla \times \mathbf{v}) \, \mathrm{d}\Omega
-- k_0^2 \int_\Omega \varepsilon_r^* \mathbf{E} \cdot \mathbf{v} \, \mathrm{d}\Omega
+- k_0^2 \int_\Omega \varepsilon_r \mathbf{E} \cdot \mathbf{v} \, \mathrm{d}\Omega
 - j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, \mathrm{d}s
 = 0
 $$

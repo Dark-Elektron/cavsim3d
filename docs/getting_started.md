@@ -4,7 +4,7 @@ This guide walks you through a simple simulation.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.9-3.12
 - [NGSolve](https://github.com/NGSolve/ngsolve) and [PythonOCC](https://github.com/tpaviot/pythonocc-core) installed
 
 ## Installation
