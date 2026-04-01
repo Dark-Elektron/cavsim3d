@@ -9,7 +9,7 @@
 
 - Simulate RF cavities, waveguides, and accelerator components
 - Compute S-parameters, Z-parameters, and eigenfrequencies
-- Accelerate wideband analysis with Proper Orthogonal Decomposition (POD)
+- Accelerate electromagnetic field analysis through Model Order Reduction (MOR)
 - Handle multi-component assemblies with automatic concatenation
 
 ## Analysis Pathways
