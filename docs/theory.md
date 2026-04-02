@@ -6,7 +6,7 @@
 
 ## 1. Maxwell's Equations
 
-In the frequency domain, assuming an $\exp(j\omega t)$ time dependence:
+In the frequency domain, assuming an $e^{j\omega t}$ time dependence:
 
 $$
 \nabla \times \mathbf{E} = -j\omega \mu \mathbf{H}
@@ -45,7 +45,7 @@ $$
 = 0
 $$
 
-The surface integral naturally imposes boundary conditions:
+The boundary conditions are applied using the surface integral term:
 
 | Boundary | Condition | Effect |
 |----------|-----------|--------|
@@ -53,22 +53,245 @@ The surface integral naturally imposes boundary conditions:
 | **PMC** | $\mathbf{n} \times \mathbf{H} = 0$ | Perfect magnetic conductor |
 | **Port** | Modal expansion | Waveguide interface for S-parameter extraction |
 
+!!! info "Implementation detail"
+    PMC boundary condition is applied on the port faces not an absorbing boundary condition like PML.
+
 ### Discretisation
 
-Expanding $\mathbf{E} \approx \sum_i x_i \mathbf{N}_i$ in the Nédélec (edge) basis leads to the linear system:
+We expand the electric field in terms of Nédélec (edge) basis functions:
+
 
 $$
-\boxed{(\mathbf{K} - \omega^2 \mathbf{M}) \mathbf{x} = \omega \, \mathbf{b}}
+\mathbf{E} \approx \sum_{i} x_i \mathbf{N}_i
 $$
+
+
+and choose the test function $\mathbf{v} = \mathbf{N}_j$ (Galerkin method) for each degree of freedom $j$.
+Substituting into the variational form:
+
+
+$$
+\int_\Omega \frac{1}{\mu_r}
+  \left(\nabla \times \sum_{i} x_i \mathbf{N}_i\right)
+  \cdot (\nabla \times \mathbf{N}_j) \, \mathrm{d}\Omega
+\;-\; k_0^2 \int_\Omega \varepsilon_r
+  \left(\sum_{i} x_i \mathbf{N}_i\right)
+  \cdot \mathbf{N}_j \, \mathrm{d}\Omega
+\;-\; j\omega\mu_0 \oint_{\partial\Omega}
+  (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{N}_j \, \mathrm{d}s
+= 0
+$$
+
+
+We now treat each term separately.
+
+---
+
+#### Term 1 — Stiffness (Curl–Curl)
+
+Using linearity of the curl operator, pull the sum and coefficients out of the integral:
+
+
+$$
+\int_\Omega \frac{1}{\mu_r}
+  \left(\sum_i x_i \,\nabla \times \mathbf{N}_i\right)
+  \cdot (\nabla \times \mathbf{N}_j) \, \mathrm{d}\Omega
+\;=\;
+\sum_i x_i
+  \underbrace{
+    \int_\Omega \frac{1}{\mu_r}
+    (\nabla \times \mathbf{N}_i) \cdot (\nabla \times \mathbf{N}_j)
+    \, \mathrm{d}\Omega
+  }_{K_{ji}}
+$$
+
+
+Define the **stiffness matrix**:
+
+
+$$
+\boxed{
+  K_{ji} = \int_\Omega \frac{1}{\mu_r}\,
+  (\nabla \times \mathbf{N}_i) \cdot (\nabla \times \mathbf{N}_j)
+  \, \mathrm{d}\Omega
+}
+$$
+
+
+So Term 1 becomes $\displaystyle\sum_i K_{ji}\, x_i$.
+
+---
+
+#### Term 2 — Mass
+
+Similarly, expand and factor:
+
+
+$$
+k_0^2 \int_\Omega \varepsilon_r
+  \left(\sum_i x_i \,\mathbf{N}_i\right) \cdot \mathbf{N}_j
+  \, \mathrm{d}\Omega
+\;=\;
+k_0^2 \sum_i x_i
+  \underbrace{
+    \int_\Omega \varepsilon_r \,
+    \mathbf{N}_i \cdot \mathbf{N}_j
+    \, \mathrm{d}\Omega
+  }_{M_{ji}'}
+$$
+
+
+Since $k_0 = \omega\sqrt{\mu_0 \varepsilon_0}$, we have
+$k_0^2 = \omega^2 \mu_0 \varepsilon_0$. Absorbing the physical
+constants into the matrix, define the **mass matrix**:
+
+
+$$
+\boxed{
+  M_{ji} = \mu_0 \varepsilon_0
+  \int_\Omega \varepsilon_r \,
+  \mathbf{N}_i \cdot \mathbf{N}_j
+  \, \mathrm{d}\Omega
+}
+$$
+
+
+So Term 2 becomes $\displaystyle -\omega^2 \sum_i M_{ji}\, x_i$.
+
+---
+
+#### Term 3 — Boundary Conditions
+
+#### PEC Boundary
+
+Starting from the surface integral:
+
+
+$$
+-j\omega\mu_0 \oint_{\partial\Omega}
+(\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v}
+\,\mathrm{d}s
+\,=\;
+- j\omega\mu_0 \oint_{\partial\Omega}
+\mathbf{H} \cdot (\mathbf{n} \times \mathbf{v})
+\,\mathrm{d}s
+$$
+
+
+On PEC walls, $\mathbf{n} \times \mathbf{E} = 0$ is
+an **essential (Dirichlet) boundary condition**, enforced
+by constraining the edge degrees of freedom. Since the
+test functions live in the same constrained space, they
+must also satisfy:
+
+
+$$
+\mathbf{n} \times \mathbf{v}\big|_{\partial\Omega_{\text{PEC}}} = 0
+$$
+
+
+Therefore:
+
+
+$$
+j\omega\mu_0 \oint_{\partial\Omega_{\text{PEC}}}
+\mathbf{H} \cdot
+\underbrace{(\mathbf{n} \times \mathbf{v})}_{=\,0}
+\,\mathrm{d}s = 0
+$$
+
+#### PMC Boundary
+
+For PMC, the tangential magnetic field vanishes:
+$\mathbf{n} \times \mathbf{H} = 0$.
+This is a **natural (Neumann) boundary condition** — the
+surface integral vanishes directly without constraining
+any degrees of freedom:
+
+
+$$
+-j\omega\mu_0
+\oint_{\partial\Omega_{\text{PMC}}}
+\underbrace{(\mathbf{n} \times \mathbf{H})}_{= \,0}
+\cdot \mathbf{v}\,\mathrm{d}s \;=\; 0
+$$
+
+
+No special treatment is needed: simply not imposing any
+boundary condition on a surface automatically enforces PMC.                                                                               
+
+#### Source / Port Excitation
+The surface integral does not depend on the unknown
+coefficients $x_i$. The field in the integral is the
+incident field (subscript inc) from the port. Factor out $\omega$:
+
+
+$$
+-j\omega\mu_0 \oint_{\partial\Omega_\mathrm{port}}
+  (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j \, \mathrm{d}s
+\;=\;
+\omega
+\underbrace{
+  \left(
+    -j\mu_0 \oint_{\partial\Omega_\mathrm{port}}
+    (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j
+    \, \mathrm{d}s
+  \right)
+}_{b_j}
+$$
+
+
+Define the **excitation vector**:
+
+
+$$
+\boxed{
+  b_j = -j\mu_0 \oint_{\partial\Omega_\mathrm{port}}
+  (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j
+  \, \mathrm{d}s
+}
+$$
+
+
+So Term 3 becomes $\omega\, b_j$ and moves to the right-hand side.
+
+---
+
+#### Assembly into Matrix Form
+
+Collecting all three terms for each test function index $j$:
+
+
+$$
+\sum_i K_{ji}\, x_i
+\;-\; \omega^2 \sum_i M_{ji}\, x_i
+\;=\; \omega\, b_j
+$$
+
+
+Recognising the sums as matrix–vector products:
+
+$$
+\boxed{
+  \left(\mathbf{K} - \omega^2\,\mathbf{M}\right)\mathbf{x}
+  = \omega\,\mathbf{b}
+}
+$$
+
 
 where:
 
-- $\mathbf{K}$ = stiffness matrix (from curl-curl term)
-- $\mathbf{M}$ = mass matrix (from $\varepsilon$ term)
-- $\mathbf{b}$ = right-hand side excitation vector (port modal source, see [Section 3.3](#33-building-the-right-hand-side-b))
+| Symbol | Size | Definition |
+|--------|------|------------|
+| $\mathbf{K}$ | $N \times N$ | Stiffness (curl–curl) matrix |
+| $\mathbf{M}$ | $N \times N$ | Mass matrix (with $\mu_0\varepsilon_0$ absorbed) |
+| $\mathbf{x}$ | $N \times 1$ | Unknown edge-element coefficients |
+| $\mathbf{b}$ | $N \times 1$ | Port excitation vector |
+| $N$           | —    | Number of edge degrees of freedom |
+
 
 !!! info "Notation"
-    The system is solved one excitation at a time. For each port-mode pair $(p, m)$, the solver constructs a dedicated RHS vector $\mathbf{b}_{p,m}$ and solves for the corresponding field solution $\mathbf{x}_{p,m}$. The collection of all solutions is assembled into a solution matrix $\mathbf{X} = [\mathbf{x}_1 \mid \mathbf{x}_2 \mid \dots]$.
+    The system is solved one excitation at a time. For each port-mode pair $(p, m)$, the solver constructs a dedicated RHS vector $\mathbf{b}_{p,m}$ assembled in the excitation matrix $\mathbf{B}$ and solves for the corresponding field solution $\mathbf{x}_{p,m}$. The collection of all solutions is assembled into a solution matrix $\mathbf{X} = [\mathbf{x}_1 \mid \mathbf{x}_2 \mid \dots]$.
 
 ---
 
@@ -87,7 +310,7 @@ $$
 where $k_{c,m}$ is the cutoff wavenumber of mode $m$ and $\nabla_t$ denotes the transverse (2D) curl operator restricted to the port surface.
 
 !!! tip "Mode sources"
-    For standard cross-sections (rectangular, circular), **cavsim3d** uses **analytic mode formulas** for speed and deterministic phase. For arbitrary cross-sections, a **numeric eigenvalue solve** on the port FE space is used instead.
+    For standard cross-sections (rectangular, circular), **cavsim3d** uses **analytic mode formulas** (for external ports) for speed and deterministic phase. For internal ports and arbitrary cross-sections, a **numeric eigenvalue solve** on the port FE space is used instead. The default setting is using analytical mode formulas for all external ports and numerical mode solver for all internal ports. This can be changed by setting the `mode_source` and `mode_source_internal` flags to `'analytic'` or `'numeric'`.
 
 ### 3.2 Mode Normalisation
 
