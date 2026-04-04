@@ -1094,17 +1094,22 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             
             # Store base RHS vectors (without omega scaling)
             rhs_base_vectors = []
-            for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-                f = LinearForm(fes)
-                f += InnerProduct(
-                    self.port_modes[port_m][mode_m], v.Trace()
-                ) * ds(port_m)
-                with TaskManager():
-                    f.Assemble()
+            # for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
+            #     f = LinearForm(fes)
+            #     f += InnerProduct(
+            #         self.port_modes[port_m][mode_m], v.Trace()
+            #     ) * ds(port_m)
+            #     with TaskManager():
+            #         f.Assemble()
                 
-                # Clone the vector (not just reference)
+            #     # Clone the vector (not just reference)
+            #     vec = template_vec.CreateVector()
+            #     vec.data = f.vec
+            #     rhs_base_vectors.append(vec)
+
+            for col in range(n_excitations):
                 vec = template_vec.CreateVector()
-                vec.data = f.vec
+                vec.FV().NumPy()[:] = B[:, col]   # ← direct copy, no integration
                 rhs_base_vectors.append(vec)
 
             # ============================================================
@@ -1292,17 +1297,22 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         template_vec = template_vec.vec
         rhs_base_vectors = []
         
-        for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-            f = LinearForm(fes)
-            f += InnerProduct(
-                self.port_modes[port_m][mode_m], v.Trace()
-            ) * ds(port_m)
+        # for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
+        #     f = LinearForm(fes)
+        #     f += InnerProduct(
+        #         self.port_modes[port_m][mode_m], v.Trace()
+        #     ) * ds(port_m)
             
-            with TaskManager():
-                f.Assemble()
+        #     with TaskManager():
+        #         f.Assemble()
             
+        #     vec = template_vec.CreateVector()
+        #     vec.data = f.vec
+        #     rhs_base_vectors.append(vec)
+
+        for col in range(n_excitations):
             vec = template_vec.CreateVector()
-            vec.data = f.vec
+            vec.FV().NumPy()[:] = B[:, col]   # ← direct copy, no integration
             rhs_base_vectors.append(vec)
 
         # ============================================================

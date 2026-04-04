@@ -41,7 +41,7 @@ To solve numerically via FEM, we multiply by a test function $\mathbf{v} \in H(\
 $$
 \int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{E}) \cdot (\nabla \times \mathbf{v}) \, \mathrm{d}\Omega
 - k_0^2 \int_\Omega \varepsilon_r \mathbf{E} \cdot \mathbf{v} \, \mathrm{d}\Omega
-- j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, \mathrm{d}s
+- j\omega\mu_0 \oint_{\partial\Omega} (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v} \, \mathrm{d}S
 = 0
 $$
 
@@ -78,7 +78,7 @@ $$
   \left(\sum_{i} x_i \mathbf{N}_i\right)
   \cdot \mathbf{N}_j \, \mathrm{d}\Omega
 \;-\; j\omega\mu_0 \oint_{\partial\Omega}
-  (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{N}_j \, \mathrm{d}s
+  (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{N}_j \, \mathrm{d}S
 = 0
 $$
 
@@ -170,11 +170,11 @@ Starting from the surface integral:
 $$
 -j\omega\mu_0 \oint_{\partial\Omega}
 (\mathbf{n} \times \mathbf{H}) \cdot \mathbf{v}
-\,\mathrm{d}s
-\,=\;
+\,\mathrm{d}S
+\;=\;
 - j\omega\mu_0 \oint_{\partial\Omega}
 \mathbf{H} \cdot (\mathbf{n} \times \mathbf{v})
-\,\mathrm{d}s
+\,\mathrm{d}S
 $$
 
 
@@ -197,7 +197,7 @@ $$
 j\omega\mu_0 \oint_{\partial\Omega_{\text{PEC}}}
 \mathbf{H} \cdot
 \underbrace{(\mathbf{n} \times \mathbf{v})}_{=\,0}
-\,\mathrm{d}s = 0
+\,\mathrm{d}S = 0
 $$
 
 #### PMC Boundary
@@ -213,7 +213,7 @@ $$
 -j\omega\mu_0
 \oint_{\partial\Omega_{\text{PMC}}}
 \underbrace{(\mathbf{n} \times \mathbf{H})}_{= \,0}
-\cdot \mathbf{v}\,\mathrm{d}s \;=\; 0
+\cdot \mathbf{v}\,\mathrm{d}S \;=\; 0
 $$
 
 
@@ -228,14 +228,14 @@ incident field (subscript inc) from the port. Factor out $\omega$:
 
 $$
 -j\omega\mu_0 \oint_{\partial\Omega_\mathrm{port}}
-  (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j \, \mathrm{d}s
+  (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j \, \mathrm{d}S
 \;=\;
-\omega
+-j\omega
 \underbrace{
   \left(
-    -j\mu_0 \oint_{\partial\Omega_\mathrm{port}}
+    \mu_0 \oint_{\partial\Omega_\mathrm{port}}
     (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j
-    \, \mathrm{d}s
+    \, \mathrm{d}S
   \right)
 }_{b_j}
 $$
@@ -246,9 +246,9 @@ Define the **excitation vector**:
 
 $$
 \boxed{
-  b_j = -j\mu_0 \oint_{\partial\Omega_\mathrm{port}}
+  b_j = \mu_0 \oint_{\partial\Omega_\mathrm{port}}
   (\mathbf{n} \times \mathbf{H}_\mathrm{inc}) \cdot \mathbf{N}_j
-  \, \mathrm{d}s
+  \, \mathrm{d}S
 }
 $$
 
@@ -265,7 +265,7 @@ Collecting all three terms for each test function index $j$:
 $$
 \sum_i K_{ji}\, x_i
 \;-\; \omega^2 \sum_i M_{ji}\, x_i
-\;=\; \omega\, b_j
+\;=\; j\omega\, b_j
 $$
 
 
@@ -274,7 +274,7 @@ Recognising the sums as matrix–vector products:
 $$
 \boxed{
   \left(\mathbf{K} - \omega^2\,\mathbf{M}\right)\mathbf{x}
-  = \omega\,\mathbf{b}
+  = j\omega\,\mathbf{b}
 }
 $$
 
@@ -297,105 +297,225 @@ where:
 
 ## 3. Port Modal Analysis
 
-At each waveguide port, a 2D eigenvalue problem is solved on the port cross-section to determine the propagating modes.
+At each waveguide port, a 2D eigenvalue problem is solved on the port
+cross-section to determine the propagating modes.
 
 ### 3.1 Port Eigenvalue Problem
 
 The transverse electric field modes $\mathbf{e}_m$ satisfy:
 
+
 $$
-\nabla_t \times (\nabla_t \times \mathbf{e}_m) = k_{c,m}^2 \, \mathbf{e}_m
+\nabla_t \times (\nabla_t \times \mathbf{e}_m)
+= k_{c,m}^2 \, \mathbf{e}_m
 $$
 
-where $k_{c,m}$ is the cutoff wavenumber of mode $m$ and $\nabla_t$ denotes the transverse (2D) curl operator restricted to the port surface.
+
+where $k_{c,m}$ is the cutoff wavenumber of mode $m$ and $\nabla_t$
+denotes the transverse (2D) curl operator restricted to the port surface.
 
 !!! tip "Mode sources"
-    For standard cross-sections (rectangular, circular), **cavsim3d** uses **analytic mode formulas** (for external ports) for speed and deterministic phase. For internal ports and arbitrary cross-sections, a **numeric eigenvalue solve** on the port FE space is used instead. The default setting is using analytical mode formulas for all external ports and numerical mode solver for all internal ports. This can be changed by setting the `mode_source` and `mode_source_internal` flags to `'analytic'` or `'numeric'`.
+    For standard cross-sections (rectangular, circular), **cavsim3d**
+    uses **analytic mode formulas** (for external ports) for speed and
+    deterministic phase. For internal ports and arbitrary cross-sections,
+    a **numeric eigenvalue solve** on the port FE space is used instead.
+    The default setting is using analytical mode formulas for all external
+    ports and numerical mode solver for all internal ports. This can be
+    changed by setting the `mode_source` and `mode_source_internal` flags
+    to `'analytic'` or `'numeric'`.
 
-### 3.2 Mode Normalisation
+#### Port Eigenmode Expansion
 
-Each port eigenmode is normalised so that the transverse field carries unit energy over the port surface $\Gamma_p$:
+The port eigenmodes are computed on the 2D port surface $\Gamma_p$
+using the **same Nédélec basis functions** as the 3D domain, but
+restricted (traced) to the port boundary. Specifically, the $m$-th
+port eigenmode field is expanded as:
+
 
 $$
-\int_{\Gamma_p} |\mathbf{e}_m|^2 \, \mathrm{d}S = 1
+\mathbf{e}_m = \sum_i (\hat{e}_m)_i \, \mathbf{N}_i^{\text{trace}}
 $$
 
-In the implementation, the mode grid function is scaled:
+
+where $(\hat{e}_m)_i$ are the expansion coefficients forming the
+discrete eigenvector
+$\hat{\mathbf{e}}_m \in \mathbb{R}^{n_p}$, and
+$\mathbf{N}_i^{\text{trace}}$ is the tangential trace of the $i$-th
+Nédélec edge basis function onto the port surface
+$\partial\Omega_{\text{port}}$. Here $n_p$ is the number of edge
+degrees of freedom on the port.
+
+!!! note "Notation"
+    Throughout this section we distinguish between:
+
+    - $\mathbf{e}_m$ — the **continuous mode field** (a function on
+      the port surface)
+    - $\hat{\mathbf{e}}_m$ — the **discrete coefficient vector**
+      (the eigenvector in $\mathbb{R}^{n_p}$)
+
+    They are related by
+    $\mathbf{e}_m = \sum_i (\hat{e}_m)_i \,
+    \mathbf{N}_i^{\text{trace}}$.
+
+These eigenvectors are obtained by solving the 2D eigenvalue
+problem on $\partial\Omega_{\text{port}}$:
+
 
 $$
-\mathbf{e}_m \;\leftarrow\; \frac{\mathbf{e}_m}{\sqrt{\displaystyle\int_{\Gamma_p} |\mathbf{e}_m|^2 \, \mathrm{d}S}}
+\int_{\partial\Omega_{\text{port}}}
+(\nabla_t \times \mathbf{e}_m) \cdot
+(\nabla_t \times \mathbf{N}_j^{\text{trace}})
+\,\mathrm{d}S
+= k_{c,m}^2
+\int_{\partial\Omega_{\text{port}}}
+\mathbf{e}_m \cdot \mathbf{N}_j^{\text{trace}}
+\,\mathrm{d}S
 $$
 
-!!! example "Rectangular waveguide TE modes"
-    For a rectangular port with dimensions $a \times b$, the TE$_{mn}$ mode has the analytic form:
+
+which in matrix form reads:
+
+
+$$
+\mathbf{K}_{\text{port}}\,\hat{\mathbf{e}}_m
+= k_{c,m}^2\,\mathbf{M}_{\text{port}}\,\hat{\mathbf{e}}_m
+$$
+
+
+where:
+
+
+$$
+(K_{\text{port}})_{ij}
+= \int_{\partial\Omega_{\text{port}}}
+  (\nabla_t \times \mathbf{N}_i^{\text{trace}})
+  \cdot
+  (\nabla_t \times \mathbf{N}_j^{\text{trace}})
+  \,\mathrm{d}S,
+\quad
+(M_{\text{port}})_{ij}
+= \int_{\partial\Omega_{\text{port}}}
+  \mathbf{N}_i^{\text{trace}}
+  \cdot
+  \mathbf{N}_j^{\text{trace}}
+  \,\mathrm{d}S
+$$
+
+
+and $k_{c,m}$ is the cutoff wavenumber of the $m$-th mode.
+
+!!! info "Why the same basis?"
+    Using the trace of the 3D Nédélec basis on the port
+    — rather than an independent 2D basis — ensures that
+    the coefficient vector $\hat{\mathbf{e}}_m$ lives directly
+    in the same discrete space as the 3D field $\mathbf{E}$.
+    This means the port mode can be embedded into the full
+    finite-element vector without any interpolation or
+    projection error: the coefficients $(\hat{e}_m)_i$ simply
+    slot into the corresponding global DOFs on the port face.
+
+### 3.2 Building the Right-Hand Side (b)
+
+The right-hand side vector $\mathbf{b}$ encodes the port modal
+excitation. For each port $p$ and mode $m$, the excitation is a
+boundary integral over the port surface.
+
+Starting from the boundary integral for the $j$-th component of the
+right-hand side vector:
+
+
+$$
+b_j^{(p,m)} = \int_{\partial\Omega_{\text{port}}}
+\mathbf{e}_m \cdot \mathbf{N}_j^{\text{trace}}
+\,\mathrm{d}S
+$$
+
+
+Substitute the basis expansion
+$\mathbf{e}_m = \sum_i (\hat{e}_m)_i \,
+\mathbf{N}_i^{\text{trace}}$:
+
+
+$$
+b_j^{(p,m)} = \int_{\partial\Omega_{\text{port}}}
+\left(\sum_i (\hat{e}_m)_i \,
+\mathbf{N}_i^{\text{trace}}\right)
+\cdot \mathbf{N}_j^{\text{trace}}
+\,\mathrm{d}S
+$$
+
+
+Pull the sum and coefficients out of the integral:
+
+
+$$
+ b_j^{(p,m)} = \sum_i (\hat{e}_m)_i
+\underbrace{
+  \int_{\partial\Omega_{\text{port}}}
+  \mathbf{N}_i^{\text{trace}} \cdot \mathbf{N}_j^{\text{trace}}
+  \,\mathrm{d}S
+}_{(M_{\text{port}})_{ji}}
+$$
+
+
+This reveals the **port boundary mass matrix**:
+
+
+$$
+\boxed{
+(M_{\text{port}})_{ji} = \int_{\partial\Omega_{\text{port}}}
+\mathbf{N}_i^{\text{trace}} \cdot \mathbf{N}_j^{\text{trace}}
+\,\mathrm{d}S
+}
+$$
+
+
+Recognising the sum as a matrix–vector product, the full
+right-hand side vector for port $p$, mode $m$ is:
+
+
+$$
+\boxed{
+\mathbf{b}^{(p,m)} = M_{\text{port}} \, \hat{\mathbf{e}}_m
+}
+$$
+
+
+where $\hat{\mathbf{e}}_m \in \mathbb{R}^{n_p}$ is the discrete
+eigenvector of the port eigenvalue problem, containing the
+coefficients $(\hat{e}_m)_i$.
+
+!!! info "Normalisation"
+    The mode field vector $\hat{\mathbf{e}}_m$ is normalised to have
+    **unit amplitude** on the port surface:
 
     $$
-    \mathbf{e}_{mn}(x,y) = E_0 \left[ \frac{m\pi}{a}\cos\!\left(\frac{m\pi x}{a}\right)\sin\!\left(\frac{n\pi y}{b}\right)\hat{\mathbf{x}} + \frac{n\pi}{b}\sin\!\left(\frac{m\pi x}{a}\right)\cos\!\left(\frac{n\pi y}{b}\right)\hat{\mathbf{y}} \right]
+    \sqrt{\langle\hat{\mathbf{e}}_m,\hat{\mathbf{e}}_m\rangle} = 1
+    $$
+    
+    $$
+    \hat{\mathbf{e}}_m \leftarrow
+        \frac{\hat{\mathbf{e}}_m}{
+        \sqrt{\langle\hat{\mathbf{e}}_m,\hat{\mathbf{e}}_m\rangle}
+        }
     $$
 
-    with $E_0$ chosen so that $\int|\mathbf{e}_{mn}|^2\,\mathrm{d}S = 1$, and cutoff wavenumber $k_{c,mn} = \sqrt{(m\pi/a)^2 + (n\pi/b)^2}$.
 
-### 3.3 Building the Right-Hand Side (b)
-
-The right-hand side vector $\mathbf{b}$ encodes the port modal excitation. For each port $p$ and mode $m$, the excitation is a boundary integral over the port surface:
+The solver assembles these vectors for all port-mode pairs and
+collects them column-wise into the **port basis matrix**:
 
 $$
-b_i^{(p,m)} = \int_{\Gamma_p} \mathbf{e}_m \cdot \mathbf{N}_i^{\text{trace}} \, \mathrm{d}S
+\mathbf{B} = \bigl[\mathbf{b}^{(1,1)} \mid \mathbf{b}^{(1,2)} \mid \cdots \mid \mathbf{b}^{(p,m)}\bigr] \in \mathbb{R}^{N \times (p \cdot m)}
 $$
 
-where $\mathbf{N}_i^{\text{trace}}$ is the trace (tangential restriction) of the $i$-th Nédélec basis function onto the port boundary.
-
-!!! info "Implementation detail"
-    In practice, this is computed via the **boundary mass matrix** approach:
-
-    1. Assemble the port boundary mass matrix:
-
-        $$
-        (M_{\text{bnd}})_{ij} = \int_{\Gamma_p} \mathbf{N}_i^{\text{trace}} \cdot \mathbf{N}_j^{\text{trace}} \, \mathrm{d}S
-        $$
-
-    2. Embed the port mode into the full FE space as a grid function $\mathbf{g}$ with coefficients from $\mathbf{e}_m$.
-
-    3. Compute the weighted vector:
-
-        $$
-        \mathbf{b}^{(p,m)} = M_{\text{bnd}} \, \mathbf{g}
-        $$
-
-    This mass-weighting ensures that the port mode is correctly projected onto the FE basis, accounting for the mesh geometry at the port.
-
-The solver assembles these vectors for all port-mode pairs and collects them column-wise into the **port basis matrix**:
+where $p$ is the number of ports and $m$ the number of modes per port. The general equation therefore for multiple ports and multiple modes per port is:
 
 $$
-\mathbf{B} = \bigl[\mathbf{b}^{(1,1)} \mid \mathbf{b}^{(1,2)} \mid \cdots \mid \mathbf{b}^{(P,M)}\bigr] \in \mathbb{R}^{n \times (P \cdot M)}
+\boxed{
+  \left(\mathbf{K} - \omega^2\,\mathbf{M}\right)\mathbf{X}
+  = j\omega\,\mathbf{B}
+}
 $$
-
-where $P$ is the number of ports and $M$ the number of modes per port.
-
-### 3.4 Incident Wave Amplitudes and the Frequency Solve
-
-The transverse field at a port is expanded as:
-
-$$
-\mathbf{E}_t = \sum_m (a_m + b_m) \mathbf{e}_m
-$$
-
-where $a_m$ and $b_m$ are the incident and reflected wave amplitudes for mode $m$.
-
-!!! note "Total-field formulation"
-    **cavsim3d** uses a **total-field** approach: there is no explicit decomposition into incident and scattered fields. The solver excites unit incident waves one at a time by constructing the RHS:
-
-    $$
-    \mathbf{f}^{(p,m)} = \omega \int_{\Gamma_p} \mathbf{e}_m \cdot \mathbf{v}^{\text{trace}} \, \mathrm{d}S
-    $$
-
-    The factor $\omega$ arises from the frequency-dependent coupling. At each frequency $\omega$, the system solved is:
-
-    $$
-    (\mathbf{K} - \omega^2 \mathbf{M}) \, \mathbf{x}_{p,m} = \omega \, \mathbf{b}^{(p,m)}
-    $$
-
-    The resulting total field $\mathbf{x}_{p,m}$ encodes both the incident excitation and the cavity response. The Z and S-parameters are then extracted directly from this total field (see [Section 4](#4-z-parameter-extraction)).
 
 ---
 
@@ -407,7 +527,7 @@ $$
 \boxed{\mathbf{Z}(\omega) = j \, \mathbf{B}^H \mathbf{X}(\omega)}
 $$
 
-where $\mathbf{X} = [\mathbf{x}_1 \mid \dots \mid \mathbf{x}_{P \cdot M}]$ is the matrix of solution vectors (one column per excitation) and $\mathbf{B}$ is the port basis matrix.
+where $\mathbf{X} = [\mathbf{x}_1 \mid \dots \mid \mathbf{x}_{p \cdot m}]$ is the matrix of solution vectors (one column per excitation) and $\mathbf{B}$ is the port basis matrix.
 
 !!! info "Why this formula works"
     The inner product $\mathbf{B}^H \mathbf{x}$ computes the projection of the total field onto each port mode:
@@ -416,17 +536,11 @@ where $\mathbf{X} = [\mathbf{x}_1 \mid \dots \mid \mathbf{x}_{P \cdot M}]$ is th
     (\mathbf{B}^H \mathbf{x})_{p,m} = \sum_i \overline{b_i^{(p,m)}} \, x_i = \int_{\Gamma_p} \overline{\mathbf{e}_m} \cdot \mathbf{E}_t \, \mathrm{d}S
     $$
 
-    This is the **modal voltage** at port $(p,m)$. The factor $j$ accounts for the impedance phase convention consistent with the $\exp(j\omega t)$ time-harmonic assumption.
+    This is the **modal voltage** at port $(p,m)$.
 
 ---
 
-## 5. S-Parameter Extraction
-
-The **Scattering Matrix** relates incident and reflected waves:
-
-$$
-\mathbf{b} = \mathbf{S} \, \mathbf{a}
-$$
+## 5. Z/S-Parameter Extraction
 
 ### 5.1 Characteristic (Wave) Impedance
 
@@ -439,7 +553,7 @@ $$
 where $\omega_{c,m} = c_0 \, k_{c,m}$ is the cutoff angular frequency and $c_0$ is the speed of light. The reference impedance matrix is:
 
 $$
-\mathbf{Z}_0(f) = \text{diag}\bigl(Z_c(1,1,f),\; Z_c(1,2,f),\; \dots,\; Z_c(P,M,f)\bigr)
+\mathbf{Z}_0(f) = \text{diag}\bigl(Z_c(1,1,f),\; Z_c(1,2,f),\; \dots,\; Z_c(p,m,f)\bigr)
 $$
 
 ### 5.2 Z-to-S Conversion
@@ -477,7 +591,7 @@ Solving the full system at every frequency point is expensive. **Proper Orthogon
     \mathbf{X} = [\mathbf{x}(\omega_1), \dots, \mathbf{x}(\omega_{N_s})]
     $$
 
-2. **SVD** of the snapshot matrix:
+2. **Singular Value Decomposition (SVD)** of the snapshot matrix:
 
     $$
     \mathbf{X} = \mathbf{U} \mathbf{\Sigma} \mathbf{W}^H
@@ -492,27 +606,28 @@ Solving the full system at every frequency point is expensive. **Proper Orthogon
 4. **Project** the system onto the reduced basis:
 
     $$
-    \underbrace{\mathbf{V}^H \mathbf{K} \mathbf{V}}_{\tilde{\mathbf{K}} \in \mathbb{R}^{r \times r}} \tilde{\mathbf{x}} - \omega^2 \underbrace{\mathbf{V}^H \mathbf{M} \mathbf{V}}_{\tilde{\mathbf{M}}} \tilde{\mathbf{x}} = \underbrace{\mathbf{V}^H \mathbf{B}}_{\tilde{\mathbf{B}}} \mathbf{a}
+    \underbrace{\mathbf{V}^H \mathbf{K} \mathbf{V}}_{\tilde{\mathbf{K}} \in \mathbb{R}^{r \times r}} \hat{\mathbf{X}} - \omega^2 \underbrace{\mathbf{V}^H \mathbf{M} \mathbf{V}}_{\tilde{\mathbf{M}} \in \mathbb{R}^{r \times r}} \hat{\mathbf{X}} = j\omega \underbrace{\mathbf{V}^H \mathbf{B}}_{\tilde{\mathbf{B}} \in \mathbb{R}^{r \times p \cdot m}}
     $$
+
+    where $\mathbf{X} = \mathbf{V}\hat{\mathbf{X}}$, $\hat{\mathbf{X}} \in \mathbb{R}^{r \times p \cdot m}$.
 
 5. **Solve** the $r \times r$ system at each frequency (milliseconds).
 
 !!! tip "Mass-weighted spectral transformation"
-    For improved spectral accuracy, cavsim3d applies a mass-weighted transformation to the reduced system:
 
     1. Eigendecompose the reduced mass matrix: $\tilde{\mathbf{M}} = \mathbf{Q} \mathbf{\Lambda} \mathbf{Q}^T$
     2. Compute $\mathbf{Q}_L^{-1} = \mathbf{Q} \mathbf{\Lambda}^{-1/2}$
-    3. Transform: $\hat{\mathbf{K}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{K}} \, \mathbf{Q}_L^{-1}$, $\quad \hat{\mathbf{B}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{B}}$
-    4. The reduced system becomes $(\hat{\mathbf{K}} - \omega^2 \mathbf{I})\hat{\mathbf{x}} = \omega \hat{\mathbf{B}} \mathbf{a}$
+    3. Transform: $\hat{\mathbf{A}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{K}} \, \mathbf{Q}_L^{-1}$, $\quad \hat{\mathbf{B}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{B}}$
+    4. The reduced system becomes $(\hat{\mathbf{A}} - \omega_r^2 \mathbf{I})\hat{\mathbf{X}} = \omega_r \hat{\mathbf{B}}$
 
-    The eigenvalues of $\hat{\mathbf{K}}$ directly give the squared resonant frequencies $\omega_r^2$.
+    The eigenvalues of ${\hat{\mathbf{A}}}$ directly give the squared resonant frequencies $\omega_r^2$.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 graph LR
-    A("Full System<br/>N ≈ 10,000 DOFs"):::full -->|"SVD"| B("Reduced Basis<br/>r ≈ 20 DOFs"):::basis
+    A("Full System<br/>N DOFs"):::full -->|"SVD"| B("Reduced Basis<br/>r DOFs"):::basis
     B -->|"Project K, M, B"| C("Reduced System<br/>r × r"):::reduced
-    C -->|"Solve at 1000s<br/>of freq points"| D("S/Z Parameters"):::result
+    C -->|"Solve at more<br/>freq. points"| D("S/Z Parameters"):::result
     classDef full fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
     classDef basis fill:#ce93d8,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef reduced fill:#90caf9,stroke:#1565c0,stroke-width:2px,color:#000
@@ -521,28 +636,28 @@ graph LR
 
 ---
 
-## 7. Concatenation Theory
+## 7. Concatenation
 
-For multi-domain structures, the per-domain **system matrices** ($\mathbf{A}_d, \mathbf{B}_d$) are concatenated into a single coupled system via **Kirchhoff constraints** at shared interfaces. The coupled system is then solved directly for the global Z-parameters, from which the S-parameters are derived.
+For multi-domain structures, the per-domain **system matrices** ($\hat{\mathbf{A}}_d, \hat{\mathbf{B}}_d$) are concatenated into a single coupled system via **Kirchhoff constraints** at shared interfaces. The coupled system is then solved directly for the global Z-parameters, from which the S-parameters are derived.
 
 !!! note "System-level coupling, not S-parameter cascading"
-    The concatenation operates on the reduced system matrices, **not** on S-parameters. The per-domain matrices $\mathbf{A}_d$ and $\mathbf{B}_d$ are assembled into a block-diagonal system and then projected onto a constraint-satisfying subspace that enforces field continuity at internal ports. The S-parameters are only computed at the very end from the Z-parameters of the coupled system.
+    The concatenation operates on the reduced system matrices, **not** on S-parameters. The per-domain matrices $\hat{\mathbf{A}}_d$ and $\hat{\mathbf{B}}_d$ are assembled into a block-diagonal system and then projected onto a constraint-satisfying subspace that enforces field continuity at internal ports. The S-parameters are only computed at the very end from the Z-parameters of the coupled system.
 
 ### 7.1 Block-Diagonal Assembly
 
 Each domain $d$ has a reduced system of the form (after POD, see [Section 6](#6-model-order-reduction-pod)):
 
 $$
-(\mathbf{A}_d - \omega^2 \mathbf{I}) \, \mathbf{x}_d = \omega \, \mathbf{B}_d \, \mathbf{u}_d
+(\hat{\mathbf{A}}_d - \omega^2 \mathbf{I}) \, \mathbf{X}_d = \omega \, \hat{\mathbf{B}}_d
 $$
 
-where $\mathbf{A}_d \in \mathbb{R}^{r_d \times r_d}$ is the reduced system matrix and $\mathbf{B}_d \in \mathbb{R}^{r_d \times p_d}$ is the reduced port basis, with $p_d$ the number of port-modes in domain $d$.
+where $\hat{\mathbf{A}}_d \in \mathbb{R}^{r_d \times r_d}$ is the reduced system matrix and $\hat{\mathbf{B}}_d \in \mathbb{R}^{r_d \times p_d}$ is the reduced port basis, with $p_d$ the number of port-modes in domain $d$.
 
 The uncoupled multi-domain system is assembled as a block-diagonal:
 
 $$
-\mathbf{A}_{\text{blk}} = \begin{bmatrix} \mathbf{A}_1 & & \\ & \mathbf{A}_2 & \\ & & \ddots \end{bmatrix}, \qquad
-\mathbf{B}_{\text{blk}} = \begin{bmatrix} \mathbf{B}_1 & & \\ & \mathbf{B}_2 & \\ & & \ddots \end{bmatrix}
+\mathbf{A}_{\text{blk}} = \begin{bmatrix} \hat{\mathbf{A}}_1 & & \\ & \hat{\mathbf{A}}_2 & \\ & & \ddots \end{bmatrix}, \qquad
+\mathbf{B}_{\text{blk}} = \begin{bmatrix} \hat{\mathbf{B}}_1 & & \\ & \hat{\mathbf{B}}_2 & \\ & & \ddots \end{bmatrix}
 $$
 
 ### 7.2 Port Classification and Kirchhoff Constraints
@@ -559,7 +674,20 @@ $$
 \mathbf{F}^T \mathbf{B}_{\text{int}}^T \, \mathbf{x} = \mathbf{0}
 $$
 
-where $\mathbf{F}$ is an **incidence matrix** that encodes the connection topology (which internal ports are linked).
+where $\mathbf{F}$ is a matrix that encodes the connection topology (which internal ports are linked).
+
+$$
+\mathbf{F} = 
+\begin{bmatrix} 
+1 & 0 & \dots & 0 \\
+ -1 & 0 & \dots & 0 \\ 
+ 0 & 1 & \dots & 0 \\ 
+ 0 & -1 & \dots & 0 \\ 
+ \vdots & \vdots & \ddots & \vdots \\ 
+ 0 & 0 & \dots & 1 \\ 
+ 0 & 0 & \dots & -1 
+\end{bmatrix}
+$$
 
 ### 7.3 Null-Space Projection
 
