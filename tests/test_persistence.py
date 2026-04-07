@@ -48,6 +48,7 @@ class DummyPicklable:
 
 class DummyMesh(DummyPicklable):
     """Mock NGSolve Mesh."""
+    ne = 100
     def Materials(self, *args):
         return mock.MagicMock()
     def Boundaries(self, *args):
