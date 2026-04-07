@@ -815,66 +815,101 @@ class Assembly(BaseGeometry):
         return super().generate_mesh(maxh=maxh, curve_order=curve_order)
     
     def _name_solids(self, shape_keys: List[str]) -> None:
-        """Name each solid in the geometry based on component keys."""
+        """Name each solid in the geometry based on component keys.
+
+        Each assembly component may contain multiple mesh solids (e.g. after
+        PEC subtraction).  All solids belonging to the same component are
+        given the same material name so the solver treats each component as
+        a single domain.
+        """
         self._solid_info = {}
-        
+        axis_idx = self._AXIS_IDX[self.main_axis]
+
         try:
             solids = list(self.geo.solids)
-            n_solids = len(solids)
-            
-            if n_solids != len(shape_keys):
-                # Mismatch - solids might have been merged or split
-                # Fall back to position-based naming
-                print(f"WARNING: Assembly solid mismatch! Expected {len(shape_keys)} components, "
-                      f"but found {n_solids} solids in the final geometry.")
-                print("         This usually means identical adjacent components were merged.")
-                self._name_solids_by_position(solids)
-                return
-            
-            # Sort solids by position along main axis to match component order
-            axis_idx = self._AXIS_IDX[self.main_axis]
-            
-            def get_solid_position(solid):
-                bb = solid.bounding_box
-                return (bb[0][axis_idx] + bb[1][axis_idx]) / 2
-            
-            solids_with_pos = [(get_solid_position(s), i, s) for i, s in enumerate(solids)]
-            solids_with_pos.sort(key=lambda x: x[0])
-            
-            # Match sorted solids to component order
-            for order_idx, (pos, orig_idx, solid) in enumerate(solids_with_pos):
-                key = shape_keys[order_idx]
-                entry = self._components[key]
-                
-                # Name the solid
-                solid.mat(key)
-                
-                # Store solid info
-                bb = solid.bounding_box
-                self._solid_info[key] = {
-                    'material': key,
-                    'base_name': entry.base_name,
-                    'position': pos,
-                    'bounds': (tuple(bb[0]), tuple(bb[1])),
-                    'is_identical': len(self._base_name_groups.get(entry.base_name, [])) > 1
-                }
-                
-        except Exception as e:
-            # Single solid or error
-            print(f"Warning in _name_solids: {e}")
+        except AttributeError:
+            # Single solid
+            key = shape_keys[0]
+            entry = self._components[key]
+            self.geo.mat(key)
+            self._solid_info[key] = {
+                'material': key,
+                'base_name': entry.base_name,
+                'position': 0,
+                'bounds': None,
+                'is_identical': False,
+            }
+            return
+
+        # Compute bounding box for each component along the main axis
+        component_ranges = []
+        for key in shape_keys:
+            entry = self._components[key]
+            trf = entry.transform
+            offset = trf.translation[axis_idx]
+            # Get the component's own extent along main axis
+            geo = entry.geometry.geo
             try:
-                key = shape_keys[0]
-                entry = self._components[key]
-                self.geo.mat(key)
-                self._solid_info[key] = {
-                    'material': key,
-                    'base_name': entry.base_name,
-                    'position': 0,
-                    'bounds': None,
-                    'is_identical': False
-                }
-            except:
-                pass
+                comp_solids = list(geo.solids)
+            except AttributeError:
+                comp_solids = [geo]
+            lo = min(s.bounding_box[0][axis_idx] for s in comp_solids) + offset
+            hi = max(s.bounding_box[1][axis_idx] for s in comp_solids) + offset
+            component_ranges.append((lo, hi, key))
+
+        # Sort components along main axis
+        component_ranges.sort(key=lambda x: (x[0] + x[1]) / 2)
+
+        # Assign each mesh solid to the component whose range contains it.
+        # Solid names are prefixed with the component key so the solver can
+        # map mesh materials back to their owning component while preserving
+        # per-solid material distinctions for CoefficientFunction assembly.
+        def get_solid_center(solid):
+            bb = solid.bounding_box
+            return (bb[0][axis_idx] + bb[1][axis_idx]) / 2
+
+        # domain_materials: component_key -> [mesh_material_name, ...]
+        self._domain_materials: Dict[str, List[str]] = {key: [] for _, _, key in component_ranges}
+
+        for idx, solid in enumerate(solids):
+            center = get_solid_center(solid)
+            best_key = None
+            best_dist = float('inf')
+            for lo, hi, key in component_ranges:
+                if lo - 0.01 <= center <= hi + 0.01:
+                    best_key = key
+                    break
+                mid = (lo + hi) / 2
+                dist = abs(center - mid)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_key = key
+
+            # Prefix original solid name with component key for uniqueness
+            orig_name = solid.name if solid.name else f"solid"
+            # Strip temporary assembly naming
+            if orig_name.startswith('__temp_solid_'):
+                orig_name = f"solid"
+            mat_name = f"{best_key}/{orig_name}"
+            solid.mat(mat_name)
+            self._domain_materials[best_key].append(mat_name)
+
+        # Print domain material mapping
+        print(f"\nAssembly domain-material mapping:")
+        for key, mats in self._domain_materials.items():
+            print(f"  {key}: {mats}")
+
+        # Store component-level info
+        for lo, hi, key in component_ranges:
+            entry = self._components[key]
+            self._solid_info[key] = {
+                'material': key,
+                'base_name': entry.base_name,
+                'position': (lo + hi) / 2,
+                'bounds': (lo, hi),
+                'is_identical': len(self._base_name_groups.get(entry.base_name, [])) > 1,
+                'mesh_materials': self._domain_materials[key],
+            }
 
     def _snap_interfaces(self, tolerance: float = 1e-1) -> None: # 0.1 meter = 10cm tolerance (very aggressive)
         """
@@ -1068,6 +1103,32 @@ class Assembly(BaseGeometry):
             except AttributeError:
                 pass
     
+    def get_material(self, domain_name: str) -> dict:
+        """Get material properties for a mesh material, delegating to its component.
+
+        Mesh materials for assemblies are prefixed with the component key,
+        e.g. ``cell1/ceramic_1``.  This method strips the prefix and queries
+        the owning component's geometry for the material properties.
+        """
+        defaults = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+
+        # Try to find the owning component via the domain_materials mapping
+        dm = getattr(self, '_domain_materials', {})
+        for comp_key, mat_names in dm.items():
+            if domain_name in mat_names:
+                entry = self._components[comp_key]
+                # Strip component prefix to get the original solid name
+                orig_name = domain_name[len(comp_key) + 1:] if domain_name.startswith(comp_key + '/') else domain_name
+                if hasattr(entry.geometry, 'get_material'):
+                    return entry.geometry.get_material(orig_name)
+                return dict(defaults)
+
+        # Fallback: try component key as domain_name
+        if domain_name in self._components:
+            return dict(defaults)
+
+        return dict(defaults)
+
     def _find_components_at_position(
         self, 
         position: float, 

@@ -99,11 +99,21 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self.solver = solver
         self.mesh = solver.mesh
         self.order = getattr(solver, 'order', 3)
-        self.domains = solver.domains
-        self._all_ports = solver.all_ports
-        self._external_ports = solver.external_ports
-        self.domain_port_map = solver.domain_port_map
-        self.n_domains = solver.n_domains
+
+        # For non-compound structures (single geometry, possibly multi-material),
+        # treat the whole thing as one 'global' domain using global K/M/B/snapshots.
+        if not getattr(solver, 'is_compound', False):
+            self.domains = ['global']
+            self.n_domains = 1
+            self._all_ports = solver.all_ports
+            self._external_ports = solver.external_ports
+            self.domain_port_map = {'global': solver.external_ports}
+        else:
+            self.domains = solver.domains
+            self.n_domains = solver.n_domains
+            self._all_ports = solver.all_ports
+            self._external_ports = solver.external_ports
+            self.domain_port_map = solver.domain_port_map
         self._n_ports_total = len(self._all_ports)
         self._n_ports_external = len(self._external_ports)
         self.port_modes = solver.port_modes
@@ -622,7 +632,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
                 # Mass-weighted transformation: A_r = L^{-T} K_r L^{-1}
                 lam, Q = sl.eigh(M_r)
-                lam = np.maximum(lam, 1e-14 * np.max(lam))
+
+                # Filter near-zero/negative mass eigenvalues to prevent numerical blow-up
+                min_lam = np.finfo(float).eps * np.max(np.abs(lam))
+                valid = lam > min_lam
+                n_filtered = np.sum(~valid)
+                if n_filtered > 0:
+                    pr.debug(f"  Filtering {n_filtered}/{len(lam)} near-zero mass eigenvalue(s)")
+                    lam = lam[valid]
+                    Q = Q[:, valid]
+                    r = len(lam)
+                    self._r[domain] = r
 
                 inv_sqrt_lam = 1.0 / np.sqrt(lam)
                 Q_L_inv = Q @ np.diag(inv_sqrt_lam)
@@ -843,8 +863,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                              H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
         # 2. Save S and Z results
+        # Global (concatenated) results
         if self._Z_matrix is not None:
-             z_file = "z.h5" 
+             z_file = "z.h5"
              if self.n_domains == 1: z_file = f"z_{self.domains[0]}.h5"
              with h5py.File(z_path_dir / z_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._Z_matrix)
@@ -853,6 +874,18 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
              if self.n_domains == 1: s_file = f"s_{self.domains[0]}.h5"
              with h5py.File(s_path_dir / s_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._S_matrix)
+
+        # Per-domain results (for multi-domain)
+        per_domain = getattr(self, '_per_domain_results', None)
+        if per_domain:
+            for domain, res in per_domain.items():
+                safe_name = domain.replace('/', '_')
+                if res.get('Z') is not None:
+                    with h5py.File(z_path_dir / f"z_{safe_name}.h5", "a") as f:
+                        H5Serializer.save_dataset(f, "data", res['Z'])
+                if res.get('S') is not None:
+                    with h5py.File(s_path_dir / f"s_{safe_name}.h5", "a") as f:
+                        H5Serializer.save_dataset(f, "data", res['S'])
 
         # 3. Save snapshots and frequencies
         snap_file = "snapshots.h5"
@@ -1151,22 +1184,18 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             'x_r': self._x_r_snapshots,
         }
 
-    def _solve_multi_domain(self, solver_type: str = 'auto') -> Dict:
-        """Solve multi-domain system by auto-concatenating."""
-        concat = self.concatenate()
-        results = concat.solve(
-            self.frequencies[0] / 1e9,
-            self.frequencies[-1] / 1e9,
-            len(self.frequencies),
-            solver_type=solver_type,
-        )
+    def _solve_multi_domain(self, **kwargs) -> Dict:
+        """Solve multi-domain system: per-domain S/Z only."""
+        # Solve per-domain (individual S/Z for each domain)
+        per_domain_results = self.solve_per_domain()
+        self._per_domain_results = per_domain_results
 
-        self.frequencies = results['frequencies']
-        self._Z_matrix = results['Z']
-        self._S_matrix = results['S']
+        # Build concatenation for eigenmode reconstruction (but don't solve globally)
+        self.concatenate()
+
         self._invalidate_cache()
 
-        return results
+        return per_domain_results
 
     # =========================================================================
     # ROM-specific methods

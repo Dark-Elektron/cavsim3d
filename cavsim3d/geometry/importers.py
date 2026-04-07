@@ -1,7 +1,9 @@
 """Geometry importers with OCC-based loading, splitting, and visualization."""
 
 import os
+import re
 import tempfile
+import warnings
 from typing import List, Optional, Tuple, Callable, Dict, Union, Literal
 import numpy as np
 
@@ -14,7 +16,7 @@ from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_Make
 from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Ax1, gp_Ax2, gp_Trsf, gp_Vec
 from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeCone
 from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Fuse
-from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
+from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape, topods
 from OCC.Core.BRep import BRep_Builder
 from OCC.Core.BRepTools import breptools
 from OCC.Core.TopExp import TopExp_Explorer
@@ -23,6 +25,8 @@ from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
+from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+from OCC.Core.GeomAbs import GeomAbs_Plane
 from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
 
 # Netgen/NGSolve imports — must come after OCC imports
@@ -31,6 +35,165 @@ from netgen.webgui import Draw as NetgenDraw
 from ngsolve import Mesh
 
 from .base import BaseGeometry, _display_webgui_fallback
+
+
+# ==================== STEP LABEL EXTRACTION ====================
+
+def extract_brep_names_from_step(filename: str) -> List[str]:
+    """Extract MANIFOLD_SOLID_BREP names from a STEP file by parsing the text."""
+    names = []
+    with open(filename, 'r') as f:
+        for line in f:
+            match = re.match(
+                r"#\d+\s*=\s*MANIFOLD_SOLID_BREP\s*\(\s*'([^']*)'\s*,",
+                line.strip()
+            )
+            if match:
+                names.append(match.group(1))
+    return names
+
+
+def _simplify_label(full_label: str) -> str:
+    """Extract the short name from a STEP label.
+
+    Strips the CST-style folder path (``folder/subfolder/...``) and the
+    solid-type prefix (``type|``), returning just the final identifier.
+
+    Examples
+    --------
+    >>> _simplify_label('HC_FPC_orientation_optimisation/hook_top|lh4')
+    'lh4'
+    >>> _simplify_label('component1|solid1')
+    'solid1'
+    >>> _simplify_label('beampipe')
+    'beampipe'
+    """
+    # Take part after last '/'
+    short = full_label.split('/')[-1]
+    # Take part after last '|'
+    if '|' in short:
+        short = short.split('|')[-1]
+    return short
+
+
+def get_solid_centroid(occ_solid: TopoDS_Shape) -> Tuple[float, float, float]:
+    """Compute the volume-weighted centroid of an OCC solid."""
+    props = GProp_GProps()
+    brepgprop.VolumeProperties(occ_solid, props)
+    cog = props.CentreOfMass()
+    return (cog.X(), cog.Y(), cog.Z())
+
+
+# ==================== STEP PORT PARSING ====================
+
+def parse_step_entities(filename: str) -> Tuple[List[dict], List[dict], List[dict]]:
+    """Parse STEP file text for solid, port, and surface entities.
+
+    Ports are identified by ``MANIFOLD_SURFACE_SHAPE_REPRESENTATION``
+    entries whose name contains ``'Ports|'`` or ``'port'`` (case-insensitive).
+
+    Returns
+    -------
+    solids, ports, others : list[dict]
+        Each dict has ``entity_id`` (int) and ``name`` (str).
+    """
+    solids, ports, others = [], [], []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            m = re.match(
+                r"#(\d+)\s*=\s*MANIFOLD_SOLID_BREP\s*\(\s*'([^']*)'\s*,", line)
+            if m:
+                solids.append({"entity_id": int(m.group(1)), "name": m.group(2)})
+                continue
+            m = re.match(
+                r"#(\d+)\s*=\s*ADVANCED_BREP_SHAPE_REPRESENTATION\s*\(\s*'([^']*)'\s*,", line)
+            if m:
+                solids.append({"entity_id": int(m.group(1)), "name": m.group(2)})
+                continue
+            m = re.match(
+                r"#(\d+)\s*=\s*MANIFOLD_SURFACE_SHAPE_REPRESENTATION\s*\(\s*'([^']*)'\s*,", line)
+            if m:
+                entity = {"entity_id": int(m.group(1)), "name": m.group(2)}
+                if 'Ports|' in m.group(2) or 'port' in m.group(2).lower():
+                    ports.append(entity)
+                else:
+                    others.append(entity)
+                continue
+    return solids, ports, others
+
+
+# ==================== FACE PROPERTY HELPERS ====================
+
+def get_face_properties(face: TopoDS_Shape) -> dict:
+    """Compute geometric properties of a single OCC face.
+
+    Returns dict with keys: center (gp_Pnt), normal (gp_Dir | None),
+    area (float), is_planar (bool), face (TopoDS_Shape).
+    """
+    props = GProp_GProps()
+    brepgprop.SurfaceProperties(face, props)
+    adaptor = BRepAdaptor_Surface(topods.Face(face))
+    is_planar = adaptor.GetType() == GeomAbs_Plane
+    normal = adaptor.Plane().Axis().Direction() if is_planar else None
+    return {
+        "center": props.CentreOfMass(),
+        "normal": normal,
+        "area": props.Mass(),
+        "is_planar": is_planar,
+        "face": face,
+    }
+
+
+def get_port_shape_properties(port_shape: TopoDS_Shape) -> Optional[dict]:
+    """Get the largest planar face from a port shell shape."""
+    explorer = TopExp_Explorer(port_shape, TopAbs_FACE)
+    faces = []
+    while explorer.More():
+        faces.append(get_face_properties(topods.Face(explorer.Current())))
+        explorer.Next()
+    planar = [f for f in faces if f["is_planar"]]
+    if planar:
+        return max(planar, key=lambda x: x["area"])
+    return max(faces, key=lambda x: x["area"]) if faces else None
+
+
+def faces_coincide(
+        fp1: dict, fp2: dict,
+        angle_tol: float = 0.05,
+        distance_tol: Optional[float] = None,
+        center_tol: Optional[float] = None,
+) -> bool:
+    """Check if two planar faces are coplanar and spatially overlapping.
+
+    Parameters
+    ----------
+    fp1, fp2 : dict
+        Face property dicts (from :func:`get_face_properties`).
+    angle_tol : float
+        Maximum angle (radians) between normals.
+    distance_tol : float, optional
+        Max perpendicular distance.  Default: 1% of smaller equivalent radius.
+    center_tol : float, optional
+        Max lateral distance between centres.  Default: 2x larger equiv radius.
+    """
+    if not fp1["is_planar"] or not fp2["is_planar"]:
+        return False
+    n1, n2 = fp1["normal"], fp2["normal"]
+    c1, c2 = fp1["center"], fp2["center"]
+    # Parallel normals (allow anti-parallel)
+    if abs(n1.X()*n2.X() + n1.Y()*n2.Y() + n1.Z()*n2.Z()) < np.cos(angle_tol):
+        return False
+    dx, dy, dz = c2.X() - c1.X(), c2.Y() - c1.Y(), c2.Z() - c1.Z()
+    plane_dist = abs(dx*n1.X() + dy*n1.Y() + dz*n1.Z())
+    r1 = np.sqrt(fp1["area"] / np.pi)
+    r2 = np.sqrt(fp2["area"] / np.pi)
+    if plane_dist > (distance_tol or min(r1, r2) * 0.01):
+        return False
+    lat_dist = np.sqrt(max(dx**2 + dy**2 + dz**2 - plane_dist**2, 0))
+    if lat_dist > (center_tol or max(r1, r2) * 2.0):
+        return False
+    return True
 
 
 # ==================== COLOR UTILITIES ====================
@@ -230,6 +393,17 @@ class OCCImporter(BaseGeometry):
         self._plane_corners = []  # Store corner coordinates for reference
         self._is_split = False
 
+        # STEP label tracking
+        self._solid_labels: List[str] = []           # Labels from STEP BREP names
+        self._original_solids_info: List[dict] = []  # Pre-split solid info for mapping
+        self._materials: Dict[str, dict] = {}         # Material properties per label
+
+        # Port detection
+        self._port_entities: List[dict] = []          # Port entities from STEP text
+        self._port_shapes: List[Tuple[TopoDS_Shape, str]] = []  # (shape, name) for port shells
+        self._matched_ports: List[dict] = []          # Matched port results
+        self._geometry_faces: List[dict] = []         # All face properties for inspection
+
         # Detect file format
         import os
         ext = os.path.splitext(filepath)[1].lower()
@@ -277,20 +451,29 @@ class OCCImporter(BaseGeometry):
                 raise RuntimeError(f"Failed to read STEP file: {self.filepath}")
             reader.TransferRoots()
             shape = reader.OneShape()
-            
-            # Filter to keep only significant solids (removes ghost geometry)
+
+            # Check for STEP labels — if present, all solids are intentional
+            step_labels = extract_brep_names_from_step(self.filepath)
+            has_labels = len(step_labels) > 0
+
             solids = get_solids(shape)
             if solids:
-                # Calculate volumes to find the main component(s)
-                solid_volumes = []
-                for s in solids:
-                    props = GProp_GProps()
-                    brepgprop.VolumeProperties(s, props)
-                    solid_volumes.append(props.Mass())
-                
-                max_vol = max(solid_volumes) if solid_volumes else 0
-                significant_solids = [s for s, v in zip(solids, solid_volumes) if v > max_vol * 0.1]
-                
+                if has_labels and len(step_labels) == len(solids):
+                    # All solids have labels — skip ghost filtering, keep them all
+                    significant_solids = solids
+                else:
+                    # No labels or mismatch — filter ghosts by volume
+                    solid_volumes = []
+                    for s in solids:
+                        props = GProp_GProps()
+                        brepgprop.VolumeProperties(s, props)
+                        solid_volumes.append(props.Mass())
+
+                    max_vol = max(solid_volumes) if solid_volumes else 0
+                    significant_solids = [s for s, v in zip(solids, solid_volumes) if v > max_vol * 0.1]
+                    if not significant_solids:
+                        significant_solids = [solids[0]]
+
                 if len(significant_solids) > 1:
                     builder = BRep_Builder()
                     comp = TopoDS_Compound()
@@ -400,6 +583,79 @@ class OCCImporter(BaseGeometry):
 
         # Store the scale factor for reference
         self._scale_to_meters = scale_to_meters
+
+        # Extract STEP labels and store per-solid info for split mapping
+        if self._format == 'step':
+            self._solid_labels = extract_brep_names_from_step(self.filepath)
+            solids = get_solids(self._occ_shape)
+            n_labels = len(self._solid_labels)
+            n_solids = len(solids)
+
+            if n_labels > 0 and n_labels != n_solids:
+                warnings.warn(
+                    f"STEP label count ({n_labels}) does not match solid count "
+                    f"({n_solids}). Labels may be misaligned — ghost geometry "
+                    f"filtering may have removed solids. Falling back to auto-naming."
+                )
+                self._solid_labels = []
+
+            # Print labels (short names)
+            if self._solid_labels:
+                print(f"\nSTEP solids found:")
+                for name in self._solid_labels:
+                    print(f"  - {_simplify_label(name)}")
+                print()
+
+            # Store original solid info for split mapping
+            self._original_solids_info = []
+            for i, solid in enumerate(solids):
+                centroid = get_solid_centroid(solid)
+                bbox_min, bbox_max = get_shape_bounding_box(solid)
+                label = self._solid_labels[i] if i < len(self._solid_labels) else f"solid_{i+1}"
+                self._original_solids_info.append({
+                    'label': label,
+                    'centroid': centroid,
+                    'bbox_min': bbox_min,
+                    'bbox_max': bbox_max,
+                })
+
+            # Extract port entities and shell shapes
+            _, port_entities, _ = parse_step_entities(self.filepath)
+            self._port_entities = port_entities
+            if port_entities:
+                try:
+                    from OCC.Extend.DataExchange import read_step_file_with_names_colors
+                    # Suppress noisy prints from OCC library
+                    import io, contextlib
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        output_shapes = read_step_file_with_names_colors(self.filepath)
+                    port_names = [p["name"] for p in port_entities]
+                    shell_shapes = []
+                    for shape, (name, color) in output_shapes.items():
+                        if shape.ShapeType() == 3:  # TopAbs_SHELL
+                            shell_shapes.append(shape)
+
+                    self._port_shapes = []
+                    for i, shell in enumerate(shell_shapes):
+                        pname = port_names[i] if i < len(port_names) else f"port_{i+1}"
+                        self._port_shapes.append((shell, pname))
+
+                    # Apply same scaling to port shapes
+                    if self.unit != 'm':
+                        scaled = []
+                        for pshape, pname in self._port_shapes:
+                            trsf = gp_Trsf()
+                            trsf.SetScale(gp_Pnt(0, 0, 0), scale_to_meters)
+                            app = BRepBuilderAPI_Transform(trsf)
+                            app.Perform(pshape, True)
+                            scaled.append((app.Shape(), pname))
+                        self._port_shapes = scaled
+
+                    print(f"Ports found: {len(self._port_shapes)}")
+                    print()
+                except Exception as e:
+                    warnings.warn(f"Could not extract port shapes: {e}")
+                    self._port_shapes = []
 
     def add_splitting_plane(
             self,
@@ -705,8 +961,9 @@ class OCCImporter(BaseGeometry):
 
         After building:
         - All faces are named ``'default'``
-        - If split: solids are named ``cell_1``, ``cell_2``, etc. and
-          port faces are named ``port1``, ``port2``, etc.
+        - Solids are named using STEP labels if available, otherwise
+          ``cell_1``, ``cell_2``, etc.
+        - Port faces are named ``port1``, ``port2``, etc.
         - ``self.bc`` is set to ``'default'``
         """
         if self._occ_shape is None:
@@ -718,21 +975,35 @@ class OCCImporter(BaseGeometry):
         if self._is_split and hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
             # Glue solids together for mesh connectivity
             self.geo = Glue([solid for solid in occ_geo.solids])
+        elif hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
+            # Multi-solid import (not split) — still need Glue for connectivity
+            self.geo = Glue([solid for solid in occ_geo.solids])
         else:
             # Single solid or not split - extract the shape
             self.geo = occ_geo.shape
 
         # --- Deterministic boundary naming ---
-        # Step 1: Name ALL faces 'wall'
+        # Step 1: Name ALL faces 'default' (PEC)
         self._name_all_faces_wall()
 
-        # Step 2: If split, auto-name solids and ports
-        if self._is_split:
-            self._auto_name_split_geometry()
+        # Step 2: Name solids (using STEP labels or cell_N)
+        self._auto_name_solids()
 
-        # Step 3: Set boundary condition
+        # Step 3: Detect and assign ports
+        if self._port_shapes:
+            self._auto_detect_ports()
+        else:
+            self._auto_assign_ports_by_position()
+
+        # Step 4: Set boundary condition
         self.bc = 'default'
         self._bc_explicitly_set = True
+
+        # Step 5: Subtract PEC solids if materials were set before build
+        if self._materials:
+            pec_labels = [k for k, v in self._materials.items() if v == 'PEC']
+            if pec_labels:
+                self._subtract_pec_solids(pec_labels)
 
     def finalize(self, maxh: Optional[float] = None) -> 'OCCImporter':
         """
@@ -1113,16 +1384,22 @@ class OCCImporter(BaseGeometry):
         # Step 1: Name all faces 'wall' first
         self._name_all_faces_wall()
 
-        # Step 2: Name solids and ports
-        self._auto_name_split_geometry(
+        # Step 2: Name solids
+        self._auto_name_solids(
             sort_axis=sort_axis,
-            port_axis=port_axis,
-            port_prefix=port_prefix,
             naming_func=naming_func,
             print_info=print_info,
         )
 
-        # Step 3: Set boundary condition
+        # Step 3: Assign ports
+        if port_axis is None:
+            port_axis = sort_axis
+        self._auto_assign_ports_by_position(
+            port_axis=port_axis,
+            port_prefix=port_prefix,
+        )
+
+        # Step 4: Set boundary condition
         self.bc = 'default'
         self._bc_explicitly_set = True
 
@@ -1156,108 +1433,567 @@ class OCCImporter(BaseGeometry):
             except AttributeError:
                 pass
 
-    def _auto_name_split_geometry(
-            self,
-            sort_axis: str = 'Z',
-            port_axis: str = None,
-            port_prefix: str = 'port',
-            naming_func=None,
-            print_info: bool = True,
-    ) -> None:
-        """
-        Name solids and ports for a split geometry.
-
-        Solids are sorted by centroid along *sort_axis* and named
-        ``cell_1``, ``cell_2``, …  Port faces are named sequentially
-        ``port1``, ``port2``, …  All other faces remain ``'wall'``.
+    def _map_sub_solid_to_parent(self, sub_solid_centroid: Tuple[float, float, float]) -> str:
+        """Map a sub-solid's centroid to its parent label using bounding box containment.
 
         Parameters
         ----------
-        sort_axis : str
-            Axis to sort solids by ('X', 'Y', 'Z').
-        port_axis : str, optional
-            Axis for port faces.  Defaults to *sort_axis*.
-        port_prefix : str
-            Prefix for port names.
-        naming_func : callable, optional
-            ``(index, solid) -> str`` for material names.
-        print_info : bool
-            Print naming summary.
+        sub_solid_centroid : tuple
+            (x, y, z) centroid of the sub-solid after splitting.
+
+        Returns
+        -------
+        str
+            The label of the parent solid that contains this sub-solid.
+        """
+        cx, cy, cz = sub_solid_centroid
+        best_label = None
+        best_dist = float('inf')
+
+        for info in self._original_solids_info:
+            bmin = info['bbox_min']
+            bmax = info['bbox_max']
+            # Check containment with small tolerance
+            tol = 1e-8
+            if (bmin[0] - tol <= cx <= bmax[0] + tol and
+                bmin[1] - tol <= cy <= bmax[1] + tol and
+                bmin[2] - tol <= cz <= bmax[2] + tol):
+                # Inside this parent's bounding box — pick closest centroid
+                pc = info['centroid']
+                dist = ((cx - pc[0])**2 + (cy - pc[1])**2 + (cz - pc[2])**2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_label = info['label']
+
+        if best_label is None:
+            # Fallback: find nearest parent centroid
+            for info in self._original_solids_info:
+                pc = info['centroid']
+                dist = ((cx - pc[0])**2 + (cy - pc[1])**2 + (cz - pc[2])**2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_label = info['label']
+
+        return best_label
+
+    def _auto_name_solids(
+            self,
+            sort_axis: str = 'Z',
+            naming_func=None,
+            print_info: bool = True,
+    ) -> None:
+        """Name solids using STEP labels or a naming function.
+
+        Solids are sorted by centroid along *sort_axis* for deterministic
+        ordering.  STEP labels are used when available and *naming_func*
+        is ``None``.
         """
         if self.geo is None:
             return
 
-        if naming_func is None:
+        has_parent_info = bool(self._original_solids_info) and naming_func is None
+
+        if naming_func is None and not has_parent_info:
             naming_func = lambda i, s: f"cell_{i + 1}"
 
-        if port_axis is None:
-            port_axis = sort_axis
-
-        axis_map = {'X': X, 'Y': Y, 'Z': Z}
         axis_index = {'X': 0, 'Y': 1, 'Z': 2}
-
-        if sort_axis.upper() not in axis_map:
-            raise ValueError(f"Invalid sort_axis: {sort_axis}")
-        if port_axis.upper() not in axis_map:
-            raise ValueError(f"Invalid port_axis: {port_axis}")
-
-        ax = axis_map[port_axis.upper()]
-        sort_idx = axis_index[sort_axis.upper()]
+        sort_idx = axis_index.get(sort_axis.upper(), 2)
 
         try:
             solids = list(self.geo.solids)
             n_solids = len(solids)
 
             if n_solids <= 1:
-                # Single solid — name material, assign 2 ports
                 solid = solids[0] if n_solids == 1 else self.geo
-                solid.mat(naming_func(0, solid))
+                if has_parent_info:
+                    bb = solid.bounding_box
+                    pmin, pmax = bb
+                    centroid = ((pmin[0]+pmax[0])/2, (pmin[1]+pmax[1])/2, (pmin[2]+pmax[2])/2)
+                    mat_name = _simplify_label(self._map_sub_solid_to_parent(centroid))
+                elif naming_func is not None:
+                    mat_name = naming_func(0, solid)
+                else:
+                    mat_name = "cell_1"
+                solid.mat(mat_name)
+                if print_info:
+                    print(f"Solid: '{mat_name}'")
+                return
+
+            # Sort solids by centroid
+            def _centroid(solid):
+                bb = solid.bounding_box
+                return (bb[0][sort_idx] + bb[1][sort_idx]) / 2
+
+            solids_sorted = sorted(enumerate(solids), key=lambda x: _centroid(x[1]))
+
+            # Determine material names
+            if has_parent_info:
+                raw_names = []
+                label_counts = {}
+                for orig_idx, solid in solids_sorted:
+                    bb = solid.bounding_box
+                    centroid = tuple((bb[0][j]+bb[1][j])/2 for j in range(3))
+                    parent = self._map_sub_solid_to_parent(centroid)
+                    short = _simplify_label(parent)
+                    label_counts[short] = label_counts.get(short, 0) + 1
+                    raw_names.append(short)
+
+                seen = {}
+                needs_suffix = {k for k, v in label_counts.items() if v > 1}
+                mat_names = []
+                for name in raw_names:
+                    if name in needs_suffix:
+                        seen[name] = seen.get(name, 0) + 1
+                        mat_names.append(f"{name}_{seen[name]}")
+                    else:
+                        mat_names.append(name)
+            else:
+                mat_names = [naming_func(i, s) if naming_func else f"cell_{i+1}"
+                             for i, (_, s) in enumerate(solids_sorted)]
+
+            for new_idx, (orig_idx, solid) in enumerate(solids_sorted):
+                solid.mat(mat_names[new_idx])
+
+            if print_info:
+                print(f"Named {n_solids} solids:")
+                for i, name in enumerate(mat_names):
+                    print(f"  solid {i}: '{name}'")
+
+        except AttributeError:
+            if has_parent_info:
+                mat_name = _simplify_label(self._original_solids_info[0]['label'])
+            elif naming_func is not None:
+                mat_name = naming_func(0, self.geo)
+            else:
+                mat_name = "cell_1"
+            self.geo.mat(mat_name)
+            if print_info:
+                print(f"Solid: '{mat_name}'")
+
+    # ==================== PORT DETECTION ====================
+
+    def _collect_occ_geometry_faces(self) -> List[dict]:
+        """Enumerate all faces on the raw OCC compound and compute properties.
+
+        Populates ``self._geometry_faces`` — a list of dicts, each with
+        ``index``, ``center``, ``normal``, ``area``, ``is_planar``, ``face``.
+        """
+        if self._occ_shape is None:
+            return []
+
+        faces = []
+        explorer = TopExp_Explorer(self._occ_shape, TopAbs_FACE)
+        idx = 0
+        while explorer.More():
+            fp = get_face_properties(topods.Face(explorer.Current()))
+            fp["index"] = idx
+            faces.append(fp)
+            explorer.Next()
+            idx += 1
+
+        self._geometry_faces = faces
+        return faces
+
+    def _auto_detect_ports(self) -> None:
+        """Match STEP-defined port shells to netgen geometry faces.
+
+        For each port shell shape, the largest planar face is extracted and
+        matched against all planar faces on the geometry using
+        :func:`faces_coincide`.  Matched faces are renamed to the port name
+        found in the STEP file (e.g. ``Ports|port1`` → ``port1``).
+        """
+        if not self._port_shapes or self.geo is None:
+            return
+
+        # Collect OCC-level face properties for matching
+        if not self._geometry_faces:
+            self._collect_occ_geometry_faces()
+
+        self._matched_ports = []
+        used_face_indices = set()
+
+        for port_shape, raw_port_name in self._port_shapes:
+            port_fp = get_port_shape_properties(port_shape)
+            if port_fp is None or not port_fp["is_planar"]:
+                warnings.warn(f"Port '{raw_port_name}': not planar or has no faces — skipped")
+                continue
+
+            # Find best matching geometry face
+            pc = port_fp["center"]
+            best_match = None
+            best_score = float('inf')
+
+            for gf in self._geometry_faces:
+                if gf["index"] in used_face_indices:
+                    continue
+                if not gf["is_planar"]:
+                    continue
+                if faces_coincide(port_fp, gf):
+                    dx = gf["center"].X() - pc.X()
+                    dy = gf["center"].Y() - pc.Y()
+                    dz = gf["center"].Z() - pc.Z()
+                    score = np.sqrt(dx**2 + dy**2 + dz**2)
+                    if score < best_score:
+                        best_score = score
+                        best_match = gf
+
+            if best_match is None:
+                warnings.warn(f"Port '{raw_port_name}': no matching geometry face found")
+                continue
+
+            used_face_indices.add(best_match["index"])
+
+            # Derive clean port name: "Ports|port1" -> "port1"
+            clean_name = raw_port_name
+            if '|' in clean_name:
+                clean_name = clean_name.split('|', 1)[1]
+
+            n = best_match["normal"]
+            mc = best_match["center"]
+            self._matched_ports.append({
+                "name": clean_name,
+                "raw_name": raw_port_name,
+                "face_index": best_match["index"],
+                "center": (mc.X(), mc.Y(), mc.Z()),
+                "normal": (n.X(), n.Y(), n.Z()),
+                "area": best_match["area"],
+            })
+
+        # Now apply port names to netgen geometry
+        self._apply_matched_ports_to_netgen()
+
+        # Collect unmatched ports (internal ports needing splitting)
+        matched_raw = {p["raw_name"] for p in self._matched_ports}
+        unmatched = [(s, n) for s, n in self._port_shapes if n not in matched_raw]
+
+        # Print summary
+        n_matched = len(self._matched_ports)
+        n_total = len(self._port_shapes)
+        print(f"Ports matched: {n_matched}/{n_total}")
+        for p in self._matched_ports:
+            cx, cy, cz = p["center"]
+            nx, ny, nz = p["normal"]
+            print(f"  {p['name']:20s} center=({cx:.5f}, {cy:.5f}, {cz:.5f})  "
+                  f"normal=({nx:.4f}, {ny:.4f}, {nz:.4f})")
+
+        if unmatched:
+            print(f"\nUnmatched ports ({len(unmatched)}) — these are internal ports "
+                  f"that require splitting:")
+            for port_shape, raw_name in unmatched:
+                fp = get_port_shape_properties(port_shape)
+                if fp and fp["is_planar"]:
+                    c = fp["center"]
+                    n = fp["normal"]
+                    # Determine axis from normal
+                    nx, ny, nz = abs(n.X()), abs(n.Y()), abs(n.Z())
+                    if nz > nx and nz > ny:
+                        axis_hint = f"add_splitting_plane_at_z({c.Z():.6f})"
+                    elif nx > ny:
+                        axis_hint = f"add_splitting_plane_at_x({c.X():.6f})"
+                    else:
+                        axis_hint = f"add_splitting_plane_at_y({c.Y():.6f})"
+                    clean = raw_name.split('|', 1)[1] if '|' in raw_name else raw_name
+                    print(f"  {clean:20s} -> geo.{axis_hint}")
+                else:
+                    print(f"  {raw_name}: not planar")
+
+    def _apply_matched_ports_to_netgen(self) -> None:
+        """Apply matched port names to netgen geometry faces.
+
+        For each matched port, find the netgen face whose centroid and
+        normal match the OCC-level match, and rename it.
+        """
+        if not self._matched_ports or self.geo is None:
+            return
+
+        # Collect all netgen faces with their properties
+        netgen_faces = []
+        try:
+            solids = list(self.geo.solids)
+            for solid in solids:
+                for face in solid.faces:
+                    try:
+                        bb = face.bounding_box
+                        fc = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
+                        netgen_faces.append({"face": face, "center": fc})
+                    except Exception:
+                        continue
+        except AttributeError:
+            for face in self.geo.faces:
+                try:
+                    bb = face.bounding_box
+                    fc = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
+                    netgen_faces.append({"face": face, "center": fc})
+                except Exception:
+                    continue
+
+        for port in self._matched_ports:
+            pc = port["center"]
+            best_face = None
+            best_dist = float('inf')
+
+            for nf in netgen_faces:
+                fc = nf["center"]
+                dist = sum((pc[j] - fc[j])**2 for j in range(3))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_face = nf["face"]
+
+            if best_face is not None:
+                best_face.name = port["name"]
+                best_face.col = (1, 0, 0)
+
+    def _auto_assign_ports_by_position(
+            self,
+            port_axis: str = 'Z',
+            port_prefix: str = 'port',
+    ) -> None:
+        """Fallback port assignment using Min/Max faces along an axis.
+
+        Used when no STEP port definitions are found.  For multi-solid
+        geometry, ports are assigned sequentially: ``port1`` at the
+        global minimum, ``portN+1`` at the global maximum, with internal
+        ports at solid boundaries.
+        """
+        if self.geo is None:
+            return
+
+        axis_map = {'X': X, 'Y': Y, 'Z': Z}
+        axis_index = {'X': 0, 'Y': 1, 'Z': 2}
+
+        ax = axis_map.get(port_axis.upper(), Z)
+        sort_idx = axis_index.get(port_axis.upper(), 2)
+
+        try:
+            solids = list(self.geo.solids)
+            n_solids = len(solids)
+
+            if n_solids <= 1:
+                solid = solids[0] if n_solids == 1 else self.geo
                 solid.faces.Min(ax).name = f'{port_prefix}1'
                 solid.faces.Min(ax).col = (1, 0, 0)
                 solid.faces.Max(ax).name = f'{port_prefix}2'
                 solid.faces.Max(ax).col = (1, 0, 0)
-                if print_info:
-                    print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
+                print(f"Ports: {port_prefix}1, {port_prefix}2 (by position)")
                 return
 
-            # Sort solids by centroid position along sort_axis
-            def get_solid_centroid(solid):
+            # Sort solids by centroid
+            def _centroid(solid):
                 bb = solid.bounding_box
-                pmin, pmax = bb
-                return (pmin[sort_idx] + pmax[sort_idx]) / 2
+                return (bb[0][sort_idx] + bb[1][sort_idx]) / 2
 
-            solids_with_pos = [(get_solid_centroid(s), i, s) for i, s in enumerate(solids)]
-            solids_with_pos.sort(key=lambda x: x[0])
+            solids_sorted = sorted(solids, key=_centroid)
 
-            # Name solids and ports in sorted order
-            for new_idx, (pos, orig_idx, solid) in enumerate(solids_with_pos):
-                mat_name = naming_func(new_idx, solid)
-                solid.mat(mat_name)
-
-                min_port_num = new_idx + 1
-                max_port_num = new_idx + 2
-
-                solid.faces.Min(ax).name = f'{port_prefix}{min_port_num}'
+            for i, solid in enumerate(solids_sorted):
+                solid.faces.Min(ax).name = f'{port_prefix}{i + 1}'
                 solid.faces.Min(ax).col = (1, 0, 0)
-                solid.faces.Max(ax).name = f'{port_prefix}{max_port_num}'
+                solid.faces.Max(ax).name = f'{port_prefix}{i + 2}'
                 solid.faces.Max(ax).col = (1, 0, 0)
 
-            if print_info:
-                print(f"Named {n_solids} solids, {n_solids + 1} ports")
-                print(f"  External: {port_prefix}1, {port_prefix}{n_solids + 1}")
-                if n_solids > 1:
-                    internal = ', '.join(f"{port_prefix}{i}" for i in range(2, n_solids + 1))
-                    print(f"  Internal: {internal}")
+            print(f"Ports: {n_solids + 1} ports assigned by position "
+                  f"({port_prefix}1 ... {port_prefix}{n_solids + 1})")
 
         except AttributeError:
-            # Fallback for geometry without .solids attribute
-            self.geo.mat(naming_func(0, self.geo))
             self.geo.faces.Min(ax).name = f'{port_prefix}1'
             self.geo.faces.Min(ax).col = (1, 0, 0)
             self.geo.faces.Max(ax).name = f'{port_prefix}2'
             self.geo.faces.Max(ax).col = (1, 0, 0)
-            if print_info:
-                print(f"Single solid: {port_prefix}1 and {port_prefix}2 assigned")
+            print(f"Ports: {port_prefix}1, {port_prefix}2 (by position)")
+
+    # ==================== PORT INSPECTION & MANUAL ASSIGNMENT ====================
+
+    def list_planar_faces(self) -> List[dict]:
+        """List all planar faces on the OCC geometry with their properties.
+
+        Useful for inspecting the geometry before manual port assignment.
+
+        Returns
+        -------
+        list[dict]
+            Each dict contains ``index``, ``center`` (tuple), ``normal`` (tuple),
+            ``area`` (float).
+        """
+        if self._occ_shape is None:
+            raise RuntimeError("No OCC shape loaded.")
+
+        if not self._geometry_faces:
+            self._collect_occ_geometry_faces()
+
+        planar = [f for f in self._geometry_faces if f["is_planar"]]
+
+        print(f"\nPlanar faces: {len(planar)} / {len(self._geometry_faces)} total\n")
+        print(f"{'ID':<6} {'Center':<42} {'Normal':<35} {'Area':<12}")
+        print("-" * 100)
+
+        result = []
+        for pf in planar:
+            c, n = pf["center"], pf["normal"]
+            cx, cy, cz = c.X(), c.Y(), c.Z()
+            nx, ny, nz = n.X(), n.Y(), n.Z()
+            print(f"{pf['index']:<6} ({cx:>10.5f}, {cy:>10.5f}, {cz:>10.5f})   "
+                  f"({nx:>7.4f}, {ny:>7.4f}, {nz:>7.4f})   {pf['area']:<12.6f}")
+            result.append({
+                "index": pf["index"],
+                "center": (cx, cy, cz),
+                "normal": (nx, ny, nz),
+                "area": pf["area"],
+            })
+        return result
+
+    def assign_ports(
+            self,
+            port_face_map: Dict[str, int],
+    ) -> 'OCCImporter':
+        """Manually assign ports by mapping port names to OCC face indices.
+
+        Use :meth:`list_planar_faces` or :meth:`show_planar_faces` to
+        identify the face indices first.
+
+        Parameters
+        ----------
+        port_face_map : dict
+            ``{port_name: face_index}`` — e.g. ``{"port1": 42, "port2": 107}``.
+
+        Returns
+        -------
+        self : OCCImporter
+
+        Examples
+        --------
+        >>> geo.list_planar_faces()        # inspect
+        >>> geo.assign_ports({"port1": 42, "port2": 107})
+        """
+        if self._occ_shape is None:
+            raise RuntimeError("No OCC shape loaded.")
+        if self.geo is None:
+            raise RuntimeError("Geometry not built. Call build() first.")
+
+        if not self._geometry_faces:
+            self._collect_occ_geometry_faces()
+
+        face_by_index = {f["index"]: f for f in self._geometry_faces}
+
+        self._matched_ports = []
+        for port_name, face_idx in port_face_map.items():
+            if face_idx not in face_by_index:
+                warnings.warn(f"Face index {face_idx} not found — skipping port '{port_name}'")
+                continue
+
+            gf = face_by_index[face_idx]
+            c = gf["center"]
+            n = gf["normal"]
+            self._matched_ports.append({
+                "name": port_name,
+                "raw_name": port_name,
+                "face_index": face_idx,
+                "center": (c.X(), c.Y(), c.Z()),
+                "normal": (n.X(), n.Y(), n.Z()) if n else (0, 0, 0),
+                "area": gf["area"],
+            })
+            print(f"  {port_name} -> Face #{face_idx} "
+                  f"at ({c.X():.4f}, {c.Y():.4f}, {c.Z():.4f})")
+
+        # Apply to netgen
+        self._apply_matched_ports_to_netgen()
+
+        self._record('assign_ports', port_face_map=port_face_map)
+        return self
+
+    # ==================== VISUAL INSPECTION ====================
+
+    def show_planar_faces(
+            self,
+            highlight_ports: bool = True,
+            backend: str = 'auto',
+            **kwargs,
+    ):
+        """Display the geometry with planar faces highlighted.
+
+        Parameters
+        ----------
+        highlight_ports : bool
+            If True, highlight matched port faces in red.
+        backend : str
+            ``'jupyter'`` for JupyterRenderer, ``'occ'`` for the standalone
+            OCC viewer (SimpleGui), ``'auto'`` tries Jupyter first.
+        """
+        if self._occ_shape is None:
+            raise RuntimeError("No OCC shape loaded.")
+
+        if not self._geometry_faces:
+            self._collect_occ_geometry_faces()
+
+        port_indices = {p["face_index"] for p in self._matched_ports}
+
+        if backend == 'auto':
+            try:
+                get_ipython  # noqa: F821 — available in Jupyter
+                backend = 'jupyter'
+            except NameError:
+                backend = 'occ'
+
+        if backend == 'jupyter':
+            self._show_planar_faces_jupyter(port_indices, highlight_ports, **kwargs)
+        else:
+            self._show_planar_faces_occ(port_indices, highlight_ports, **kwargs)
+
+    def _show_planar_faces_jupyter(self, port_indices, highlight_ports, **kwargs):
+        """Jupyter-based planar face viewer."""
+        rnd = JupyterRenderer()
+
+        # Display geometry with transparency
+        solids = get_solids(self._occ_shape)
+        for solid in solids:
+            rnd.DisplayShape(solid, render_edges=True, **kwargs)
+
+        # Highlight planar faces
+        for gf in self._geometry_faces:
+            if not gf["is_planar"]:
+                continue
+            if highlight_ports and gf["index"] in port_indices:
+                rnd.DisplayShape(gf["face"], render_edges=True)
+            # Non-port planar faces shown as-is (part of geometry)
+
+        rnd.Display()
+
+    def _show_planar_faces_occ(self, port_indices, highlight_ports, **kwargs):
+        """Standalone OCC viewer for planar face inspection."""
+        try:
+            from OCC.Display.SimpleGui import init_display
+            from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
+        except ImportError:
+            warnings.warn(
+                "OCC.Display.SimpleGui not available. "
+                "Use backend='jupyter' or install pythonocc-core with GUI support."
+            )
+            return
+
+        display, start_display, _, _ = init_display()
+
+        # Display geometry
+        solids = get_solids(self._occ_shape)
+        colors = generate_distinct_colors(len(solids))
+        for i, solid in enumerate(solids):
+            r, g, b = colors[i]
+            display.DisplayShape(
+                solid,
+                color=Quantity_Color(r, g, b, Quantity_TOC_RGB),
+                transparency=0.5,
+                update=False,
+            )
+
+        # Highlight port faces in red
+        if highlight_ports:
+            for gf in self._geometry_faces:
+                if gf["index"] in port_indices:
+                    display.DisplayShape(
+                        gf["face"],
+                        color=Quantity_Color(1.0, 0.0, 0.0, Quantity_TOC_RGB),
+                        update=False,
+                    )
+
+        display.FitAll()
+        start_display()
 
     def name_faces_by_position(
             self,
@@ -1321,6 +2057,424 @@ class OCCImporter(BaseGeometry):
             print("Single solid geometry - no color variation needed")
 
         return self
+
+    # ==================== MATERIAL ASSIGNMENT ====================
+
+    def set_materials(self, material_config: Dict[str, dict]) -> 'OCCImporter':
+        """
+        Assign material properties to solids by their STEP label or material name.
+
+        The keys in *material_config* must match the solid labels (from the STEP
+        file) or the material names assigned during build/split.  Unmatched keys
+        produce a warning.
+
+        A value of ``'PEC'`` marks the solid as a perfect electric conductor.
+        PEC solids are subtracted from the computational domain and their
+        exposed surfaces become Dirichlet boundaries.  This triggers an
+        automatic geometry/mesh rebuild.
+
+        Parameters
+        ----------
+        material_config : dict
+            Mapping of solid label → material properties dict or ``'PEC'``.
+            Each properties dict can contain::
+
+                {
+                    "eps_r": float,       # relative permittivity (default 1.0)
+                    "epsilon_r": float,   # accepted as alias for eps_r
+                    "mu_r": float,        # relative permeability (default 1.0)
+                    "sigma": float,       # electrical conductivity S/m (default 0)
+                    "tan_delta": float,   # loss tangent (default 0)
+                }
+
+        Returns
+        -------
+        self : OCCImporter
+
+        Examples
+        --------
+        >>> geo.set_materials({
+        ...     "hook_top": "PEC",
+        ...     "ceramic": {"eps_r": 9.4, "tan_delta": 1e-4},
+        ...     "beampipe": {"eps_r": 1.0},
+        ... })
+        """
+        # Normalise: accept 'epsilon_r' as alias for 'eps_r'
+        normalised = {}
+        for key, val in material_config.items():
+            if isinstance(val, str) and val.upper() == 'PEC':
+                normalised[key] = 'PEC'
+            elif isinstance(val, dict):
+                d = dict(val)
+                if 'epsilon_r' in d and 'eps_r' not in d:
+                    d['eps_r'] = d.pop('epsilon_r')
+                normalised[key] = d
+            else:
+                normalised[key] = val
+
+        # Validate material keys against known solid names
+        import fnmatch
+        known_names = set()
+        if self.mesh is not None:
+            known_names = set(self.mesh.GetMaterials())
+        elif self.geo is not None:
+            try:
+                for solid in self.geo.solids:
+                    known_names.add(solid.name)
+            except AttributeError:
+                pass
+        # Add all STEP label variants (full path + segments)
+        for label in self._solid_labels:
+            known_names.add(label)
+            short = label.split('/')[-1]
+            known_names.add(short)
+            known_names.update(short.split('|'))
+
+        for key in normalised:
+            if '*' in key:
+                matched = any(fnmatch.fnmatchcase(kn, key) for kn in known_names)
+            else:
+                matched = key in known_names
+
+            if not matched and known_names:
+                warnings.warn(
+                    f"Material key '{key}' does not match any known solid label. "
+                    f"Known labels: {sorted(known_names)}"
+                )
+
+        self._materials = normalised
+
+        # Check if any PEC solids need to be subtracted
+        pec_labels = [k for k, v in normalised.items() if v == 'PEC']
+        if pec_labels and self.geo is not None:
+            self._subtract_pec_solids(pec_labels)
+
+        self._record('set_materials', material_config=material_config)
+
+        n_pec = len(pec_labels)
+        n_other = len(normalised) - n_pec
+        parts = []
+        if n_other:
+            parts.append(f"{n_other} dielectric")
+        if n_pec:
+            parts.append(f"{n_pec} PEC")
+        print(f"Material properties assigned: {', '.join(parts)}")
+        return self
+
+    def _get_all_names_for_solid(self, solid_name: str) -> List[str]:
+        """Return all name variants for a solid (simplified + full STEP label parts).
+
+        This lets material keys reference a solid by its simplified mesh name,
+        the full STEP path, or any segment of it (e.g. ``hook_top|lh4``).
+        """
+        names = {solid_name}
+        # Strip auto-generated suffix (_1, _2) to find the base
+        base = solid_name.rsplit('_', 1)[0] if '_' in solid_name else solid_name
+        # Look up the original STEP label for this solid
+        for info in self._original_solids_info:
+            full_label = info['label']
+            if _simplify_label(full_label) == base:
+                names.add(full_label)
+                # Add intermediate segments: "hook_top|lh4", "hook_top", "lh4"
+                short = full_label.split('/')[-1]
+                names.add(short)
+                names.update(short.split('|'))
+                break
+        return list(names)
+
+    def _resolve_material_key(self, mat_key: str, solid_name: str) -> bool:
+        """Check if a material config key matches a solid name.
+
+        Matching rules:
+        - **Exact**: key equals the solid name or any of its STEP label variants.
+        - **Wildcard** (``*``): glob-style matching via ``fnmatch``.
+
+        No fuzzy substring matching — ``'solid'`` does NOT match ``'solid1'``.
+        """
+        import fnmatch
+
+        candidates = self._get_all_names_for_solid(solid_name)
+
+        if '*' in mat_key:
+            return any(fnmatch.fnmatchcase(c, mat_key) for c in candidates)
+
+        return mat_key in candidates
+
+    def _subtract_pec_solids(self, pec_labels: List[str]) -> None:
+        """Remove PEC solids from the geometry and name exposed faces as BC.
+
+        PEC solids are identified by matching *pec_labels* against the
+        netgen solid names.  The remaining (non-PEC) solids are re-glued
+        and the faces that were shared with PEC solids automatically
+        become external boundary faces named ``self.bc`` (the Dirichlet BC).
+        """
+        if self.geo is None:
+            return
+
+        try:
+            all_solids = list(self.geo.solids)
+        except AttributeError:
+            warnings.warn("Cannot subtract PEC solids from single-solid geometry")
+            return
+
+        keep = []
+        removed_names = []
+        for solid in all_solids:
+            is_pec = False
+            for pec_key in pec_labels:
+                if self._resolve_material_key(pec_key, solid.name):
+                    is_pec = True
+                    break
+            if is_pec:
+                removed_names.append(solid.name)
+            else:
+                keep.append(solid)
+
+        if not removed_names:
+            warnings.warn("No PEC solids matched — geometry unchanged")
+            return
+
+        if not keep:
+            raise ValueError("All solids are PEC — no computational domain remains")
+
+        print(f"Subtracting {len(removed_names)} PEC solid(s): {removed_names}")
+
+        # Rebuild geometry from non-PEC solids
+        if len(keep) == 1:
+            self.geo = keep[0]
+        else:
+            self.geo = Glue(keep)
+
+        # Name all faces as PEC boundary (exposed interfaces get this automatically)
+        bc_name = self.bc or 'default'
+        try:
+            for solid in self.geo.solids:
+                for face in solid.faces:
+                    if face.name == 'default' or face.name == '':
+                        face.name = bc_name
+        except AttributeError:
+            for face in self.geo.faces:
+                if face.name == 'default' or face.name == '':
+                    face.name = bc_name
+
+        # Invalidate mesh — must re-mesh after PEC subtraction
+        self.mesh = None
+        self._ports = None
+        self._boundaries = None
+
+    def get_material(self, domain_name: str) -> dict:
+        """
+        Get material properties for a domain, resolving label matching.
+
+        Returns default vacuum properties if no material is assigned.
+        PEC domains (already subtracted) should not appear in the mesh,
+        but if queried they return ``{"PEC": True}``.
+
+        Parameters
+        ----------
+        domain_name : str
+            The material/domain name as it appears in the mesh.
+
+        Returns
+        -------
+        dict
+            Material properties with defaults filled in::
+
+                {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+        """
+        import fnmatch
+
+        defaults = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+
+        def _apply(raw):
+            if raw == 'PEC':
+                return {"PEC": True}
+            props = dict(defaults)
+            if isinstance(raw, dict):
+                props.update(raw)
+            return props
+
+        candidates = self._get_all_names_for_solid(domain_name)
+
+        # 1. Exact match (non-wildcard keys only)
+        for key, mat in self._materials.items():
+            if '*' not in key and key in candidates:
+                return _apply(mat)
+
+        # 2. Wildcard match
+        for key, mat in self._materials.items():
+            if '*' in key and any(fnmatch.fnmatchcase(c, key) for c in candidates):
+                return _apply(mat)
+
+        return defaults
+
+    @property
+    def solid_labels(self) -> List[str]:
+        """STEP solid labels extracted from the file."""
+        return list(self._solid_labels)
+
+    @property
+    def materials(self) -> Dict[str, dict]:
+        """Currently assigned material properties."""
+        return dict(self._materials)
+
+    # ==================== PARTS INVENTORY ====================
+
+    def save_parts_inventory(
+            self,
+            save_dir: Optional[str] = None,
+            ncols: int = 4,
+            figsize_per_cell: Tuple[float, float] = (4, 4),
+            deflection: float = 0.1,
+            elev: float = 30,
+            azim: float = 45,
+    ) -> str:
+        """
+        Generate and save a parts inventory image showing each solid with its label.
+
+        Parameters
+        ----------
+        save_dir : str, optional
+            Directory to save the image. Defaults to ``geometry/`` next to the
+            STEP file.
+        ncols : int
+            Number of columns in the grid.
+        figsize_per_cell : tuple
+            (width, height) per subplot cell in inches.
+        deflection : float
+            Mesh deflection for triangulation quality.
+        elev, azim : float
+            3D view angles.
+
+        Returns
+        -------
+        str
+            Path to the saved image file.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+            from OCC.Core.BRep import BRep_Tool
+            from OCC.Core.TopLoc import TopLoc_Location
+        except ImportError as e:
+            warnings.warn(f"Cannot generate parts inventory: {e}")
+            return ""
+
+        if self._occ_shape is None:
+            raise RuntimeError("No OCC shape loaded.")
+
+        solids = get_solids(self._occ_shape)
+        n = len(solids)
+        if n == 0:
+            warnings.warn("No solids found for parts inventory.")
+            return ""
+
+        # Determine labels
+        labels = []
+        for i in range(n):
+            if i < len(self._solid_labels):
+                labels.append(self._solid_labels[i])
+            else:
+                labels.append(f"solid_{i+1}")
+
+        nrows = int(np.ceil(n / ncols))
+        fig = plt.figure(figsize=(figsize_per_cell[0] * ncols,
+                                   figsize_per_cell[1] * nrows))
+
+        colors = generate_distinct_colors(n)
+
+        for idx, solid in enumerate(solids):
+            # Triangulate
+            mesh_inc = BRepMesh_IncrementalMesh(solid, deflection, False, 0.5, True)
+            mesh_inc.Perform()
+
+            vertices = []
+            triangles = []
+            vertex_offset = 0
+
+            explorer = TopExp_Explorer(solid, TopAbs_FACE)
+            while explorer.More():
+                face = explorer.Current()
+                loc = TopLoc_Location()
+                triangulation = BRep_Tool.Triangulation(face, loc)
+
+                if triangulation is not None:
+                    trsf = loc.Transformation()
+                    for i in range(1, triangulation.NbNodes() + 1):
+                        node = triangulation.Node(i)
+                        node.Transform(trsf)
+                        vertices.append([node.X(), node.Y(), node.Z()])
+                    for i in range(1, triangulation.NbTriangles() + 1):
+                        tri = triangulation.Triangle(i)
+                        n1, n2, n3 = tri.Get()
+                        triangles.append([
+                            n1 - 1 + vertex_offset,
+                            n2 - 1 + vertex_offset,
+                            n3 - 1 + vertex_offset
+                        ])
+                    vertex_offset += triangulation.NbNodes()
+
+                explorer.Next()
+
+            ax_plot = fig.add_subplot(nrows, ncols, idx + 1, projection='3d')
+
+            if vertices and triangles:
+                verts = np.array(vertices)
+                tris = np.array(triangles)
+
+                center = (verts.max(axis=0) + verts.min(axis=0)) / 2
+                verts_c = verts - center
+                extent = (verts.max(axis=0) - verts.min(axis=0)).max()
+                if extent > 0:
+                    verts_c = verts_c / extent
+
+                tri_verts = verts_c[tris]
+                poly = Poly3DCollection(tri_verts, alpha=0.85)
+                poly.set_facecolor(colors[idx])
+                poly.set_edgecolor((0.2, 0.2, 0.2, 0.3))
+                poly.set_linewidth(0.1)
+                ax_plot.add_collection3d(poly)
+                ax_plot.set_xlim(-0.6, 0.6)
+                ax_plot.set_ylim(-0.6, 0.6)
+                ax_plot.set_zlim(-0.6, 0.6)
+            else:
+                ax_plot.text2D(0.5, 0.5, "No mesh", ha='center', va='center',
+                              transform=ax_plot.transAxes)
+
+            ax_plot.set_box_aspect([1, 1, 1])
+            ax_plot.set_axis_off()
+            ax_plot.view_init(elev=elev, azim=azim)
+
+            # Title
+            parts = labels[idx].split('/')
+            short_name = parts[-1]
+            path = '/'.join(parts[:-1])
+            if len(path) > 30:
+                path = '...' + path[-27:]
+            ax_plot.set_title(f"[{idx}] {short_name}\n{path}",
+                              fontsize=8, fontweight='bold', pad=2)
+
+        # Hide empty subplots
+        for idx in range(n, nrows * ncols):
+            fig.add_subplot(nrows, ncols, idx + 1).set_visible(False)
+
+        basename = os.path.splitext(os.path.basename(self.filepath))[0]
+        plt.suptitle(f"Parts Inventory: {basename} — {n} solids",
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+
+        # Determine save path
+        if save_dir is None:
+            save_dir = os.path.join(os.path.dirname(self.filepath), 'geometry')
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"{basename}_parts_inventory.png")
+
+        plt.savefig(save_path, dpi=150, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+        plt.close(fig)
+        print(f"Parts inventory saved to: {save_path}")
+        return save_path
 
     @property
     def n_solids(self) -> int:

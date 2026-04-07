@@ -47,14 +47,15 @@ class CSTResult(PlotMixin):
     >>> fig, ax = fds.fom.plot_s(ax=ax, label='FOM')
     """
 
+    # Matches both "S1(1),2(1).txt" (multimode) and "S1,2.txt" (single-mode)
     _FILENAME_PATTERN_S = re.compile(
-        r"(?:S-Parameters_S|S Matrix_S)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+        r"(?:S-Parameters_S|S Matrix_S)(\d+)(?:\((\d+)\))?,(\d+)(?:\((\d+)\))?\.txt$"
     )
     _FILENAME_PATTERN_Z = re.compile(
-        r"(?:Z-Parameters_Z|Z Matrix_Z)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+        r"(?:Z-Parameters_Z|Z Matrix_Z)(\d+)(?:\((\d+)\))?,(\d+)(?:\((\d+)\))?\.txt$"
     )
     _FILENAME_PATTERN_Y = re.compile(
-        r"(?:Y-Parameters_Y|Y Matrix_Y)(\d+)\((\d+)\),(\d+)\((\d+)\)\.txt$"
+        r"(?:Y-Parameters_Y|Y Matrix_Y)(\d+)(?:\((\d+)\))?,(\d+)(?:\((\d+)\))?\.txt$"
     )
 
     def __init__(
@@ -177,8 +178,11 @@ class CSTResult(PlotMixin):
                 print(f"  Warning: Could not parse filename {filepath.name}, skipping.")
                 continue
 
-            indices = tuple(int(x) for x in match.groups())
-            port_i, mode_i, port_j, mode_j = indices
+            g = match.groups()
+            port_i = int(g[0])
+            mode_i = int(g[1]) if g[1] is not None else 1
+            port_j = int(g[2])
+            mode_j = int(g[3]) if g[3] is not None else 1
             port_indices.update([port_i, port_j])
             mode_indices.update([mode_i, mode_j])
 
@@ -256,8 +260,11 @@ class CSTResult(PlotMixin):
             if not match:
                 continue
             
-            indices = tuple(int(x) for x in match.groups())
-            port_i, mode_i, port_j, mode_j = indices
+            g = match.groups()
+            port_i = int(g[0])
+            mode_i = int(g[1]) if g[1] is not None else 1
+            port_j = int(g[2])
+            mode_j = int(g[3]) if g[3] is not None else 1
 
             # Load data (reuse S-loader as format is identical: freq, mag, phase)
             freq_hz, z_complex = self._load_s_parameter_file(filepath)
@@ -318,8 +325,11 @@ class CSTResult(PlotMixin):
             if not match:
                 continue
             
-            indices = tuple(int(x) for x in match.groups())
-            port_i, mode_i, port_j, mode_j = indices
+            g = match.groups()
+            port_i = int(g[0])
+            mode_i = int(g[1]) if g[1] is not None else 1
+            port_j = int(g[2])
+            mode_j = int(g[3]) if g[3] is not None else 1
 
             freq_hz, y_complex = self._load_s_parameter_file(filepath)
 

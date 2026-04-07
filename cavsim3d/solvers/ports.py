@@ -754,7 +754,7 @@ class PortEigenmodeSolver:
             mode_name = f"{amode.type}_{m}{n}"
             pol_str = f" ({amode.polarization})" if amode.polarization else ""
             print(f"\t{port} mode {mode_idx}: {mode_name}{pol_str}, "
-                  f"kc={amode.kc:.4f}, σ={sigma:+.0f}")
+                  f"kc={amode.kc:.4f}, sigma={sigma:+.0f}")
 
             mode_idx += 1
 
@@ -815,7 +815,7 @@ class PortEigenmodeSolver:
                 
                 print(f"\t  {port} mode {mode_idx}: kc={kc:.4f}, "
                     f"type={group_type}, fc={c0 * kc / (2 * np.pi) / 1e9:.4f} GHz, "
-                    f"σ={sigma:+.0f}, phase={'+' if phase_sign > 0 else '-'}"
+                    f"sigma={sigma:+.0f}, phase={'+' if phase_sign > 0 else '-'}"
                     f"{pol_str}{degen_str}")
 
                 mode_idx += 1
@@ -1091,6 +1091,9 @@ class PortEigenmodeSolver:
         """
         port_region = self.mesh.Boundaries(port)
 
+        # ========== TEM Mode ==========
+        tem_mode = self._solve_tem_mode(port)
+
         # ========== TE Modes ==========
         te_modes, te_cutoffs = self._solve_te_modes(port, nmodes + 5)
 
@@ -1099,6 +1102,8 @@ class PortEigenmodeSolver:
 
         # Combine all modes
         all_modes = []
+        if tem_mode is not None:
+            all_modes.append((0.0, tem_mode, 'TEM'))
         for mode, kc in zip(te_modes, te_cutoffs):
             all_modes.append((kc, mode, 'TE'))
         for mode, kc in zip(tm_modes, tm_cutoffs):
@@ -1303,6 +1308,103 @@ class PortEigenmodeSolver:
 
         return modes, cutoffs
 
+    def _solve_tem_mode(self, port: str):
+        """
+        Solve for TEM mode on a port cross-section.
+
+        TEM modes exist only on multi-conductor ports (e.g. coaxial).
+        The transverse E field is Et = -∇φ where φ satisfies Laplace's
+        equation with distinct potentials on inner and outer conductors.
+
+        We detect a TEM mode by solving the Laplace eigenvalue problem
+        (same as TM but looking for a near-zero eigenvalue that is NOT
+        the trivial constant mode removed by Dirichlet BC).  If the port
+        has only a single conductor boundary the Dirichlet BC removes all
+        constant modes and no TEM mode exists.
+
+        For a coaxial port the inner conductor has Dirichlet BC (φ=0)
+        while the outer conductor also has Dirichlet BC.  The TEM potential
+        is the harmonic function that is 1 on the inner conductor and 0 on
+        the outer (or vice-versa).  We approximate this by solving the
+        Laplace problem with an inhomogeneous Dirichlet lift.
+
+        Returns
+        -------
+        mode : GridFunction or None
+            TEM mode E-field pattern (HCurl), or None if no TEM mode exists.
+        """
+        from ngsolve import H1, grad, dx as dx_vol
+
+        port_region = self.mesh.Boundaries(port)
+
+        # H1 space on port surface with Dirichlet BC on waveguide walls
+        fes_h1 = H1(
+            self.mesh, order=self.order + 1,
+            dirichlet=self.bc,
+            definedon=self.mesh.Boundaries(port)
+        )
+
+        n_free = sum(1 for i in range(fes_h1.ndof) if fes_h1.FreeDofs()[i])
+        if n_free < 2:
+            return None
+
+        u_h1, v_h1 = fes_h1.TnT()
+
+        # Solve the same Laplace eigenvalue problem as TM modes
+        # but look for eigenvalues very close to zero.
+        # A near-zero eigenvalue (but non-trivial) indicates a TEM mode.
+        a = BilinearForm(InnerProduct(grad(u_h1).Trace(), grad(v_h1).Trace()) * ds(port))
+        m = BilinearForm(u_h1.Trace() * v_h1.Trace() * ds(port))
+        apre = BilinearForm(
+            (InnerProduct(grad(u_h1).Trace(), grad(v_h1).Trace()) + u_h1.Trace() * v_h1.Trace()) * ds(port)
+        )
+        pre = Preconditioner(apre, type="direct", inverse="sparsecholesky")
+
+        with TaskManager():
+            a.Assemble()
+            m.Assemble()
+            apre.Assemble()
+
+            evals, evecs = solvers.PINVIT(
+                a.mat, m.mat, pre=pre.mat,
+                num=min(3, n_free - 1),
+                maxit=50, printrates=False
+            )
+
+        # Look for a near-zero eigenvalue — this is the TEM mode.
+        # The Dirichlet BC removes the trivial constant, so a near-zero
+        # eigenvalue means a harmonic function with non-trivial gradient
+        # exists (multi-conductor topology).
+        tem_threshold = 1e-4  # eigenvalue threshold for "near zero"
+
+        for i, ev in enumerate(evals):
+            if ev < tem_threshold and ev >= 0:
+                # Found a TEM candidate — compute Et = -∇φ
+                phi = GridFunction(fes_h1)
+                phi.vec.data = evecs[i]
+
+                Et_cf = -grad(phi)
+
+                # Project to HCurl space
+                fes_hcurl = HCurl(
+                    self.mesh, order=self.order,
+                    dirichlet=self.bc,
+                    definedon=self.mesh.Boundaries(port)
+                )
+                Et = GridFunction(fes_hcurl)
+                Et.Set(Et_cf, definedon=port_region)
+
+                # Normalize
+                norm_sq = float(np.real(Integrate(
+                    InnerProduct(Et, Et), self.mesh, BND, definedon=port_region
+                )))
+
+                if norm_sq > 1e-15:
+                    Et.vec.data /= np.sqrt(norm_sq)
+                    return Et
+
+        return None
+
     def _classify_mode_type(self, mode, port, normal):
         port_region = self.mesh.Boundaries(port)
         n_cf = CoefficientFunction(tuple(normal))
@@ -1391,6 +1493,8 @@ class PortEigenmodeSolver:
 
         wc = kc * c0
         s = 1j * 2 * np.pi * freq
+        if mode_type == 'TEM':
+            return complex(Z0)
         sqrt_term = np.sqrt(s**2 + wc**2)
         if mode_type == 'TE':
             return complex(s * Z0 / sqrt_term)
@@ -1542,7 +1646,7 @@ class PortEigenmodeSolver:
                 print(f"  a={geom.a:.6f}, b={geom.b:.6f}")
             elif geom.type == PortGeometryType.CIRCULAR:
                 print(f"  R={geom.radius:.6f}")
-            print(f"  σ={self.port_orientation_factors[port]:+.0f}")
+            print(f"  sigma={self.port_orientation_factors[port]:+.0f}")
             print(f"  {'Mode':<6}{'Type':<6}{'Indices':<10}{'fc [GHz]':<12}{'kc':<10}")
             print(f"  {'-' * 44}")
             for mode in sorted(self.port_modes[port].keys()):

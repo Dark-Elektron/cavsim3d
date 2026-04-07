@@ -57,6 +57,17 @@ from cavsim3d.rom.reduction import ModelOrderReduction
 
 
 
+def _safe_filename(name: str) -> str:
+    """Sanitize a domain name for use in file paths.
+
+    Replaces characters that are invalid in Windows/POSIX paths
+    (``/``, ``\\``, ``|``, ``:``, ``*``, ``?``, ``<``, ``>``, ``"``)
+    with underscores.
+    """
+    import re
+    return re.sub(r'[/\\|:*?"<>]', '_', name)
+
+
 # =============================================================================
 # FOMResult
 # =============================================================================
@@ -450,9 +461,9 @@ class FOMResult(PlotMixin):
         
         # 1. Load frequencies from snapshots or legacy
         frequencies = None
-        snap_path = path / "snapshots" / (f"snapshots_{domain}.h5" if domain else "snapshots.h5")
+        snap_path = path / "snapshots" / (f"snapshots_{_safe_filename(domain)}.h5" if domain else "snapshots.h5")
         if not snap_path.exists():
-            snap_path = path / (f"snapshots_{domain}.h5" if domain else "snapshots.h5")
+            snap_path = path / (f"snapshots_{_safe_filename(domain)}.h5" if domain else "snapshots.h5")
             
         if snap_path.exists():
             with h5py.File(snap_path, "r") as f:
@@ -462,14 +473,14 @@ class FOMResult(PlotMixin):
         Z_matrix = None
         S_matrix = None
         
-        z_path = path / "z" / (f"z_{domain}.h5" if domain else "z.h5")
-        if not z_path.exists(): z_path = path / (f"z_{domain}.h5" if domain else "z.h5")
+        z_path = path / "z" / (f"z_{_safe_filename(domain)}.h5" if domain else "z.h5")
+        if not z_path.exists(): z_path = path / (f"z_{_safe_filename(domain)}.h5" if domain else "z.h5")
         if z_path.exists():
             with h5py.File(z_path, "r") as f:
                 Z_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
                 
-        s_path = path / "s" / (f"s_{domain}.h5" if domain else "s.h5")
-        if not s_path.exists(): s_path = path / (f"s_{domain}.h5" if domain else "s.h5")
+        s_path = path / "s" / (f"s_{_safe_filename(domain)}.h5" if domain else "s.h5")
+        if not s_path.exists(): s_path = path / (f"s_{_safe_filename(domain)}.h5" if domain else "s.h5")
         if s_path.exists():
             with h5py.File(s_path, "r") as f:
                 S_matrix = H5Serializer.load_dataset(f["data"]) if "data" in f else None
@@ -984,27 +995,27 @@ class FOMCollection(PlotMixin):
             if fom._solver_ref is not None:
                 domain = fom.domain
                 if domain in getattr(fom._solver_ref, 'K', {}):
-                    with h5py.File(mat_path / f"K_{domain}.h5", "a") as fk:
+                    with h5py.File(mat_path / f"K_{_safe_filename(domain)}.h5", "a") as fk:
                         H5Serializer.save_dataset(fk, "data", fom._solver_ref.K.get(domain))
-                    with h5py.File(mat_path / f"M_{domain}.h5", "a") as fm:
+                    with h5py.File(mat_path / f"M_{_safe_filename(domain)}.h5", "a") as fm:
                         H5Serializer.save_dataset(fm, "data", fom._solver_ref.M.get(domain))
-                    with h5py.File(mat_path / f"B_{domain}.h5", "a") as fb:
+                    with h5py.File(mat_path / f"B_{_safe_filename(domain)}.h5", "a") as fb:
                         H5Serializer.save_dataset(fb, "data", fom._solver_ref.B.get(domain))
 
         # 2. Save S and Z results
         for fom in self._foms:
             domain = fom.domain
             if fom._Z_matrix is not None:
-                with h5py.File(z_path / f"z_{domain}.h5", "a") as fz:
+                with h5py.File(z_path / f"z_{_safe_filename(domain)}.h5", "a") as fz:
                     H5Serializer.save_dataset(fz, "data", fom._Z_matrix)
             if fom._S_matrix is not None:
-                with h5py.File(s_path / f"s_{domain}.h5", "a") as fs:
+                with h5py.File(s_path / f"s_{_safe_filename(domain)}.h5", "a") as fs:
                     H5Serializer.save_dataset(fs, "data", fom._S_matrix)
 
         # 3. Save frequencies, residual data, and field snapshots
         for fom in self._foms:
             domain = fom.domain
-            snap_file = f"snapshots_{domain}.h5"
+            snap_file = f"snapshots_{_safe_filename(domain)}.h5"
             with h5py.File(snap_path / snap_file, "a") as fsnap:
                 if self.frequencies is not None:
                     H5Serializer.save_dataset(fsnap, "frequencies", self.frequencies)
@@ -1076,7 +1087,7 @@ class FOMCollection(PlotMixin):
                 for d_meta in metadata.get("solids", []):
                     domain = d_meta["domain"]
                     for mname in ["K", "M", "B"]:
-                        mfile = mat_path / f"{mname}_{domain}.h5"
+                        mfile = mat_path / f"{mname}_{_safe_filename(domain)}.h5"
                         if mfile.exists():
                             with h5py.File(mfile, "r") as f:
                                 data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
@@ -1112,8 +1123,8 @@ class FOMCollection(PlotMixin):
             field_snapshots = None
             
             # Load Z
-            z_path = path / "z" / f"z_{domain}.h5"
-            if not z_path.exists(): z_path = path / f"z_{domain}.h5"
+            z_path = path / "z" / f"z_{_safe_filename(domain)}.h5"
+            if not z_path.exists(): z_path = path / f"z_{_safe_filename(domain)}.h5"
             if z_path.exists():
                 with h5py.File(z_path, "r") as fz:
                     Z_matrix = H5Serializer.load_dataset(fz["data"])
@@ -1122,8 +1133,8 @@ class FOMCollection(PlotMixin):
                     if domain in fz: Z_matrix = H5Serializer.load_dataset(fz[domain])
 
             # Load S
-            s_path = path / "s" / f"s_{domain}.h5"
-            if not s_path.exists(): s_path = path / f"s_{domain}.h5"
+            s_path = path / "s" / f"s_{_safe_filename(domain)}.h5"
+            if not s_path.exists(): s_path = path / f"s_{_safe_filename(domain)}.h5"
             if s_path.exists():
                 with h5py.File(s_path, "r") as fsr:
                     S_matrix = H5Serializer.load_dataset(fsr["data"])
@@ -1132,8 +1143,8 @@ class FOMCollection(PlotMixin):
                     if domain in fsr: S_matrix = H5Serializer.load_dataset(fsr[domain])
             
             # Load snapshots and residuals
-            snap_path = path / "snapshots" / f"snapshots_{domain}.h5"
-            if not snap_path.exists(): snap_path = path / f"snapshots_{domain}.h5"
+            snap_path = path / "snapshots" / f"snapshots_{_safe_filename(domain)}.h5"
+            if not snap_path.exists(): snap_path = path / f"snapshots_{_safe_filename(domain)}.h5"
             if snap_path.exists():
                 with h5py.File(snap_path, "r") as fs:
                     residual_data = H5Serializer.load_dataset(fs["residual_data"]) if "residual_data" in fs else None

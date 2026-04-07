@@ -206,7 +206,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self.domain_port_map = self._build_domain_port_map()
             self.n_domains = len(self.domains)
             self._n_ports = len(self._ports)
-            self.is_compound = self.n_domains > 1
+            # Compound = Assembly with multiple independent sub-structures,
+            # NOT a single geometry with multiple material regions.
+            from cavsim3d.geometry.assembly import Assembly
+            self.is_compound = self.n_domains > 1 and isinstance(self.geometry, Assembly)
     
             # External ports (for compound structures, first and last only)
             self._external_ports: List[str] = self._identify_external_ports()
@@ -422,16 +425,34 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # === Structure detection ===
 
     def _detect_domains(self) -> List[str]:
-        """Detect domains from mesh materials with fallback."""
+        """Detect domains from geometry structure.
+
+        For assemblies, returns the component names (each component is one
+        domain, even if it contains multiple mesh materials).  For single
+        geometries, returns the deduplicated mesh material list.
+        """
+        # Assemblies define their own domain structure
+        from cavsim3d.geometry.assembly import Assembly
+        if isinstance(self.geometry, Assembly):
+            return list(self.geometry.keys)
+
         if self.mesh is None:
             return []
         materials = list(self.mesh.GetMaterials())
         if not materials:
             return ['default']
 
+        # Deduplicate while preserving first-occurrence order
+        seen = set()
+        unique = []
+        for m in materials:
+            if m not in seen:
+                seen.add(m)
+                unique.append(m)
+
         # Try to find domains matching the 'cell' naming convention (sorted numerically)
         cell_domains = sorted(
-            [m for m in materials if 'cell' in m.lower()],
+            [m for m in unique if 'cell' in m.lower()],
             key=lambda x: int(''.join(filter(str.isdigit, x)) or 0)
         )
 
@@ -439,13 +460,28 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             return cell_domains
 
         # If no 'cell' naming, include all unique non-default materials
-        other_domains = sorted([m for m in materials if m.lower() != 'default'])
-        
+        # This covers STEP-label names like 'ceramic', 'beampipe', etc.
+        other_domains = [m for m in unique if m.lower() != 'default']
+
         if other_domains:
             return other_domains
 
         # Fallback to the first available material (likely 'default' or a single custom name)
-        return [materials[0]]
+        return [unique[0]]
+
+    def _get_domain_mesh_materials(self, domain: str) -> List[str]:
+        """Return mesh material names belonging to a domain.
+
+        For assemblies a single domain (component) may contain several mesh
+        materials (e.g. ``cell1/ceramic_1``, ``cell1/solid1``).  For single
+        geometries, the domain name *is* the mesh material.
+        """
+        from cavsim3d.geometry.assembly import Assembly
+        if isinstance(self.geometry, Assembly):
+            dm = getattr(self.geometry, '_domain_materials', {})
+            if domain in dm:
+                return dm[domain]
+        return [domain]
 
     def _detect_ports(self) -> List[str]:
         """Detect ports from mesh boundaries with fallback."""
@@ -477,36 +513,43 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             for i, domain in enumerate(self.domains):
                 if i + 1 < n_ports:
                     mapping[domain] = [self._ports[i], self._ports[i + 1]]
-                else:
+                elif i < n_ports:
                     mapping[domain] = [self._ports[i]]
+                else:
+                    mapping[domain] = []
 
         return mapping
 
     def _print_structure_info(self) -> None:
         """Print detected structure information."""
-        pr.info("\n" + "=" * 60)
-        pr.info("Structure Topology")
-        pr.info("=" * 60)
-        pr.info(f"Type: {'Compound' if self.is_compound else 'Single'} structure")
-        pr.info(f"Domains ({self.n_domains}): {self.domains}")
-        pr.info(f"Total Ports ({self._n_ports}): {self._ports}")
+        print("\n" + "=" * 60)
+        print("Structure Topology")
+        print("=" * 60)
+        stype = 'Compound' if self.is_compound else 'Single'
+        print(f"  Type: {stype} structure")
+        print(f"  Domains ({self.n_domains}): {self.domains}")
+        print(f"  Ports ({self._n_ports}): {self._ports}")
+
+        # Mesh statistics
+        if self.mesh is not None:
+            ne = self.mesh.ne  # number of volume elements (tetrahedra)
+            print(f"  Mesh elements: {ne}")
 
         if self.is_compound:
-            pr.info(f"External Ports ({len(self._external_ports)}): {self._external_ports}")
-            pr.info(f"Internal Ports ({len(self._internal_ports)}): {self._internal_ports}")
-
-        pr.info("\nDomain-Port Mapping:")
-        for domain, ports in self.domain_port_map.items():
-            port_types = []
-            for p in ports:
-                if p in self._external_ports:
-                    if p == self._ports[0]:
-                        port_types.append(f"{p} (external, input)")
+            print(f"  External Ports ({len(self._external_ports)}): {self._external_ports}")
+            print(f"  Internal Ports ({len(self._internal_ports)}): {self._internal_ports}")
+            print("\n  Domain-Port Mapping:")
+            for domain, ports in self.domain_port_map.items():
+                port_types = []
+                for p in ports:
+                    if p in self._external_ports:
+                        if p == self._ports[0]:
+                            port_types.append(f"{p} (input)")
+                        else:
+                            port_types.append(f"{p} (output)")
                     else:
-                        port_types.append(f"{p} (external, output)")
-                else:
-                    port_types.append(f"{p} (internal)")
-            print(f"  {domain}: {port_types}")
+                        port_types.append(f"{p} (internal)")
+                print(f"    {domain}: {port_types}")
         print("=" * 60)
 
     # === Matrix assembly ===
@@ -540,10 +583,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         pr.running("Assembling Matrices...")
         pr.running("=" * 60)
 
-        # For single-domain, per-domain and global are the same
+        # For single (non-compound) structures, only global matrices are needed
         if not self.is_compound:
             assemble_global = True
-            assemble_per_domain = True
+            assemble_per_domain = False
 
         # Solve port eigenmodes if missing or if the solver is blank
         needs_port_solve = (self.port_modes is None)
@@ -576,27 +619,87 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self.save()
         return self._get_matrix_summary()
 
+    def _get_domain_material(self, domain: str) -> dict:
+        """Get material properties for a domain from the geometry.
+
+        Falls back to vacuum (eps_r=1, mu_r=1) if no materials are set.
+        Always guarantees 'eps_r' and 'mu_r' keys in the returned dict.
+        """
+        defaults = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+        if hasattr(self.geometry, 'get_material'):
+            mat = self.geometry.get_material(domain)
+            # Ensure eps_r and mu_r always present (guard against PEC or sparse dicts)
+            if "eps_r" not in mat:
+                mat["eps_r"] = defaults["eps_r"]
+            if "mu_r" not in mat:
+                mat["mu_r"] = defaults["mu_r"]
+            return mat
+        return defaults
+
+    def _build_material_cfs(self):
+        """Build CoefficientFunctions for eps_r and mu_r from mesh materials.
+
+        Returns a (eps_r_cf, mu_r_cf) pair that can be used directly in
+        bilinear forms over the full mesh.  Each mesh material name is looked
+        up via ``_get_domain_material`` so PEC-subtracted geometries (where
+        only non-PEC domains remain) work transparently.
+        """
+        mat_names = list(self.mesh.GetMaterials())
+        eps_vals = []
+        mu_vals = []
+        for name in mat_names:
+            props = self._get_domain_material(name)
+            eps_vals.append(props["eps_r"])
+            mu_vals.append(props["mu_r"])
+
+        eps_r_cf = CoefficientFunction(eps_vals)
+        mu_r_cf = CoefficientFunction(mu_vals)
+
+        if any(v != 1.0 for v in eps_vals) or any(v != 1.0 for v in mu_vals):
+            pr.debug(f"  Material CFs: eps_r={eps_vals}, mu_r={mu_vals}")
+
+        return eps_r_cf, mu_r_cf
+
     def _assemble_per_domain_matrices(self) -> None:
-        """Assemble matrices for each domain independently."""
+        """Assemble matrices for each domain independently.
+
+        A domain may span multiple mesh materials (e.g. assembly components
+        with ceramics and vacuum regions).  In that case the FES and bilinear
+        forms are defined on the union of those materials, and each material
+        contributes its own eps_r / mu_r.
+        """
         pr.debug("\n--- Assembling Per-Domain Matrices ---")
 
         for domain in self.domains:
             pr.debug(f"\nDomain: {domain}")
+
+            mesh_mats = self._get_domain_mesh_materials(domain)
+
+            # Build definedon region (union of all mesh materials in this domain)
+            region = self.mesh.Materials("|".join(mesh_mats))
 
             # Create FES for this domain
             fes = HCurl(
                 self.mesh,
                 order=self.order,
                 dirichlet=self.bc,
-                definedon=self.mesh.Materials(domain)
+                definedon=region,
             )
             self._fes[domain] = fes
 
             u, v = fes.TnT()
 
-            # Stiffness and mass matrices
-            k_form = BilinearForm((1 / mu0) * curl(u) * curl(v) * dx(domain))
-            m_form = BilinearForm(eps0 * u * v * dx(domain))
+            # Stiffness and mass with per-material properties
+            k_form = BilinearForm(fes)
+            m_form = BilinearForm(fes)
+            for mm in mesh_mats:
+                mat = self._get_domain_material(mm)
+                eps_r = mat["eps_r"]
+                mu_r = mat["mu_r"]
+                if eps_r != 1.0 or mu_r != 1.0:
+                    pr.debug(f"  {mm}: eps_r={eps_r}, mu_r={mu_r}")
+                k_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(mm)
+                m_form += eps0 * eps_r * u * v * dx(mm)
 
             with TaskManager():
                 k_form.Assemble()
@@ -614,11 +717,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             pr.debug(f"  B shape: {self.B[domain].shape}")
 
     def _assemble_global_matrices(self) -> None:
-        """Assemble matrices for the full (coupled) structure."""
+        """Assemble matrices for the full (coupled) structure.
+
+        If per-domain material properties are set, the bilinear forms are
+        assembled as a sum of domain-specific contributions so that each
+        domain can have its own eps_r / mu_r.
+        """
         pr.debug("\n--- Assembling Global Matrices (Coupled System) ---")
 
         # Create FES for entire mesh
-        print("boundary condition: ", self.bc)
         self._fes_global = HCurl(
             self.mesh,
             order=self.order,
@@ -627,9 +734,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         fes = self._fes_global
         u, v = fes.TnT()
 
-        # Stiffness and mass matrices for full structure
-        k_form = BilinearForm((1 / mu0) * curl(u) * curl(v) * dx)
-        m_form = BilinearForm(eps0 * u * v * dx)
+        # Use CoefficientFunctions for material properties (handles special
+        # characters in domain names and matches the frequency-loop assembly).
+        eps_r_cf, mu_r_cf = self._build_material_cfs()
+        k_form = BilinearForm((1 / (mu0 * mu_r_cf)) * curl(u) * curl(v) * dx)
+        m_form = BilinearForm(eps0 * eps_r_cf * u * v * dx)
 
         with TaskManager():
             k_form.Assemble()
@@ -669,24 +778,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             with TaskManager():
                 m_bnd_form.Assemble()
 
-            M_bnd = sp.csr_matrix(m_bnd_form.mat.CSR())
-
-            # Port sign convention
-            # sigma = float(self.port_solver.port_orientation_factors.get(port, 1.0))
-
             for mode in sorted(self.port_basis[port].keys()):
                 port_mode_cf = self.port_modes[port][mode]
 
                 gf = GridFunction(fes)
                 gf.Set(port_mode_cf, definedon=self.mesh.Boundaries(port))
 
-                b_coeffs = gf.vec.FV().NumPy().copy()
-                b_weighted = M_bnd @ b_coeffs
-
-                # # Apply sigma so ROM uses same port convention as FOM
-                # b_weighted *= sigma
-
-                basis_vectors.append(b_weighted)
+                # Use NGSolve native mat-vec (handles definedon DOF mapping correctly)
+                res = gf.vec.CreateVector()
+                res.data = m_bnd_form.mat * gf.vec
+                basis_vectors.append(res.FV().NumPy().copy())
 
         if basis_vectors:
             self.B[domain] = np.array(basis_vectors).T
@@ -711,9 +812,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(port))
             with TaskManager():
                 m_bnd_form.Assemble()
-            M_bnd = sp.csr_matrix(m_bnd_form.mat.CSR())
-
-            # sigma = float(self.port_solver.port_orientation_factors.get(port, 1.0))
 
             for mode in sorted(self.port_basis[port].keys()):
                 port_mode_cf = self.port_modes[port][mode]
@@ -721,13 +819,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 gf = GridFunction(fes)
                 gf.Set(port_mode_cf, definedon=self.mesh.Boundaries(port))
 
-                b_coeffs = gf.vec.FV().NumPy().copy()
-                b_weighted = M_bnd @ b_coeffs
-
-                # # Apply sigma so ROM uses same port convention as FOM
-                # b_weighted *= sigma
-
-                basis_vectors.append(b_weighted)
+                # Use NGSolve native mat-vec (handles DOF mapping correctly)
+                res = gf.vec.CreateVector()
+                res.data = m_bnd_form.mat * gf.vec
+                basis_vectors.append(res.FV().NumPy().copy())
 
         self.B_global = np.array(basis_vectors).T if basis_vectors else np.zeros((fes.ndof, 0))
 
@@ -954,6 +1049,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 self.order = order
                 # If mesh exists, we must recreate the Port solver and clear old modes
                 if self.mesh is not None:
+                    from cavsim3d.solvers.ports import PortEigenmodeSolver
                     self.port_solver = PortEigenmodeSolver(self.mesh, self.order, self.bc)
                     self.port_modes = None
                     self.port_basis = None
@@ -1055,6 +1151,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             domain_ports = self.domain_port_map[domain]
             fes = self._fes[domain]
 
+            # Material properties for this domain (may span multiple mesh materials)
+            mesh_mats = self._get_domain_mesh_materials(domain)
+            domain_materials = []
+            for mm in mesh_mats:
+                mat = self._get_domain_material(mm)
+                domain_materials.append((mm, mat["eps_r"], mat["mu_r"]))
+
             # Resolve solver type for this domain
             st = self._resolve_solver_type(solver_type, fes)
             pr.debug(f"  Solver type: {st}")
@@ -1140,8 +1243,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
                 # Build system matrix: A(ω) = K - ω²M
                 a_form = BilinearForm(fes)
-                a_form += (1 / mu0) * curl(u) * curl(v) * dx(domain)
-                a_form += -omega ** 2 * eps0 * u * v * dx(domain)
+                for mm, eps_r, mu_r in domain_materials:
+                    a_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(mm)
+                    a_form += -omega ** 2 * (eps0 * eps_r) * u * v * dx(mm)
 
                 # Prepare solver
                 if st == 'direct':
@@ -1263,6 +1367,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         fes = self._fes_global
         st = self._resolve_solver_type(solver_type, fes)
 
+        # Build spatially-varying material CoefficientFunctions
+        eps_r_cf, mu_r_cf = self._build_material_cfs()
+
         if st == 'iterative':
             fes = self._prepare_iterative(fes, iter_opts)
             self._fes_global = fes
@@ -1346,13 +1453,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
             # Build system matrix
             a_form = BilinearForm(fes)
-            a_form += (1 / mu0) * curl(u) * curl(v) * dx
-            a_form += -omega ** 2 * eps0 * u * v * dx
+            a_form += (1 / (mu0 * mu_r_cf)) * curl(u) * curl(v) * dx
+            a_form += -omega ** 2 * (eps0 * eps_r_cf) * u * v * dx
 
             # Prepare solver
             if st == 'direct':
                 with TaskManager():
                     a_form.Assemble()
+                    print('direct solder is ', _DIRECT_SOLVER)
                     inv_a = a_form.mat.Inverse(
                         freedofs=freedofs,
                         inverse=_DIRECT_SOLVER

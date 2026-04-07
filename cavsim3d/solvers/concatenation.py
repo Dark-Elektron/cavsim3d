@@ -327,30 +327,43 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self._local_to_global_maps = {}
         all_dofs_by_domain = {}
         
+        # Resolve which mesh materials belong to each domain
+        def _get_domain_mats(domain_name):
+            """Get the set of mesh material names for a domain."""
+            # Try via solver chain: MOR -> FDS -> _get_domain_mesh_materials
+            solver = self._solver_ref
+            if solver is not None:
+                fds = getattr(solver, 'solver', solver)  # MOR.solver or FDS itself
+                if hasattr(fds, '_get_domain_mesh_materials'):
+                    mats = set(fds._get_domain_mesh_materials(domain_name))
+                    if mats != {domain_name}:
+                        return mats
+            # Fallback: scan mesh for materials prefixed with domain_name/
+            all_mats = set(self.mesh.GetMaterials())
+            matched = {m for m in all_mats if m == domain_name or m.startswith(domain_name + '/')}
+            return matched if matched else {domain_name}
+
+        # Debug: print all mesh material names
+        all_mesh_mats = set(self.mesh.GetMaterials())
+        print(f"  [DEBUG] All mesh materials: {sorted(all_mesh_mats)}")
+
         for struct_idx, struct in enumerate(self.structures):
             domain_name = struct.domain
+            domain_mats = _get_domain_mats(domain_name)
+            domain_mats_str = {str(m) for m in domain_mats}
             dofs = set()
-            local_to_global = {}
-            
+
+            # Collect global DOFs belonging to this domain's elements
             for el in self.mesh.Elements(VOL):
-                if el.mat != domain_name:
+                if str(el.mat) not in domain_mats_str:
                     continue
-                
-                global_dofs = self.fes.GetDofNrs(el)
-                local_dofs = struct.fes.GetDofNrs(el)
-                
-                for g_dof, l_dof in zip(global_dofs, local_dofs):
+                for g_dof in self.fes.GetDofNrs(el):
                     if g_dof >= 0:
                         dofs.add(g_dof)
-                    if g_dof >= 0 and l_dof >= 0:
-                        if l_dof not in local_to_global:
-                            local_to_global[l_dof] = g_dof
-            
+
             self._domain_dofs[struct_idx] = sorted(dofs)
-            self._local_to_global_maps[struct_idx] = local_to_global
             all_dofs_by_domain[struct_idx] = dofs
-            pr.debug(f"    Domain {struct_idx} ({domain_name}): {len(dofs)} global DOFs, "
-                     f"{len(local_to_global)} mapped DOFs")
+            pr.debug(f"    Domain {struct_idx} ({domain_name}): {len(dofs)} global DOFs")
         
         # Find interface DOFs (shared between domains)
         self._interface_dofs = set()
@@ -1042,93 +1055,101 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         interface_mode: str = 'average'
     ) -> GridFunction:
         """
-        Reconstruct unified field using direct DOF assignment (no overwriting).
-        
-        Parameters
-        ----------
-        x_uncoupled : ndarray
-            Uncoupled stacked solution vector
-        scales : ndarray
-            Scaling factors for each structure (for interface continuity)
-        interface_mode : str
-            How to handle interface DOFs: 'average', 'first', 'last'
-            
-        Returns
-        -------
-        E_gf : GridFunction
-            Reconstructed field on global FES
+        Reconstruct unified field by creating fresh per-domain FES and
+        transferring DOFs element-by-element.
+
+        A ``definedon`` FES that was stored as a reference may become stale
+        after the mesh is rebuilt.  Instead of relying on cached FES objects,
+        we create a fresh per-domain FES here, fill a local GridFunction, and
+        copy DOF values to the global GridFunction via simultaneous
+        ``GetDofNrs`` on both FES for each domain element.
         """
-        # Ensure we have mesh and fes
+        from ngsolve import HCurl
+
         if self.mesh is None:
             raise ValueError("No mesh available")
         self._ensure_unified_fes()
-        
-        # Build DOF maps if needed
+
+        # Build domain-dof info (for interface detection only)
         self._build_domain_dof_maps()
-        
-        # Create unified GridFunction on global FES
+
+        # Determine order and BC
+        order = self.fes.globalorder
+        bc = 'default'
+        if self._solver_ref is not None:
+            bc = getattr(self._solver_ref, 'bc',
+                         getattr(getattr(self._solver_ref, 'solver', None), 'bc', bc))
+
+        # Resolve domain mesh materials
+        def _get_domain_mats(domain_name):
+            solver = self._solver_ref
+            if solver is not None:
+                fds = getattr(solver, 'solver', solver)
+                if hasattr(fds, '_get_domain_mesh_materials'):
+                    mats = set(fds._get_domain_mesh_materials(domain_name))
+                    if mats != {domain_name}:
+                        return mats
+            all_mats = set(self.mesh.GetMaterials())
+            matched = {m for m in all_mats if m == domain_name or m.startswith(domain_name + '/')}
+            return matched if matched else {domain_name}
+
+        # Global GridFunction
         E_gf = GridFunction(self.fes, complex=True)
         global_vec = E_gf.vec.FV().NumPy()
         global_vec[:] = 0
-        
-        # Track DOF contributions for interface handling
+
         dof_values = np.zeros(self.fes.ndof, dtype=complex)
         dof_counts = np.zeros(self.fes.ndof, dtype=int)
-        
+
         for struct_idx, struct in enumerate(self.structures):
-            # Check that structure can reconstruct
             if not struct.can_reconstruct():
                 raise ValueError(
-                    f"Structure {struct_idx} ({struct.domain}) cannot reconstruct. "
-                    f"W: {'set' if struct.W is not None else 'MISSING'}, "
-                    f"Q_L_inv: {'set' if struct.Q_L_inv is not None else 'MISSING'}, "
-                    f"fes: {'set' if struct.fes is not None else 'MISSING'}"
+                    f"Structure {struct_idx} ({struct.domain}) cannot reconstruct."
                 )
-            
-            # Extract this structure's reduced solution
+
+            # Extract and reconstruct
             start_r = self._structure_dof_offsets[struct_idx]
             x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            
-            # Reconstruct full-order solution for this domain
             x_full_local = struct.reconstruct(x_reduced)
-            
-            # Apply scaling for interface continuity
             x_full_scaled = scales[struct_idx] * x_full_local
-            
-            # Get local-to-global DOF mapping
-            local_to_global = self._get_local_to_global_dof_map(struct_idx)
-            
-            # Transfer using DOF mapping (no overwriting!)
-            for l_dof, g_dof in local_to_global.items():
-                if l_dof < len(x_full_scaled):
-                    dof_values[g_dof] += x_full_scaled[l_dof]
-                    dof_counts[g_dof] += 1
-        
-        # Assign values based on interface handling mode
+
+            # Create a fresh per-domain FES on the current mesh
+            domain_mats = _get_domain_mats(struct.domain)
+            region = self.mesh.Materials("|".join(domain_mats))
+            fes_local = HCurl(self.mesh, order=order, dirichlet=bc,
+                              definedon=region)
+
+            # Fill a local GridFunction with the reconstructed vector
+            gf_local = GridFunction(fes_local, complex=True)
+            local_np = gf_local.vec.FV().NumPy()
+            n = min(len(x_full_scaled), len(local_np))
+            local_np[:n] = x_full_scaled[:n]
+
+            # Transfer DOFs element-by-element
+            for el in self.mesh.Elements(VOL):
+                if str(el.mat) not in domain_mats:
+                    continue
+                local_dofs = fes_local.GetDofNrs(el)
+                global_dofs = self.fes.GetDofNrs(el)
+                for l_dof, g_dof in zip(local_dofs, global_dofs):
+                    if l_dof >= 0 and g_dof >= 0:
+                        dof_values[g_dof] += gf_local.vec[l_dof]
+                        dof_counts[g_dof] += 1
+
+        # Assign values (average at interfaces)
         n_interior = 0
         n_interface = 0
-        
         for dof in range(self.fes.ndof):
             if dof_counts[dof] == 0:
                 continue
             elif dof_counts[dof] == 1:
-                # Interior DOF - just assign
                 global_vec[dof] = dof_values[dof]
                 n_interior += 1
             else:
-                # Interface DOF - handle according to mode
+                global_vec[dof] = dof_values[dof] / dof_counts[dof]
                 n_interface += 1
-                if interface_mode == 'average':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                elif interface_mode == 'first':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                elif interface_mode == 'last':
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-                else:
-                    global_vec[dof] = dof_values[dof] / dof_counts[dof]
-        
+
         pr.debug(f"  Reconstruction: {n_interior} interior + {n_interface} interface DOFs")
-        
         return E_gf
 
     def _reconstruct_field(
@@ -1216,17 +1237,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         
         # Build DOF maps
         self._build_domain_dof_maps()
-        
-        # Reconstruct local full-order vectors for each domain (unscaled)
-        x_full_list = []
-        for struct_idx, struct in enumerate(self.structures):
-            start_r = self._structure_dof_offsets[struct_idx]
-            x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            x_full = struct.reconstruct(x_reduced)
-            x_full_list.append(x_full)
-        
-        # Propagate scales through connections
-        scales = self._propagate_interface_scales_dof(x_full_list)
+
+        # Reconstruct into global DOF vectors and compute scales
+        x_global_list = self._reconstruct_to_global_vectors(x_uncoupled)
+        scales = self._propagate_interface_scales_global(x_global_list)
         
         # Cache
         self._interface_scale_cache[cache_key] = scales
@@ -1528,18 +1542,150 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return self._reconstruct_field_from_vector(x_uncoupled, scales)
 
     def _compute_eigenmode_scales(self, x_uncoupled: np.ndarray) -> np.ndarray:
-        """Compute scaling factors for eigenmode reconstruction."""
+        """Compute scaling factors for eigenmode reconstruction.
+
+        Reconstructs each domain into a global-DOF vector using a fresh
+        per-domain FES, then compares values at interface DOFs.
+        """
         self._build_domain_dof_maps()
-        
-        # Reconstruct local full-order vectors
-        x_full_list = []
+
+        if not self._interface_pairs:
+            return np.ones(self.n_structures, dtype=complex)
+
+        # Reconstruct each domain into global DOF space
+        x_global_list = self._reconstruct_to_global_vectors(x_uncoupled)
+
+        return self._propagate_interface_scales_global(x_global_list)
+
+    def _reconstruct_to_global_vectors(self, x_uncoupled: np.ndarray) -> List[np.ndarray]:
+        """Reconstruct each domain into a global-DOF-sized vector.
+
+        Creates a fresh per-domain FES, fills it with the reconstructed
+        local solution, then copies DOFs into a global-sized array via
+        element-by-element GetDofNrs.
+        """
+        from ngsolve import HCurl
+
+        self._ensure_unified_fes()
+        order = self.fes.globalorder
+        bc = 'default'
+        if self._solver_ref is not None:
+            bc = getattr(self._solver_ref, 'bc',
+                         getattr(getattr(self._solver_ref, 'solver', None), 'bc', bc))
+
+        def _get_domain_mats(domain_name):
+            solver = self._solver_ref
+            if solver is not None:
+                fds = getattr(solver, 'solver', solver)
+                if hasattr(fds, '_get_domain_mesh_materials'):
+                    mats = set(fds._get_domain_mesh_materials(domain_name))
+                    if mats != {domain_name}:
+                        return mats
+            all_mats = set(self.mesh.GetMaterials())
+            matched = {m for m in all_mats if m == domain_name or m.startswith(domain_name + '/')}
+            return matched if matched else {domain_name}
+
+        x_global_list = []
         for struct_idx, struct in enumerate(self.structures):
             start_r = self._structure_dof_offsets[struct_idx]
             x_reduced = x_uncoupled[start_r:start_r + struct.r]
-            x_full = struct.reconstruct(x_reduced)
-            x_full_list.append(x_full)
-        
-        return self._propagate_interface_scales_dof(x_full_list)
+            x_full_local = struct.reconstruct(x_reduced)
+
+            domain_mats = _get_domain_mats(struct.domain)
+            region = self.mesh.Materials("|".join(domain_mats))
+            fes_local = HCurl(self.mesh, order=order, dirichlet=bc,
+                              definedon=region)
+
+            gf_local = GridFunction(fes_local, complex=True)
+            local_np = gf_local.vec.FV().NumPy()
+            n = min(len(x_full_local), len(local_np))
+            local_np[:n] = x_full_local[:n]
+
+            x_global = np.zeros(self.fes.ndof, dtype=complex)
+            for el in self.mesh.Elements(VOL):
+                if str(el.mat) not in domain_mats:
+                    continue
+                local_dofs = fes_local.GetDofNrs(el)
+                global_dofs = self.fes.GetDofNrs(el)
+                for l_dof, g_dof in zip(local_dofs, global_dofs):
+                    if l_dof >= 0 and g_dof >= 0:
+                        x_global[g_dof] = gf_local.vec[l_dof]
+
+            x_global_list.append(x_global)
+
+        return x_global_list
+
+    def _propagate_interface_scales_global(
+        self, x_global_list: List[np.ndarray]
+    ) -> np.ndarray:
+        """Propagate scaling factors using global-DOF vectors at interfaces."""
+        scales = np.ones(self.n_structures, dtype=complex)
+        processed = {0}
+
+        if not self.connections:
+            return scales
+
+        remaining = list(enumerate(self.connections))
+        max_iter = len(self.connections) + 1
+
+        for _ in range(max_iter):
+            if not remaining:
+                break
+            made_progress = False
+            still_remaining = []
+
+            for conn_idx, ((sA, pA), (sB, pB)) in remaining:
+                if sA in processed and sB not in processed:
+                    ref_idx, new_idx = sA, sB
+                elif sB in processed and sA not in processed:
+                    ref_idx, new_idx = sB, sA
+                elif sA in processed and sB in processed:
+                    continue
+                else:
+                    still_remaining.append((conn_idx, ((sA, pA), (sB, pB))))
+                    continue
+
+                # Find shared DOFs between domains
+                pair_key = (min(ref_idx, new_idx), max(ref_idx, new_idx))
+                if pair_key not in self._interface_pairs:
+                    pr.warning(f"No interface between domains {ref_idx} and {new_idx}")
+                    scales[new_idx] = scales[ref_idx]
+                    processed.add(new_idx)
+                    made_progress = True
+                    continue
+
+                interface_dofs = self._interface_pairs[pair_key]
+                vals_ref = x_global_list[ref_idx][list(interface_dofs)]
+                vals_new = x_global_list[new_idx][list(interface_dofs)]
+
+                # Filter near-zero
+                mask = (np.abs(vals_ref) > 1e-12) | (np.abs(vals_new) > 1e-12)
+                if np.any(mask):
+                    vr = scales[ref_idx] * vals_ref[mask]
+                    vn = vals_new[mask]
+                    denom = np.vdot(vn, vn)
+                    if abs(denom) > 1e-14:
+                        scales[new_idx] = np.vdot(vn, vr) / denom
+                    else:
+                        scales[new_idx] = scales[ref_idx]
+                else:
+                    scales[new_idx] = scales[ref_idx]
+
+                processed.add(new_idx)
+                made_progress = True
+                pr.debug(f"  Scale {ref_idx}->{new_idx}: {abs(scales[new_idx]):.4f}")
+
+            remaining = still_remaining
+            if not made_progress and remaining:
+                pr.warning("Disconnected structures detected")
+                for _, ((sA, _), (sB, _)) in remaining:
+                    for s in (sA, sB):
+                        if s not in processed:
+                            scales[s] = 1.0
+                            processed.add(s)
+                break
+
+        return scales
 
     def plot_eigenmode(
         self,
