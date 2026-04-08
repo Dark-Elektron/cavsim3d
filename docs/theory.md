@@ -529,53 +529,38 @@ $$
 
 where $\mathbf{X} = [\mathbf{x}_1 \mid \dots \mid \mathbf{x}_{p \cdot m}]$ is the matrix of solution vectors (one column per excitation) and $\mathbf{B}$ is the port basis matrix.
 
-!!! info "Why this formula works"
-    The inner product $\mathbf{B}^H \mathbf{x}$ computes the projection of the total field onto each port mode:
-
-    $$
-    (\mathbf{B}^H \mathbf{x})_{p,m} = \sum_i \overline{b_i^{(p,m)}} \, x_i = \int_{\Gamma_p} \overline{\mathbf{e}_m} \cdot \mathbf{E}_t \, \mathrm{d}S
-    $$
-
-    This is the **modal voltage** at port $(p,m)$.
-
----
 
 ## 5. Z/S-Parameter Extraction
 
 ### 5.1 Characteristic (Wave) Impedance
-
 Each port mode has a frequency-dependent characteristic impedance. For TE modes:
+$$ Z_\mathrm{TE} = \frac{\eta}{\sqrt{1 - \left( \frac{f_{c,m}}{f} \right)^2}} $$
+for TM modes:
+$$ Z_\mathrm{TM} = \eta \sqrt{1 - \left( \frac{f_{c,m}}{f} \right)^2} $$
 
-$$
-Z_{c}(p, m, f) = \frac{\omega_{c,m}}{2\pi f \, \varepsilon_0 \, c_0}
-$$
+and for TEM modes:
 
-where $\omega_{c,m} = c_0 \, k_{c,m}$ is the cutoff angular frequency and $c_0$ is the speed of light. The reference impedance matrix is:
+$$ Z_\mathrm{TEM} = \eta $$
+where $f_{c,m}$ is the cutoff frequency for the $m$-th mode at port $p$. The reference impedance matrix is:
 
-$$
-\mathbf{Z}_0(f) = \text{diag}\bigl(Z_c(1,1,f),\; Z_c(1,2,f),\; \dots,\; Z_c(p,m,f)\bigr)
-$$
+$$ \mathbf{Z}_{\mathrm{ref}} = \begin{bmatrix} 
+Z_{\mathrm{ref},1,1} & 0 & \dots & 0 \\ 
+0 & Z_{\mathrm{ref},1,2} & \dots & 0 \\ 
+\vdots & \vdots & \ddots & \vdots \\ 
+0 & 0 & \dots & Z_{\mathrm{ref},p,m} 
+\end{bmatrix} $$
+
+where $Z_{\mathrm{ref},i,j}$ is the characteristic impedance of the $i$-th port and $j$-th mode. It could be a TE, TM, or TEM mode.
 
 ### 5.2 Z-to-S Conversion
+The S-parameters are obtained from the Z-parameters using the power-normalized conversion:
+$$ \mathbf{S} = \mathbf{Z}_{\mathrm{ref}}^{-1/2} (\mathbf{Z} - \mathbf{Z}_{\mathrm{ref}})(\mathbf{Z} + \mathbf{Z}_{\mathrm{ref}})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
 
-The S-parameters are obtained from the Z-parameters using the standard conversion:
 
-$$
-\mathbf{S} = (\mathbf{Z} - \mathbf{Z}_0)(\mathbf{Z} + \mathbf{Z}_0)^{-1}
-$$
+### 5.3 The Impedance Matrix (Recovery)
+The impedance matrix can be recovered from the S-matrix via:
+$$ \mathbf{Z} = \mathbf{Z}_{\mathrm{ref}}^{1/2} (\mathbf{I} + \mathbf{S})(\mathbf{I} - \mathbf{S})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
 
-!!! note "Frequency dependence"
-    Because $\mathbf{Z}_0$ depends on frequency through the wave impedance, the Z-to-S conversion is performed at each frequency point individually. Below cutoff ($f < f_{c,m}$), the wave impedance becomes imaginary, indicating an evanescent mode.
-
-### 5.3 The Impedance Matrix (Alternative Form)
-
-The impedance matrix can also be recovered from the S-matrix via:
-
-$$
-\mathbf{Z} = \sqrt{\mathbf{Z}_c} \, (\mathbf{I} + \mathbf{S})(\mathbf{I} - \mathbf{S})^{-1} \, \sqrt{\mathbf{Z}_c}
-$$
-
-where $\mathbf{Z}_c = \text{diag}(Z_{c,1}, Z_{c,2}, \dots)$ is the diagonal matrix of modal characteristic impedances.
 
 ---
 
@@ -690,8 +675,6 @@ $$
 $$
 
 ### 7.3 Null-Space Projection
-
-The constraint matrix is:
 
 $$
 \mathbf{C} = \mathbf{B}_{\text{int}} \, \mathbf{F}
