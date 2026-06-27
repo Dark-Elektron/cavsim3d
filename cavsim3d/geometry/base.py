@@ -1,6 +1,3 @@
-# base.py (updated with tagging)
-"""Base geometry class with tagging support."""
-
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Literal, Any
 import numpy as np
@@ -10,7 +7,6 @@ import shutil
 import warnings
 from pathlib import Path
 from datetime import datetime
-
 from ngsolve import Mesh, BND, Integrate, specialcf
 from netgen.occ import OCCGeometry, X, Y, Z
 from ngsolve.webgui import Draw
@@ -192,21 +188,96 @@ class BaseGeometry(ABC, TaggableMixin):
         """Build the geometry."""
         pass
 
-    def generate_mesh(self, maxh=None, curve_order: int = 3) -> Mesh:
+    def generate_mesh(self, maxh=None, curve_order: int = 3, curvaturesafety=2) -> Mesh:
         """Generate mesh from cavsim3d.geometry. Automatically calls build() if needed."""
         if self.geo is None:
             self.build()
         
         if maxh:
-            self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(maxh=maxh))
+            self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(maxh=maxh, curvaturesafety=curvaturesafety))
         else:
-            self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh())
-
+            self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(curvaturesafety=curvaturesafety))
+        
         self.mesh.Curve(curve_order)
         self.invalidate_tag()  # Mesh changed
 
         self._record('generate_mesh', maxh=maxh, curve_order=curve_order)
         return self.mesh
+
+    def set_local_mesh_refinement(self, pattern: str, maxh: float) -> 'BaseGeometry':
+        """Set a local maximum mesh size on faces/solids matching a name pattern.
+
+        Acts on this geometry's *built* shape (``self.geo``), so for an
+        assembly you must call it on the **assembly** (after ``build()``), not
+        on a sub-component — the assembly meshes its own glued copy.
+
+        Supports ``*`` wildcards and ``|`` to combine patterns (NGSolve
+        boundary-spec style)::
+
+            geo.set_local_mesh_refinement('port*', 0.001)          # all ports
+            geo.set_local_mesh_refinement('port*|ceramic', 0.001)  # ports + ceramic
+
+        Matching **faces** get ``face.maxh`` (boundary refinement) and matching
+        **solids/materials** get ``solid.maxh`` (volume refinement).  A split
+        sub-domain / assembly prefix is ignored when matching, so ``'ceramic'``
+        also matches ``'subdomain1/ceramic'`` or ``'geo1/ceramic'``.
+
+        Call before :meth:`generate_mesh`.  The global ``maxh`` still caps the
+        rest of the mesh; per-entity ``maxh`` only refines.
+        """
+        import fnmatch
+
+        if self.geo is None:
+            self.build()
+
+        tokens = [t.strip() for t in str(pattern).split('|') if t.strip()]
+
+        def _variants(name):
+            if not name:
+                return []
+            v = [name]
+            if '/' in name:                 # strip sub-domain / component prefix
+                v.append(name.split('/', 1)[1])
+            return v
+
+        def _match(name):
+            return any(fnmatch.fnmatchcase(v, t)
+                       for v in _variants(name) for t in tokens)
+
+        n_faces = 0
+        n_solids = 0
+        try:
+            solids = list(self.geo.solids)
+        except AttributeError:
+            solids = []
+
+        if solids:
+            seen = set()
+            for solid in solids:
+                if _match(solid.name):
+                    solid.maxh = maxh
+                    n_solids += 1
+                for face in solid.faces:
+                    if face in seen:
+                        continue
+                    seen.add(face)
+                    if _match(face.name):
+                        face.maxh = maxh
+                        n_faces += 1
+        else:
+            try:
+                for face in self.geo.faces:
+                    if _match(face.name):
+                        face.maxh = maxh
+                        n_faces += 1
+            except AttributeError:
+                pass
+
+        self.mesh = None  # invalidate
+        print(f"Local mesh refinement maxh={maxh} applied to "
+              f"{n_faces} face(s) and {n_solids} solid(s) matching '{pattern}'")
+        self._record('set_local_mesh_refinement', pattern=pattern, maxh=maxh)
+        return self
 
     def show(
         self,

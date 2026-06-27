@@ -283,15 +283,15 @@ where:
 
 | Symbol | Size | Definition |
 |--------|------|------------|
-| $\mathbf{K}$ | $N \times N$ | Stiffness (curl–curl) matrix |
-| $\mathbf{M}$ | $N \times N$ | Mass matrix (with $\mu_0\varepsilon_0$ absorbed) |
-| $\mathbf{x}$ | $N \times 1$ | Unknown edge-element coefficients |
-| $\mathbf{b}$ | $N \times 1$ | Port excitation vector |
-| $N$           | —    | Number of edge degrees of freedom |
+| $\mathbf{K}$ | $n \times n$ | Stiffness (curl–curl) matrix |
+| $\mathbf{M}$ | $n \times n$ | Mass matrix (with $\mu_0\varepsilon_0$ absorbed) |
+| $\mathbf{x}$ | $n \times 1$ | Unknown edge-element coefficients |
+| $\mathbf{b}$ | $n \times 1$ | Port excitation vector |
+| $n$           | —    | Number of degrees of freedom |
 
 
 !!! info "Notation"
-    The system is solved one excitation at a time. For each port-mode pair $(p, m)$, the solver constructs a dedicated RHS vector $\mathbf{b}_{p,m}$ assembled in the excitation matrix $\mathbf{B}$ and solves for the corresponding field solution $\mathbf{x}_{p,m}$. The collection of all solutions is assembled into a solution matrix $\mathbf{X} = [\mathbf{x}_1 \mid \mathbf{x}_2 \mid \dots]$.
+    The system is solved one excitation at a time. For each port-mode pair $(p, m)$, the solver constructs a dedicated RHS vector $\mathbf{b}_{p,m}$ assembled in the excitation matrix $\mathbf{B}$ and solves for the corresponding field solution $\mathbf{x}_{p,m}$. The collection of all solutions is assembled into a solution matrix $\mathbf{X} = [\mathbf{x}_{1,1} \mid \mathbf{x}_{1,2} \mid \dots \mid \mathbf{x}_{p,m}]$.
 
 ---
 
@@ -386,14 +386,14 @@ where:
 
 
 $$
-(K_{\text{port}})_{ij}
+(K_{\text{port}})_{ji}
 = \int_{\partial\Omega_{\text{port}}}
   (\nabla_t \times \mathbf{N}_i^{\text{trace}})
   \cdot
   (\nabla_t \times \mathbf{N}_j^{\text{trace}})
   \,\mathrm{d}S,
 \quad
-(M_{\text{port}})_{ij}
+(M_{\text{port}})_{ji}
 = \int_{\partial\Omega_{\text{port}}}
   \mathbf{N}_i^{\text{trace}}
   \cdot
@@ -425,20 +425,20 @@ right-hand side vector:
 
 
 $$
-b_j^{(p,m)} = \int_{\partial\Omega_{\text{port}}}
-\mathbf{e}_m \cdot \mathbf{N}_j^{\text{trace}}
+b_{j,p,m} = \int_{\partial\Omega_{\text{port}}}
+\mathbf{e}_{p,m} \cdot \mathbf{N}_j^{\text{trace}}
 \,\mathrm{d}S
 $$
 
 
 Substitute the basis expansion
-$\mathbf{e}_m = \sum_i (\hat{e}_m)_i \,
+$\mathbf{e}_{p,m} = \sum_i (\hat{e}_{p,m})_i \,
 \mathbf{N}_i^{\text{trace}}$:
 
 
 $$
-b_j^{(p,m)} = \int_{\partial\Omega_{\text{port}}}
-\left(\sum_i (\hat{e}_m)_i \,
+b_{j,p,m} = \int_{\partial\Omega_{\text{port}}}
+\left(\sum_i (\hat{e}_{p,m})_i \,
 \mathbf{N}_i^{\text{trace}}\right)
 \cdot \mathbf{N}_j^{\text{trace}}
 \,\mathrm{d}S
@@ -449,7 +449,7 @@ Pull the sum and coefficients out of the integral:
 
 
 $$
- b_j^{(p,m)} = \sum_i (\hat{e}_m)_i
+ b_{j,p,m} = \sum_i (\hat{e}_{p,m})_i
 \underbrace{
   \int_{\partial\Omega_{\text{port}}}
   \mathbf{N}_i^{\text{trace}} \cdot \mathbf{N}_j^{\text{trace}}
@@ -462,11 +462,9 @@ This reveals the **port boundary mass matrix**:
 
 
 $$
-\boxed{
 (M_{\text{port}})_{ji} = \int_{\partial\Omega_{\text{port}}}
 \mathbf{N}_i^{\text{trace}} \cdot \mathbf{N}_j^{\text{trace}}
 \,\mathrm{d}S
-}
 $$
 
 
@@ -475,15 +473,13 @@ right-hand side vector for port $p$, mode $m$ is:
 
 
 $$
-\boxed{
-\mathbf{b}^{(p,m)} = M_{\text{port}} \, \hat{\mathbf{e}}_m
-}
+\mathbf{b}_{p,m} = M_{\text{port}} \, \hat{\mathbf{e}}_{p,m}
 $$
 
 
-where $\hat{\mathbf{e}}_m \in \mathbb{R}^{n_p}$ is the discrete
+where $\hat{\mathbf{e}}_{p,m} \in \mathbb{R}^{n_p}$ is the discrete
 eigenvector of the port eigenvalue problem, containing the
-coefficients $(\hat{e}_m)_i$.
+coefficients $(\hat{e}_{p,m})_i$.
 
 !!! info "Normalisation"
     The mode field vector $\hat{\mathbf{e}}_m$ is normalised to have
@@ -505,16 +501,14 @@ The solver assembles these vectors for all port-mode pairs and
 collects them column-wise into the **port basis matrix**:
 
 $$
-\mathbf{B} = \bigl[\mathbf{b}^{(1,1)} \mid \mathbf{b}^{(1,2)} \mid \cdots \mid \mathbf{b}^{(p,m)}\bigr] \in \mathbb{R}^{N \times (p \cdot m)}
+\mathbf{B} = \bigl[\mathbf{b}_{1,1} \mid \mathbf{b}_{1,2} \mid \cdots \mid \mathbf{b}_{p,m}\bigr] \in \mathbb{R}^{n \times (p \cdot m)}
 $$
 
 where $p$ is the number of ports and $m$ the number of modes per port. The general equation therefore for multiple ports and multiple modes per port is:
 
 $$
-\boxed{
   \left(\mathbf{K} - \omega^2\,\mathbf{M}\right)\mathbf{X}
   = j\omega\,\mathbf{B}
-}
 $$
 
 ---
@@ -524,10 +518,10 @@ $$
 After solving the linear system for all excitations at a given frequency, the impedance matrix is extracted via a single matrix-vector product:
 
 $$
-\boxed{\mathbf{Z}(\omega) = j \, \mathbf{B}^H \mathbf{X}(\omega)}
+\mathbf{Z}(\omega) = j \, \mathbf{B}^H \mathbf{X}(\omega)
 $$
 
-where $\mathbf{X} = [\mathbf{x}_1 \mid \dots \mid \mathbf{x}_{p \cdot m}]$ is the matrix of solution vectors (one column per excitation) and $\mathbf{B}$ is the port basis matrix.
+where $\mathbf{X} = [\mathbf{x}_{1,1} \mid \dots \mid \mathbf{x}_{p,m}]$ is the matrix of solution vectors (one column per excitation) and $\mathbf{B}$ is the port basis matrix.
 
 
 ## 5. Z/S-Parameter Extraction
@@ -697,10 +691,8 @@ $$
 The global coupled system is obtained by Galerkin projection onto $\mathbf{W}_c$:
 
 $$
-\boxed{
 \mathbf{A}_{\text{coupled}} = \mathbf{W}_c^H \, \mathbf{A}_{\text{blk}} \, \mathbf{W}_c, \qquad
 \mathbf{B}_{\text{coupled}} = \mathbf{W}_c^H \, \mathbf{B}_{\text{ext}}
-}
 $$
 
 The coupled system has only the external port-modes remaining. At each frequency, the solve is:
@@ -775,12 +767,12 @@ The following table summarises the key mathematical objects and where they appea
 |--------|--------|------|-------------|
 | Stiffness matrix | $\mathbf{K}$ | $n \times n$ | Curl-curl bilinear form: $\int \frac{1}{\mu_r}(\nabla \times \mathbf{N}_i) \cdot (\nabla \times \mathbf{N}_j) \,\mathrm{d}\Omega$ |
 | Mass matrix | $\mathbf{M}$ | $n \times n$ | $\varepsilon$-weighted inner product: $\int \varepsilon_0 \, \mathbf{N}_i \cdot \mathbf{N}_j \,\mathrm{d}\Omega$ |
-| Port basis matrix | $\mathbf{B}$ | $n \times PM$ | Boundary mass-weighted port modes (see [Section 3.3](#33-building-the-right-hand-side-b)) |
+| Port basis matrix | $\mathbf{B}$ | $n \times p\cdot m$ | Boundary mass-weighted port modes (see [Section 3.3](#33-building-the-right-hand-side-b)) |
 | Solution vector | $\mathbf{x}$ | $n$ | FE coefficients of total electric field |
-| Z-parameters | $\mathbf{Z}$ | $PM \times PM$ | Impedance matrix: $j\mathbf{B}^H\mathbf{X}$ |
-| S-parameters | $\mathbf{S}$ | $PM \times PM$ | Scattering matrix: $(\mathbf{Z}-\mathbf{Z}_0)(\mathbf{Z}+\mathbf{Z}_0)^{-1}$ |
+| Z-parameters | $\mathbf{Z}$ | $p\cdot m \times p\cdot m$ | Impedance matrix: $j\mathbf{B}^H\mathbf{X}$ |
+| S-parameters | $\mathbf{S}$ | $p\cdot m \times p\cdot m$ | Scattering matrix: $(\mathbf{Z}-\mathbf{Z}_0)(\mathbf{Z}+\mathbf{Z}_0)^{-1}$ |
 | POD basis | $\mathbf{V}$ | $n \times r$ | Truncated left singular vectors of snapshot matrix |
-| Reduced system | $\mathbf{A}_d, \mathbf{B}_d$ | $r \times r$ | Per-domain Galerkin-projected matrices ($r \ll n$) |
-| Block-diagonal system | $\mathbf{A}_{\text{blk}}$ | $R \times R$ | Block-diagonal assembly of all per-domain $\mathbf{A}_d$ ($R = \sum r_d$) |
-| Constraint matrix | $\mathbf{C}$ | $R \times c$ | Kirchhoff coupling: $\mathbf{C} = \mathbf{B}_{\text{int}} \mathbf{F}$ |
+| Reduced system | $\mathbf{A}_d, \mathbf{B}_d$ | $r_d \times r_d$ | Per-domain Galerkin-projected matrices ($r_d \ll n$) |
+| Block-diagonal system | $\mathbf{A}_{\text{blk}}$ | $r_\mathrm{blk} \times r_\mathrm{blk}$ | Block-diagonal assembly of all per-domain $\mathbf{A}_d$ ($r_\mathrm{blk} = \sum r_d$) |
+| Constraint matrix | $\mathbf{C}$ | $r_\mathrm{blk} \times c$ | Kirchhoff coupling: $\mathbf{C} = \mathbf{B}_{\text{int}} \mathbf{F}$ |
 | Coupled system | $\mathbf{A}_{\text{coupled}}, \mathbf{B}_{\text{coupled}}$ | $r_c \times r_c$ | Null-space projected system with internal ports eliminated |

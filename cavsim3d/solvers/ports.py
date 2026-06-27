@@ -7,27 +7,34 @@ The phase is deterministic from the formula - no mesh-dependent normalization.
 OPTIMIZED VERSION (safe precomputation of boundary mass matrix)
 """
 
+import platform
 from typing import Dict, Tuple, List, Optional, Literal, Union
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 import numpy as np
 import scipy.sparse as sp
+from scipy.special import jv, yv, jvp, yvp, jn_zeros, jnp_zeros
+import numpy.polynomial.chebyshev as cheb
 
 from ngsolve import (
     HCurl, BilinearForm, GridFunction, BND, Cross, Integrate, InnerProduct,
     TaskManager, Preconditioner, solvers, IdentityMatrix, curl, ds,
-    CoefficientFunction, specialcf, x, y, z, sin, cos, sqrt, pi
+    CoefficientFunction, specialcf, x, y, z, sin, cos, sqrt, pi,
+    H1, grad, dx as dx_vol
 )
 
 from cavsim3d.core.constants import c0, mu0, eps0, Z0
 import cavsim3d.utils.printing as pr
 
+# PARDISO is not available on macOS; fall back to UMFPACK
+_DIRECT_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
 
 class PortGeometryType(Enum):
     """Supported port geometry types."""
     RECTANGULAR = "rectangular"
     CIRCULAR = "circular"
+    COAXIAL = "coaxial"
     UNKNOWN = "unknown"
 
 
@@ -43,6 +50,7 @@ class PortGeometry:
     a: Optional[float] = None
     b: Optional[float] = None
     radius: Optional[float] = None
+    inner_radius: Optional[float] = None  # inner radius for coaxial ports
     fit_error: float = 0.0
 
 
@@ -67,7 +75,7 @@ class PortEigenmodeSolver:
         order: int = 3,
         bc: str = 'default',
         mode_source: Literal['analytic', 'numeric'] = 'analytic',
-        mode_source_internal: Literal['analytic', 'numeric'] = 'numeric',
+        mode_source_internal: Literal['analytic', 'numeric'] = 'analytic',
         geometry_tolerance: float = 0.05,
         polarization_angle: float = 0.0,
         global_up: Tuple[float, float, float] = (0.0, 1.0, 0.0),
@@ -102,6 +110,12 @@ class PortEigenmodeSolver:
         self.port_orientation_factors: Dict[str, float] = {}
         self.port_tangent_frames: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self.port_geometries: Dict[str, PortGeometry] = {}
+
+        # Relative permittivity of the medium filling each port (default
+        # vacuum).  Populated by the frequency-domain solver from the
+        # material adjacent to each port face; used to scale the medium wave
+        # impedance eta = eta0 / sqrt(eps_r).
+        self.port_media_eps: Dict[str, float] = {}
 
         # Phase and polarization tracking
         self.port_phase_signs: Dict[str, Dict[int, float]] = {}
@@ -157,7 +171,7 @@ class PortEigenmodeSolver:
         dot = np.dot(inward, self.propagation_axis)
         if np.abs(dot) < 0.1:
             return 1.0
-        return np.sign(dot)
+        return 1.0 #np.sign(dot) <- checkthe orientation later
 
     def _compute_polarization_vector(self, t1: np.ndarray, t2: np.ndarray) -> np.ndarray:
         theta = self.polarization_angle
@@ -217,6 +231,82 @@ class PortEigenmodeSolver:
             radius=R, fit_error=total_error
         ), total_error
 
+    def _fit_coaxial(self, center, normal, t1, t2, area, I_uu, I_vv, I_uv):
+        """
+        Fit coaxial (annular) geometry.
+
+        For an annular ring with inner radius *a* and outer radius *b*:
+          Area  = π (b² - a²)
+          I_uu = I_vv = π (b⁴ - a⁴) / 4   (isotropic, like a circle)
+
+        We detect a coaxial port by noticing that:
+          1. The cross-section is isotropic (I_uu ≈ I_vv) — same as a circle.
+          2. BUT the area / moment relationship does NOT match a solid circle.
+             For a solid circle: I / Area² = 1 / (4π).
+             For an annulus:     I / Area² = (b² + a²) / (4π(b² - a²))  > 1/(4π).
+
+        So when the circular fit passes the isotropy check but fails the
+        magnitude check, the port is likely coaxial.
+        """
+        if I_uu + I_vv < 1e-20:
+            return None, 1.0
+
+        I_sum = I_uu + I_vv
+        I_avg = I_sum / 2
+
+        # Must be isotropic
+        isotropy_error = abs(I_uu - I_vv) / I_sum * 2
+        if isotropy_error > 0.15:
+            return None, 1.0
+
+        # Solve for a and b from area and moment:
+        #   Area = π (b² - a²)
+        #   I    = π (b⁴ - a⁴) / 4 = π (b² - a²)(b² + a²) / 4
+        #        = Area * (b² + a²) / 4
+        # So:
+        #   b² + a² = 4 * I / Area
+        #   b² - a² = Area / π
+        sum_sq = 4 * I_avg / area        # b² + a²
+        diff_sq = area / np.pi           # b² - a²
+
+        b_sq = (sum_sq + diff_sq) / 2
+        a_sq = (sum_sq - diff_sq) / 2
+
+        if a_sq <= 0 or b_sq <= 0 or a_sq >= b_sq:
+            return None, 1.0
+
+        a = np.sqrt(a_sq)
+        b = np.sqrt(b_sq)
+
+        # Reject if inner radius is negligible — this is a solid circle,
+        # not a coaxial port (mesh noise can produce tiny positive a_sq).
+        if a / b < 0.02:
+            return None, 1.0
+
+        # Validate: area and moment should be consistent
+        area_check = np.pi * (b**2 - a**2)
+        area_error = abs(area_check - area) / area
+
+        I_check = np.pi * (b**4 - a**4) / 4
+        moment_error = abs(I_check - I_avg) / I_avg if I_avg > 1e-20 else 1.0
+
+        # Cross-moment should be near zero
+        cross_error = abs(I_uv) / I_avg if I_avg > 1e-20 else 0.0
+
+        total_error = (
+            isotropy_error * 1.0 +
+            area_error * 0.5 +
+            moment_error * 0.3 +
+            cross_error * 0.5
+        ) / 2.3
+
+        geom = PortGeometry(
+            type=PortGeometryType.COAXIAL,
+            center=center, normal=normal, t1=t1, t2=t2, area=area,
+            radius=b, inner_radius=a, fit_error=total_error
+        )
+        return geom, total_error
+
     def _fit_rectangular(self, center, normal, t1, t2, area, I_uu, I_vv, I_uv):
         """
         Fit rectangular geometry.
@@ -269,8 +359,8 @@ class PortEigenmodeSolver:
 
     def _detect_port_geometry(self, port: str) -> PortGeometry:
         """
-        Detect port geometry type (rectangular or circular).
-        
+        Detect port geometry type (rectangular, circular, or coaxial).
+
         Uses moments of inertia to distinguish shapes.
         Includes fallback logic for interface ports that may have
         slightly elevated fit errors due to mesh artifacts.
@@ -289,44 +379,61 @@ class PortEigenmodeSolver:
         I_vv = float(Integrate(u * u, self.mesh, BND, definedon=port_region))
         I_uv = float(Integrate(u * v, self.mesh, BND, definedon=port_region))
 
-        # Try both fits
+        # Try all fits
         rect_geom, rect_error = self._fit_rectangular(
             center, normal, t1, t2, area, I_uu, I_vv, I_uv
         )
         circ_geom, circ_error = self._fit_circular(
             center, normal, t1, t2, area, I_uu, I_vv, I_uv
         )
+        coax_result = self._fit_coaxial(
+            center, normal, t1, t2, area, I_uu, I_vv, I_uv
+        )
+        coax_geom, coax_error = coax_result if coax_result[0] is not None else (None, 1.0)
 
         # Decision logic with tolerance
         tol = self.geometry_tolerance
-        
+
+        # Coaxial: isotropic like a circle but moment/area ratio is wrong
+        # for a solid disk.  If coaxial fits well and circular does NOT,
+        # prefer coaxial.  If both fit, the circular magnitude error will
+        # be high while coaxial error will be low.
+        if coax_geom is not None and coax_error <= tol:
+            # Only prefer coaxial when circular magnitude is off
+            if circ_error > tol:
+                return coax_geom
+            # Both pass — coaxial wins if it has a better fit
+            if coax_error < circ_error:
+                return coax_geom
+
         # Strong preference for the better fit
         if rect_error <= tol and circ_error <= tol:
-            # Both pass - choose the better one
             if rect_error < circ_error:
                 return rect_geom
             else:
                 return circ_geom
-        
+
         if rect_error <= tol:
             return rect_geom
-        
+
         if circ_error <= tol:
             return circ_geom
-        
+
+        # Try coaxial with relaxed tolerance
+        if coax_geom is not None and coax_error <= tol * 3:
+            return coax_geom
+
         # Neither passes strict tolerance - try relaxed tolerance
-        # This handles internal interfaces from Glue() operations
-        relaxed_tol = tol * 3  # 3x relaxed tolerance
-        
+        relaxed_tol = tol * 3
+
         if circ_error <= relaxed_tol and circ_error < rect_error:
-            # Accept circular with warning (common for revolved geometries)
             return PortGeometry(
                 type=PortGeometryType.CIRCULAR,
                 center=center, normal=normal, t1=t1, t2=t2, area=area,
-                radius=circ_geom.radius, 
-                fit_error=circ_error  # Keep actual error for info
+                radius=circ_geom.radius,
+                fit_error=circ_error
             )
-        
+
         if rect_error <= relaxed_tol:
             return PortGeometry(
                 type=PortGeometryType.RECTANGULAR,
@@ -378,8 +485,86 @@ class PortEigenmodeSolver:
         modes.sort(key=lambda mode: mode.kc)
         return modes[:nmodes * 2 + 4]
 
+    def _generate_coaxial_modes(self, geometry: PortGeometry, nmodes: int) -> List[AnalyticMode]:
+        """
+        Generate analytic modes for a coaxial (annular) waveguide.
+
+        Mode spectrum:
+          TEM: kc = 0  (fundamental, unique to multi-conductor)
+          TE_mn: kc from  J'_m(kc*b)*Y'_m(kc*a) - J'_m(kc*a)*Y'_m(kc*b) = 0
+          TM_mn: kc from  J_m(kc*b)*Y_m(kc*a) - J_m(kc*a)*Y_m(kc*b) = 0
+
+        where a = inner radius, b = outer radius.
+        """
+        from scipy.special import jv, yv, jvp, yvp
+        from scipy.optimize import brentq
+
+        a = geometry.inner_radius
+        b = geometry.radius
+        modes = []
+
+        # TEM mode — always the fundamental mode of a coaxial line
+        modes.append(AnalyticMode(type='TEM', indices=(0, 0), kc=0.0, degeneracy=1))
+
+        max_m = 5
+        max_n = 5
+
+        def _find_roots(f, kc_max, n_roots, n_search=500):
+            """Find roots of f(kc) in (0, kc_max] by sign-change search."""
+            roots = []
+            kc_vals = np.linspace(1e-6, kc_max, n_search)
+            f_vals = np.array([f(k) for k in kc_vals])
+            for i in range(len(f_vals) - 1):
+                if np.isfinite(f_vals[i]) and np.isfinite(f_vals[i + 1]):
+                    if f_vals[i] * f_vals[i + 1] < 0:
+                        try:
+                            root = brentq(f, kc_vals[i], kc_vals[i + 1])
+                            # Avoid duplicates
+                            if not any(abs(root - r) < 1e-8 for r in roots):
+                                roots.append(root)
+                        except ValueError:
+                            pass
+                if len(roots) >= n_roots:
+                    break
+            return roots
+
+        # Upper kc limit — enough to capture nmodes
+        kc_max = 50.0 / a  # generous upper bound
+
+        # TM modes: J_m(kc*b)*Y_m(kc*a) - J_m(kc*a)*Y_m(kc*b) = 0
+        for m in range(max_m):
+            def tm_dispersion(kc, m=m):
+                return jv(m, kc * b) * yv(m, kc * a) - jv(m, kc * a) * yv(m, kc * b)
+
+            roots = _find_roots(tm_dispersion, kc_max, max_n)
+            for n, kc in enumerate(roots, 1):
+                if m == 0:
+                    modes.append(AnalyticMode(type='TM', indices=(m, n), kc=kc, degeneracy=1))
+                else:
+                    modes.append(AnalyticMode(type='TM', indices=(m, n), kc=kc,
+                                              polarization='cos', degeneracy=2))
+                    modes.append(AnalyticMode(type='TM', indices=(m, n), kc=kc,
+                                              polarization='sin', degeneracy=2))
+
+        # TE modes: J'_m(kc*b)*Y'_m(kc*a) - J'_m(kc*a)*Y'_m(kc*b) = 0
+        for m in range(max_m):
+            def te_dispersion(kc, m=m):
+                return jvp(m, kc * b) * yvp(m, kc * a) - jvp(m, kc * a) * yvp(m, kc * b)
+
+            roots = _find_roots(te_dispersion, kc_max, max_n)
+            for n, kc in enumerate(roots, 1):
+                if m == 0:
+                    modes.append(AnalyticMode(type='TE', indices=(m, n), kc=kc, degeneracy=1))
+                else:
+                    modes.append(AnalyticMode(type='TE', indices=(m, n), kc=kc,
+                                              polarization='cos', degeneracy=2))
+                    modes.append(AnalyticMode(type='TE', indices=(m, n), kc=kc,
+                                              polarization='sin', degeneracy=2))
+
+        modes.sort(key=lambda mode: (mode.kc, mode.type, mode.polarization or ''))
+        return modes[:nmodes * 2 + 4]
+
     def _generate_circular_modes(self, geometry: PortGeometry, nmodes: int) -> List[AnalyticMode]:
-        from scipy.special import jn_zeros, jnp_zeros
 
         R = geometry.radius
         modes = []
@@ -535,6 +720,124 @@ class PortEigenmodeSolver:
 
         return CoefficientFunction((E_x, E_y, E_z))
 
+    def _create_coaxial_mode_cf(self, mode: AnalyticMode, geometry: PortGeometry) -> CoefficientFunction:
+        """
+        Create CoefficientFunction for a coaxial waveguide mode.
+
+        TEM mode: E_r = 1/r  (radial, azimuthally symmetric)
+        TE/TM modes: Bessel combination  C1*J_m(kc*r) + C2*Y_m(kc*r)
+        with boundary conditions at r=a and r=b.
+        """
+
+        a_inner = geometry.inner_radius
+        b_outer = geometry.radius
+        center = geometry.center
+        normal = geometry.normal
+        t1, t2 = geometry.t1, geometry.t2
+        m_idx, n_idx = mode.indices
+
+        # Use the port's own pre-computed tangent frame for the local
+        # polar coordinate system.  These vectors are already orthonormal
+        # and lie in the port plane, regardless of its orientation.
+        e1 = t1
+        e2 = t2
+
+        u_global = (x - center[0]) * e1[0] + (y - center[1]) * e1[1] + (z - center[2]) * e1[2]
+        v_global = (x - center[0]) * e2[0] + (y - center[1]) * e2[1] + (z - center[2]) * e2[2]
+        r_cf = sqrt(u_global * u_global + v_global * v_global + 1e-30)
+        cos_phi = u_global / r_cf
+        sin_phi = v_global / r_cf
+
+
+        if mode.type == 'TEM':
+            # TEM: E_r = 1/r, E_phi = 0  (azimuthally symmetric)
+            E_r = 1.0 / r_cf
+            E_phi = CoefficientFunction(0.0)
+
+            E_e1 = E_r * cos_phi
+            E_e2 = E_r * sin_phi
+
+            E_x = E_e1 * e1[0] + E_e2 * e2[0]
+            E_y = E_e1 * e1[1] + E_e2 * e2[1]
+            E_z = E_e1 * e1[2] + E_e2 * e2[2]
+
+            return CoefficientFunction((E_x, E_y, E_z))
+
+        # TE/TM modes: radial function is C1*J_m(kc*r) + C2*Y_m(kc*r)
+        # with boundary conditions determining C1/C2 ratio.
+        kc = mode.kc
+
+        # Approximate the radial Bessel combination via Chebyshev interpolation
+        # on the annular region [a, b].
+        n_pts = 60
+        r_pts = np.linspace(a_inner, b_outer, n_pts)
+
+        if mode.type == 'TM':
+            # BC: R(a)=0, R(b)=0  =>  C1*J_m(kc*a) + C2*Y_m(kc*a) = 0
+            # => C2 = -C1 * J_m(kc*a) / Y_m(kc*a)
+            Ym_a = yv(m_idx, kc * a_inner)
+            if abs(Ym_a) < 1e-30:
+                return CoefficientFunction((0.0, 0.0, 0.0))
+            C1 = 1.0
+            C2 = -C1 * jv(m_idx, kc * a_inner) / Ym_a
+
+            R_vals = C1 * jv(m_idx, kc * r_pts) + C2 * yv(m_idx, kc * r_pts)
+            Rp_vals = C1 * jvp(m_idx, kc * r_pts) * kc + C2 * yvp(m_idx, kc * r_pts) * kc
+        else:  # TE
+            # BC: R'(a)=0, R'(b)=0  =>  C1*J'_m(kc*a) + C2*Y'_m(kc*a) = 0
+            Ymp_a = yvp(m_idx, kc * a_inner)
+            if abs(Ymp_a) < 1e-30:
+                return CoefficientFunction((0.0, 0.0, 0.0))
+            C1 = 1.0
+            C2 = -C1 * jvp(m_idx, kc * a_inner) / Ymp_a
+
+            R_vals = C1 * jv(m_idx, kc * r_pts) + C2 * yv(m_idx, kc * r_pts)
+            Rp_vals = C1 * jvp(m_idx, kc * r_pts) * kc + C2 * yvp(m_idx, kc * r_pts) * kc
+
+        # Chebyshev fit on [a, b] mapped to [-1, 1]
+        cheb_x = 2 * (r_pts - a_inner) / (b_outer - a_inner) - 1
+        R_coeffs = cheb.chebfit(cheb_x, R_vals, min(20, n_pts - 1))
+        Rp_coeffs = cheb.chebfit(cheb_x, Rp_vals, min(20, n_pts - 1))
+
+        # Map r_cf to Chebyshev variable
+        cheb_var = 2 * (r_cf - a_inner) / (b_outer - a_inner) - 1
+        R_cf = self._eval_chebyshev_cf(cheb_var, R_coeffs)
+        Rp_cf = self._eval_chebyshev_cf(cheb_var, Rp_coeffs)
+
+        # Angular functions
+        cos_m_phi, sin_m_phi = self._trig_multiple_cf(cos_phi, sin_phi, m_idx)
+
+        if mode.polarization == 'sin':
+            angular_1 = sin_m_phi
+            angular_2 = -cos_m_phi
+        else:
+            angular_1 = cos_m_phi
+            angular_2 = sin_m_phi
+
+        if mode.type == 'TE':
+            if m_idx == 0:
+                E_r = CoefficientFunction(0.0)
+                E_phi = Rp_cf
+            else:
+                E_r = (m_idx / r_cf) * R_cf * angular_2
+                E_phi = Rp_cf * angular_1
+        else:  # TM
+            if m_idx == 0:
+                E_r = Rp_cf
+                E_phi = CoefficientFunction(0.0)
+            else:
+                E_r = Rp_cf * angular_1
+                E_phi = -(m_idx / r_cf) * R_cf * angular_2
+
+        E_e1 = E_r * cos_phi - E_phi * sin_phi
+        E_e2 = E_r * sin_phi + E_phi * cos_phi
+
+        E_x = E_e1 * e1[0] + E_e2 * e2[0]
+        E_y = E_e1 * e1[1] + E_e2 * e2[1]
+        E_z = E_e1 * e1[2] + E_e2 * e2[2]
+
+        return CoefficientFunction((E_x, E_y, E_z))
+
     def _bessel_chebyshev(self, m: int, xi_cf: CoefficientFunction, xi_max: float) -> CoefficientFunction:
         from scipy.special import jv
         import numpy.polynomial.chebyshev as cheb
@@ -607,7 +910,8 @@ class PortEigenmodeSolver:
     # Main Solve Method – with safe precomputation
     # =========================================================================
 
-    def solve(self, nmodes: int = 1) -> Tuple[Dict, Dict]:
+    def solve(self, nmodes: Union[int, Dict[str, int]] = 1,
+              internal_ports: Optional[List[str]] = None) -> Tuple[Dict, Dict]:
         pr.running("Calculating Port Eigenmodes...")
         pr.info("=" * 60)
         pr.info(f"  Mode source: {self.mode_source}")
@@ -619,6 +923,13 @@ class PortEigenmodeSolver:
 
         if not ports:
             raise ValueError("No ports found in mesh")
+
+        # Resolve modes-per-port: an int applies to every port; a dict maps
+        # port name -> count (ports not listed default to 1).
+        def _nmodes_for(port: str) -> int:
+            if isinstance(nmodes, dict):
+                return int(nmodes.get(port, nmodes.get('default', 1)))
+            return int(nmodes)
 
         fes_full = HCurl(self.mesh, order=self.order, dirichlet=self.bc)
 
@@ -636,6 +947,8 @@ class PortEigenmodeSolver:
                 pr.debug(f"    a={geometry.a:.6f}, b={geometry.b:.6f}")
             elif geometry.type == PortGeometryType.CIRCULAR:
                 pr.debug(f"    R={geometry.radius:.6f}")
+            elif geometry.type == PortGeometryType.COAXIAL:
+                pr.debug(f"    R_outer={geometry.radius:.6f}, R_inner={geometry.inner_radius:.6f}")
 
         if self.mode_source == 'analytic':
             unsupported = [p for p, g in self.port_geometries.items() if g.type == PortGeometryType.UNKNOWN]
@@ -646,7 +959,7 @@ class PortEigenmodeSolver:
                 )
 
         # ────────────────────────────────────────────────────────────────
-        # OPTIMIZATION: Precompute boundary mass matrix ONCE per port
+        # Precompute boundary mass matrix ONCE per port
         # ────────────────────────────────────────────────────────────────
         pr.debug("  Precomputing boundary mass matrices (once per port)...")
         u_full, v_full = fes_full.TnT()
@@ -665,17 +978,23 @@ class PortEigenmodeSolver:
 
         # Solve for each port
         pr.debug(f"  Port order: {ports}")
+        # Determine which ports are internal (interface) vs external
+        _internal_ports = set(internal_ports) if internal_ports else set()
+
         for port in ports:
             geometry = self.port_geometries[port]
+            is_internal = port in _internal_ports
+
+            nm_port = _nmodes_for(port)
             if self.mode_source == 'analytic':
-                if self.mode_source_internal == 'numeric' and (port != ports[0] and port != ports[-1]):
-                    pr.debug(f"  Numeric calculation for internal port {port}")
-                    self._solve_port_numeric(port, nmodes, fes_full)
+                if is_internal and self.mode_source_internal == 'numeric':
+                    pr.debug(f"  Numeric calculation for internal port {port} ({nm_port} mode(s))")
+                    self._solve_port_numeric(port, nm_port, fes_full)
                 else:
-                    pr.debug(f"  Analytic calculation for port {port}")
-                    self._solve_port_analytic(port, geometry, nmodes, fes_full)
+                    pr.debug(f"  Analytic calculation for port {port} ({nm_port} mode(s))")
+                    self._solve_port_analytic(port, geometry, nm_port, fes_full)
             else:
-                self._solve_port_numeric(port, nmodes, fes_full)
+                self._solve_port_numeric(port, nm_port, fes_full)
 
         pr.done(f"Port eigenmodes complete: {sum(len(m) for m in self.port_modes.values())} total modes")
 
@@ -694,6 +1013,8 @@ class PortEigenmodeSolver:
 
         if geometry.type == PortGeometryType.RECTANGULAR:
             analytic_modes = self._generate_rectangular_modes(geometry, nmodes)
+        elif geometry.type == PortGeometryType.COAXIAL:
+            analytic_modes = self._generate_coaxial_modes(geometry, nmodes)
         else:
             analytic_modes = self._generate_circular_modes(geometry, nmodes)
 
@@ -714,6 +1035,8 @@ class PortEigenmodeSolver:
 
             if geometry.type == PortGeometryType.RECTANGULAR:
                 mode_cf = self._create_rectangular_mode_cf(amode, geometry)
+            elif geometry.type == PortGeometryType.COAXIAL:
+                mode_cf = self._create_coaxial_mode_cf(amode, geometry)
             else:
                 mode_cf = self._create_circular_mode_cf(amode, geometry)
 
@@ -726,6 +1049,12 @@ class PortEigenmodeSolver:
             )))
 
             if norm_sq < 1e-15:
+                pr.warning(
+                    f"Port {port} mode {mode_idx} ({amode.type}_{amode.indices[0]}{amode.indices[1]}) "
+                    f"has near-zero norm ({norm_sq:.2e}). "
+                    f"The mode field may be misaligned with the port boundary. "
+                    f"Check port geometry detection and coordinate system."
+                )
                 continue
 
             mode_gf.vec.data /= np.sqrt(norm_sq)
@@ -1137,7 +1466,6 @@ class PortEigenmodeSolver:
         cutoffs : List[float]
             Cutoff wavenumbers kc, sorted ascending
         """
-        from ngsolve import H1, grad
 
         port_region = self.mesh.Boundaries(port)
 
@@ -1156,7 +1484,7 @@ class PortEigenmodeSolver:
         apre = BilinearForm(
             (curl(u).Trace() * curl(v).Trace() + u.Trace() * v.Trace()) * ds(port)
         )
-        pre = Preconditioner(apre, type="direct", inverse="sparsecholesky")
+        pre = Preconditioner(apre, type="direct", inverse=_DIRECT_SOLVER)
 
         with TaskManager():
             a.Assemble()
@@ -1168,7 +1496,7 @@ class PortEigenmodeSolver:
             G, fes_h1 = fes_te.CreateGradient()
             GT = G.CreateTranspose()
             math1 = GT @ m.mat @ G
-            invh1 = math1.Inverse(inverse="sparsecholesky", freedofs=fes_h1.FreeDofs())
+            invh1 = math1.Inverse(inverse=_DIRECT_SOLVER, freedofs=fes_h1.FreeDofs())
             proj = IdentityMatrix(fes_te.ndof) - G @ invh1 @ GT @ m.mat
             projpre = proj @ pre.mat
 
@@ -1251,7 +1579,7 @@ class PortEigenmodeSolver:
         apre = BilinearForm(
             (InnerProduct(grad(u).Trace(), grad(v).Trace()) + u.Trace() * v.Trace()) * ds(port)
         )
-        pre = Preconditioner(apre, type="direct", inverse="sparsecholesky")
+        pre = Preconditioner(apre, type="direct", inverse=_DIRECT_SOLVER)
 
         with TaskManager():
             a.Assemble()
@@ -1333,7 +1661,6 @@ class PortEigenmodeSolver:
         mode : GridFunction or None
             TEM mode E-field pattern (HCurl), or None if no TEM mode exists.
         """
-        from ngsolve import H1, grad, dx as dx_vol
 
         port_region = self.mesh.Boundaries(port)
 
@@ -1358,7 +1685,7 @@ class PortEigenmodeSolver:
         apre = BilinearForm(
             (InnerProduct(grad(u_h1).Trace(), grad(v_h1).Trace()) + u_h1.Trace() * v_h1.Trace()) * ds(port)
         )
-        pre = Preconditioner(apre, type="direct", inverse="sparsecholesky")
+        pre = Preconditioner(apre, type="direct", inverse=_DIRECT_SOLVER)
 
         with TaskManager():
             a.Assemble()
@@ -1493,20 +1820,27 @@ class PortEigenmodeSolver:
 
         wc = kc * c0
         s = 1j * 2 * np.pi * freq
+        # Medium wave impedance eta = eta0 / sqrt(eps_r).  The FOM normalises
+        # its port modes to the wave impedance, so the Z->S reference must be
+        # the medium wave impedance (eta), NOT the coaxial line impedance --
+        # the latter is inconsistent with the FOM's Z normalisation.  eps_r of
+        # the medium filling the port is looked up per port (default vacuum),
+        # so dielectric-filled couplers are handled correctly.
+        eps_r = (getattr(self, 'port_media_eps', {}) or {}).get(port, 1.0)
+        eta = Z0 / np.sqrt(eps_r)
         if mode_type == 'TEM':
-            return complex(Z0)
+            return complex(eta)
         sqrt_term = np.sqrt(s**2 + wc**2)
         if mode_type == 'TE':
-            return complex(s * Z0 / sqrt_term)
+            return complex(s * eta / sqrt_term)
         else:
-            return complex(Z0 * sqrt_term / s)
+            return complex(eta * sqrt_term / s)
 
     def get_port_wave_impedance_matrix(self, freq: float) -> np.ndarray:
         impedances = []
         for port in sorted(self.port_modes.keys()):
             for mode in sorted(self.port_modes[port].keys()):
                 impedances.append(self.get_port_wave_impedance(port, mode, freq))
-        print(impedances)
         return np.diag(impedances)
 
     def get_propagation_constant(self, port: str, mode: int, freq: float) -> complex:

@@ -1276,6 +1276,77 @@ class ROMCollection(PlotMixin):
     def S_dict(self) -> Optional[Dict]:
         return self._mor_ref.S_dict if hasattr(self._mor_ref, 'S_dict') else None
 
+    def plot_s(self, params=None, plot_type='db', ax=None, label=None,
+               title=None, show=False, **kwargs):
+        """Overlay S-parameters for every domain on a single Axes."""
+        fig, ax = self._ensure_ax(ax)
+        per_domain = getattr(self._mor_ref, '_per_domain_results', None)
+        
+        if per_domain:
+            for domain, res in per_domain.items():
+                lbl = f"{label or ''}{domain}" if label else domain
+                # Wrap dict results in FOMResult to use its plot_s
+                # ROM per-domain results have same structure as FOM results
+                fom = FOMResult(
+                    domain=domain,
+                    frequencies=res['frequencies'],
+                    Z_matrix=res.get('Z'),
+                    S_matrix=res.get('S'),
+                    Z_dict=res.get('Z_dict'),
+                    S_dict=res.get('S_dict'),
+                    n_ports=len(res.get('ports', [])),
+                    ports=res.get('ports', []),
+                    n_modes_per_port=getattr(self._mor_ref, '_n_modes_per_port', 1),
+                    _solver_ref=self._fds_ref
+                )
+                fig, ax = fom.plot_s(params=params, plot_type=plot_type, ax=ax,
+                                     label=lbl, title=title, **kwargs)
+        else:
+            # Fallback for single-domain or global coupled results
+            fig, ax = self._mor_ref.plot_s(params=params, plot_type=plot_type, ax=ax,
+                                         label=label, title=title, show=False, **kwargs)
+        
+        if title:
+            ax.set_title(title)
+        if show:
+            import matplotlib.pyplot as plt
+            plt.show()
+        return fig, ax
+
+    def plot_z(self, params=None, plot_type='db', ax=None, label=None,
+               title=None, show=False, **kwargs):
+        """Overlay Z-parameters for every domain on a single Axes."""
+        fig, ax = self._ensure_ax(ax)
+        per_domain = getattr(self._mor_ref, '_per_domain_results', None)
+        
+        if per_domain:
+            for domain, res in per_domain.items():
+                lbl = f"{label or ''}{domain}" if label else domain
+                fom = FOMResult(
+                    domain=domain,
+                    frequencies=res['frequencies'],
+                    Z_matrix=res.get('Z'),
+                    S_matrix=res.get('S'),
+                    Z_dict=res.get('Z_dict'),
+                    S_dict=res.get('S_dict'),
+                    n_ports=len(res.get('ports', [])),
+                    ports=res.get('ports', []),
+                    n_modes_per_port=getattr(self._mor_ref, '_n_modes_per_port', 1),
+                    _solver_ref=self._fds_ref
+                )
+                fig, ax = fom.plot_z(params=params, plot_type=plot_type, ax=ax,
+                                     label=lbl, title=title, **kwargs)
+        else:
+            fig, ax = self._mor_ref.plot_z(params=params, plot_type=plot_type, ax=ax,
+                                         label=label, title=title, show=False, **kwargs)
+        
+        if title:
+            ax.set_title(title)
+        if show:
+            import matplotlib.pyplot as plt
+            plt.show()
+        return fig, ax
+
     # ------------------------------------------------------------------
     # Backward-compatible concat accessor
     # ------------------------------------------------------------------

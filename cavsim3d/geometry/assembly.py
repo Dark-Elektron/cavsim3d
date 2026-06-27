@@ -760,32 +760,33 @@ class Assembly(BaseGeometry):
             if entry.is_assembly and not entry.geometry._is_built:
                 entry.geometry.build()
         
-        # Collect transformed shapes
+        # Collect transformed shapes.
+        #
+        # Each component's solids keep the material names they were assigned
+        # (e.g. 'vacuum', 'ceramic'), prefixed with the component key.  The
+        # prefix keeps solids from different components distinct — so they are
+        # never merged — while preserving the per-solid materials, so a
+        # component's dielectric properties survive into the assembly mesh.
+        # Materials are therefore persistent across builds and only change
+        # when the component itself is re-assigned.
         shapes = []
         shape_keys = []  # Track which key each shape belongs to
-        
+
         for key in self._component_order:
             entry = self._components[key]
-            shape = entry.geometry.geo
-            transformed = self._apply_transform(shape, entry.transform)
-            shapes.append(transformed)
+            shape = self._apply_transform(entry.geometry.geo, entry.transform)
+            self._prefix_solid_materials(shape, key)
+            shapes.append(shape)
             shape_keys.append(key)
-        
-        # To prevent merging identical/co-planar solids, we assign unique 
-        # temporary materials and use OCCGeometry(shapes).shape which is
-        # often more robust than Glue() for preserving solid identities.
-        if len(shapes) > 1:
-            for i, shape in enumerate(shapes):
-                shape.mat(f"__temp_solid_{i}")
-        
+
         # Create multi-solid compound
         if len(shapes) == 1:
             self.geo = shapes[0]
         else:
-            # OCCGeometry(list) performs gluing but preserves solid domains better
-            occ_geo = OCCGeometry(shapes)
-            self.geo = occ_geo.shape
-        
+            # OCCGeometry(list) glues coincident faces but keeps the solid
+            # domains (and their distinct material names) separate.
+            self.geo = OCCGeometry(shapes).shape
+
         # Name solids and setup boundaries
         self._name_solids(shape_keys)
         self._setup_boundaries()
@@ -793,7 +794,7 @@ class Assembly(BaseGeometry):
         self._is_built = True
         self._record('build')
 
-    def generate_mesh(self, maxh=None, curve_order: int = 3) -> Mesh:
+    def generate_mesh(self, maxh=None, curve_order: int = 3, curvaturesafety: float = 2.0) -> Mesh:
         """
         Generate mesh with support for per-component refinement.
         """
@@ -812,8 +813,37 @@ class Assembly(BaseGeometry):
         
         # Call base generate_mesh which will create OCCGeometry(self.geo)
         # and respect the per-solid maxh settings.
-        return super().generate_mesh(maxh=maxh, curve_order=curve_order)
+        return super().generate_mesh(maxh=maxh, curve_order=curve_order, curvaturesafety=curvaturesafety)
     
+    def _prefix_solid_materials(self, shape, key: str) -> None:
+        """Prefix every solid's material name in *shape* with the component key.
+
+        Preserves each solid's existing material (e.g. ``vacuum``, ``ceramic``)
+        as ``"{key}/{material}"`` so component materials survive into the
+        assembly mesh while staying distinct per component.
+
+        Idempotent: a solid already carrying this component's prefix is left
+        untouched, so repeated :meth:`build` calls never stack prefixes.
+        """
+        prefix = f"{key}/"
+        try:
+            solids = list(shape.solids)
+        except AttributeError:
+            solids = []
+
+        if solids:
+            for solid in solids:
+                name = solid.name or 'solid'
+                if not name.startswith(prefix):
+                    solid.mat(prefix + name)
+        else:
+            try:
+                name = shape.name or 'solid'
+                if not name.startswith(prefix):
+                    shape.mat(prefix + name)
+            except Exception:
+                pass
+
     def _name_solids(self, shape_keys: List[str]) -> None:
         """Name each solid in the geometry based on component keys.
 
@@ -870,28 +900,36 @@ class Assembly(BaseGeometry):
 
         # domain_materials: component_key -> [mesh_material_name, ...]
         self._domain_materials: Dict[str, List[str]] = {key: [] for _, _, key in component_ranges}
+        known_keys = {key for _, _, key in component_ranges}
 
-        for idx, solid in enumerate(solids):
-            center = get_solid_center(solid)
-            best_key = None
-            best_dist = float('inf')
-            for lo, hi, key in component_ranges:
-                if lo - 0.01 <= center <= hi + 0.01:
-                    best_key = key
-                    break
-                mid = (lo + hi) / 2
-                dist = abs(center - mid)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_key = key
+        for solid in solids:
+            name = solid.name or ''
+            prefix = name.split('/', 1)[0] if '/' in name else ''
 
-            # Prefix original solid name with component key for uniqueness
-            orig_name = solid.name if solid.name else f"solid"
-            # Strip temporary assembly naming
-            if orig_name.startswith('__temp_solid_'):
-                orig_name = f"solid"
-            mat_name = f"{best_key}/{orig_name}"
-            solid.mat(mat_name)
+            if prefix in known_keys:
+                # Solid already carries its component prefix and material:
+                # keep it verbatim so materials are persistent across builds.
+                best_key = prefix
+                mat_name = name
+            else:
+                # Fallback: assign to the component whose axial range contains
+                # the solid centre, then prefix its (preserved) material name.
+                center = get_solid_center(solid)
+                best_key = None
+                best_dist = float('inf')
+                for lo, hi, key in component_ranges:
+                    if lo - 0.01 <= center <= hi + 0.01:
+                        best_key = key
+                        break
+                    mid = (lo + hi) / 2
+                    dist = abs(center - mid)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_key = key
+                orig_name = name if name else 'solid'
+                mat_name = f"{best_key}/{orig_name}"
+                solid.mat(mat_name)
+
             self._domain_materials[best_key].append(mat_name)
 
         # Print domain material mapping
@@ -1000,53 +1038,62 @@ class Assembly(BaseGeometry):
         axis_idx = self._AXIS_IDX[self.main_axis]
         tolerance = 1e-3 # 1mm grouping tolerance for ports
         
-        # Step 1: Name all faces 'wall' first
+        # Step 1: Classify faces, preserving component port / interface names
         self._name_all_faces_wall()
-        
-        # Step 2: Identify all port faces and their positions
+
+        # Step 2: Collect the real port faces inherited from the components.
+        # Each component already named its own ports ('port1', 'port2', the
+        # coaxial/TEM ports, ...).  We rebuild the assembly's ports from those
+        # actual port faces rather than guessing from face orientation, so
+        # material interfaces (vacuum↔ceramic, etc.) are never mistaken for
+        # ports and non-axial ports (coax) are not lost.
         port_faces = []
-        
+
         try:
             for face in self.geo.faces:
-                try:
+                if face.name and 'port' in face.name:
                     fbb = face.bounding_box
-                    face_extent = fbb[1][axis_idx] - fbb[0][axis_idx]
-                    
-                    if face_extent < tolerance:
-                        face_pos = (fbb[0][axis_idx] + fbb[1][axis_idx]) / 2
-                        port_faces.append((face_pos, face))
-                except Exception:
-                    pass
+                    center = tuple((fbb[0][j] + fbb[1][j]) / 2 for j in range(3))
+                    port_faces.append((center, face))
         except Exception as e:
             print(f"Warning: Error identifying faces: {e}")
             self.bc = 'default'
             self._bc_explicitly_set = True
             return
-        
+
         if not port_faces:
             print("Warning: No port faces found")
             self.bc = 'default'
             self._bc_explicitly_set = True
             return
-        
-        # Step 3: Group faces by position
-        port_faces.sort(key=lambda x: x[0])
-        
+
+        # Step 3: Group faces by full 3D position.
+        # Only faces that coincide in *all three* coordinates belong to the
+        # same port.  Grouping by the main-axis coordinate alone would merge
+        # distinct ports that share a plane — e.g. two coaxial couplers at the
+        # same Z but different X/Y — into one spurious interface port.  A true
+        # interface (component junction) coincides fully in 3D, so it still
+        # groups correctly.
+        port_faces.sort(key=lambda x: x[0][axis_idx])
+
         port_groups = []
-        for pos, face in port_faces:
+        for center, face in port_faces:
             matched = False
             for group in port_groups:
-                if abs(group['position'] - pos) < tolerance:
+                gc = group['center']
+                dist = sum((gc[j] - center[j]) ** 2 for j in range(3)) ** 0.5
+                if dist < tolerance:
                     group['faces'].append(face)
                     matched = True
                     break
-            
+
             if not matched:
                 port_groups.append({
-                    'position': pos,
-                    'faces': [face]
+                    'center': center,
+                    'position': center[axis_idx],
+                    'faces': [face],
                 })
-        
+
         # Step 4: Sort groups by position and assign sequential port names
         port_groups.sort(key=lambda g: g['position'])
         
@@ -1088,18 +1135,47 @@ class Assembly(BaseGeometry):
         self._bc_explicitly_set = True
     
     def _name_all_faces_wall(self) -> None:
-        """Name every face 'wall' as default."""
+        """Assign default/interface names to faces the components didn't name.
+
+        Component faces inherit their names through the OCC combine, so real
+        ports (``port*``) and genuine material interfaces (``interface``,
+        e.g. vacuum↔ceramic) are already labelled.  Those are preserved here;
+        only faces that arrive unnamed are classified as ``'default'`` (when
+        external, i.e. on a single solid) or ``'interface'`` (when shared
+        between solids).
+
+        Preserving the component port names is essential: it lets
+        :meth:`_setup_boundaries` rebuild the assembly ports from the actual
+        ports of each component instead of guessing from face orientation —
+        which previously turned every axis-perpendicular material interface
+        into a spurious port.
+        """
         if self.geo is None:
             return
-        
+
+        def _preserve(name: str) -> bool:
+            return bool(name) and ('port' in name or name == 'interface')
+
         try:
-            for solid in self.geo.solids:
+            solids = list(self.geo.solids)
+            face_counts = {}
+            for solid in solids:
                 for face in solid.faces:
-                    face.name = 'default'
+                    face_counts[face] = face_counts.get(face, 0) + 1
+
+            for solid in solids:
+                for face in solid.faces:
+                    if _preserve(face.name):
+                        continue
+                    if face_counts.get(face, 1) == 1:
+                        face.name = 'default'
+                    else:
+                        face.name = 'interface'
         except AttributeError:
             try:
                 for face in self.geo.faces:
-                    face.name = 'default'
+                    if not _preserve(face.name):
+                        face.name = 'default'
             except AttributeError:
                 pass
     
@@ -1157,10 +1233,20 @@ class Assembly(BaseGeometry):
         return connected
     
     def _apply_transform(self, shape, transform: Transform3D):
-        """Apply transformation to OCC shape."""
+        """Apply transformation to OCC shape.
+
+        Always returns an independent copy of *shape* (even for the identity
+        transform) so that assembly-time material/port renaming never mutates
+        the component's own geometry.  This is essential when the same
+        geometry object is added more than once (identical components): each
+        instance must get its own copy, otherwise prefixes stack
+        (``geo2/geo1/...``) and port names collide.
+        """
         if transform.is_identity():
-            return shape
-        
+            # Move by zero returns a fresh shape that shares no naming state
+            # with the original.
+            return shape.Move((0.0, 0.0, 0.0))
+
         result = shape
         
         rx, ry, rz = transform.rotation

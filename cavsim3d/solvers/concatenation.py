@@ -13,6 +13,7 @@ Key concepts:
 """
 
 from typing import List, Tuple, Dict, Optional, Callable, Union, Any, Literal
+import time
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
@@ -235,29 +236,35 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return None
 
     def _validate_mode_counts(self) -> None:
-        """Validate consistent mode counts across all structures."""
+        """Record a representative modes-per-port scalar.
+
+        Per-port mode counts may now differ between ports and structures
+        (e.g. a TEM port with one mode next to a TE port with several), so
+        this no longer requires a uniform count.  ``_n_modes_per_port`` is
+        kept only as a back-compat scalar (the most common per-port count);
+        the authoritative per-port layout lives in ``port_to_mode_range`` and
+        each structure's ``port_mode_pairs``.
+        """
         if not self.structures:
-            self._n_modes_per_port = 1  # Default for empty structures
+            self._n_modes_per_port = 1
             return
 
-        # Get reference mode count from first structure
-        ref_n_modes = self.structures[0].n_port_modes
-        
-        # Handle None or invalid values
-        if ref_n_modes is None or ref_n_modes < 1:
-            ref_n_modes = 1
+        from collections import Counter
+        counts = Counter()
+        for struct in self.structures:
+            for _port, modes in self._struct_modes_by_port(struct).items():
+                counts[len(modes)] += 1
+        # Most common per-port mode count (fallback to 1).
+        self._n_modes_per_port = counts.most_common(1)[0][0] if counts else 1
 
-        for i, struct in enumerate(self.structures):
-            n_modes = struct.n_port_modes
-            if n_modes is None:
-                n_modes = 1
-            if n_modes != ref_n_modes:
-                raise ValueError(
-                    f"Inconsistent mode counts: structure 0 has {ref_n_modes} modes/port, "
-                    f"but structure {i} has {n_modes} modes/port"
-                )
-
-        self._n_modes_per_port = ref_n_modes
+    @staticmethod
+    def _struct_modes_by_port(struct) -> Dict[str, list]:
+        """{port: [mode_idx, ...]} for a structure, honouring per-port counts."""
+        from collections import defaultdict
+        by_port = defaultdict(list)
+        for port, mode_idx in struct.port_mode_pairs:
+            by_port[port].append(mode_idx)
+        return by_port
 
     @staticmethod
     def _default_impedance(port: str, mode: int, freq: float) -> complex:
@@ -275,14 +282,20 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self.port_to_mode_range: Dict[Tuple[int, str], Tuple[int, int]] = {}
 
         for struct_idx, struct in enumerate(self.structures):
-            n_modes = struct.n_port_modes
-            for port in struct.ports:
+            # Group the structure's (port, mode) pairs by port, preserving order,
+            # so each port may carry a different number of modes.
+            from collections import defaultdict
+            modes_by_port: "dict[str, list]" = defaultdict(list)
+            for port, mode_idx in struct.port_mode_pairs:
+                modes_by_port[port].append(mode_idx)
+
+            for port, mode_list in modes_by_port.items():
                 start_idx = offset
-                for mode_idx in range(n_modes):
+                for mode_idx in mode_list:
                     self.port_mode_map[(struct_idx, port, mode_idx)] = offset
                     self._global_to_local[offset] = (struct_idx, port, mode_idx)
                     offset += 1
-                self.port_to_mode_range[(struct_idx, port)] = (start_idx, n_modes)
+                self.port_to_mode_range[(struct_idx, port)] = (start_idx, len(mode_list))
 
         self.n_total_port_modes = offset
 
@@ -443,7 +456,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if validate:
                 self._validate_connection((sA_idx, pA), (sB_idx, pB))
 
-            for mode_idx in range(self._n_modes_per_port):
+            # Couple all modes of the connected (interface) ports; both sides
+            # carry the same number of modes (checked in _validate_connection).
+            n_modes_conn = self.port_to_mode_range[(sA_idx, pA)][1]
+            for mode_idx in range(n_modes_conn):
                 internal_set.add(self.port_mode_map[(sA_idx, pA, mode_idx)])
                 internal_set.add(self.port_mode_map[(sB_idx, pB, mode_idx)])
 
@@ -459,14 +475,33 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             P[new_pos, old_pos] = 1.0
         self._permutation = P
 
-        # Build external port naming
+        # Build external port naming.  Number the distinct external ports
+        # sequentially (in their global order) so each external (struct, port)
+        # gets one port number regardless of how many modes it has.
         self._external_port_mode_names = []
         self._external_port_mode_map = {}
-        for i, global_idx in enumerate(self._external_port_modes):
+        _port_number: Dict[Tuple[int, str], int] = {}
+        _next_num = 1
+        for global_idx in self._external_port_modes:
             struct_idx, orig_port, mode_idx = self._global_to_local[global_idx]
-            new_name = f"port{i // self._n_modes_per_port + 1}({mode_idx + 1})"
+            key = (struct_idx, orig_port)
+            if key not in _port_number:
+                _port_number[key] = _next_num
+                _next_num += 1
+            new_name = f"port{_port_number[key]}({mode_idx + 1})"
             self._external_port_mode_names.append((orig_port, mode_idx))
             self._external_port_mode_map[new_name] = (struct_idx, orig_port, mode_idx)
+        self._n_external_ports = len(_port_number)
+
+        # Ordered (port_key, mode_idx) for the coupled Z/S matrix columns, used
+        # by the base _build_dicts to label parameters correctly when ports
+        # have different numbers of modes.  The composite key keeps each
+        # external (structure, port) distinct so it maps to one port number.
+        self._port_mode_order = [
+            (f"s{si}:{op}", mi)
+            for gidx in self._external_port_modes
+            for (si, op, mi) in (self._global_to_local[gidx],)
+        ]
 
         if validate:
             self._validate_connections()
@@ -498,9 +533,17 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 raise ValueError(f"Connection {j} connects port '{pA}' to itself")
 
     def _build_incidence_matrix(self) -> np.ndarray:
-        """Build incidence matrix F for Kirchhoff coupling."""
+        """Build incidence matrix F for Kirchhoff coupling.
+
+        One constraint column per connected (interface) port-mode; the number
+        of modes can differ from connection to connection.
+        """
         n_int = self._n_internal
-        n_mode_connections = self.n_connections * self._n_modes_per_port
+        # Total mode-connections = sum of each connection's mode count.
+        n_mode_connections = sum(
+            self.port_to_mode_range[(sA_idx, pA)][1]
+            for (sA_idx, pA), (_sB_idx, _pB) in self.connections
+        )
 
         F = np.zeros((n_int, n_mode_connections))
         int_pos = {g: i for i, g in enumerate(self._internal_port_modes)}
@@ -509,7 +552,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         for ((sA_idx, pA), (sB_idx, pB)), (sgnA, sgnB) in zip(
             self.connections, self._connection_signs
         ):
-            for mode_idx in range(self._n_modes_per_port):
+            n_modes_conn = self.port_to_mode_range[(sA_idx, pA)][1]
+            for mode_idx in range(n_modes_conn):
                 gA = self.port_mode_map[(sA_idx, pA, mode_idx)]
                 gB = self.port_mode_map[(sB_idx, pB, mode_idx)]
                 F[int_pos[gA], col] = sgnA
@@ -536,6 +580,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """
         if self.connections is None:
             raise ValueError("Must call define_connections() first")
+
+        _t_couple = time.time()
 
         # Block-diagonal assembly of uncoupled structures
         A_blocks = [np.asarray(s.Ard) for s in self.structures]
@@ -578,6 +624,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         pr.debug(f"  External port-modes: {self._n_external}")
         pr.debug(f"  Internal port-modes (eliminated): {self._n_internal}")
         pr.debug(f"  Connections: {self.n_connections}")
+
+        from cavsim3d.utils.timing import get_timing_registry
+        get_timing_registry().record(
+            "couple", time.time() - _t_couple, category="CONCAT",
+            full_dofs=int(A_blk.shape[0]), reduced_dofs=int(self.A_coupled.shape[0]),
+            n_connections=self.n_connections, n_external=self._n_external,
+        )
 
         if hasattr(self, '_mor_ref') and self._mor_ref:
             self._mor_ref._A_r_global = self.A_coupled
@@ -652,7 +705,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
     @property
     def n_external_ports(self) -> int:
-        return self._n_external // self._n_modes_per_port
+        # Distinct external ports (counted once regardless of their mode count).
+        n = getattr(self, '_n_external_ports', None)
+        if n is not None:
+            return n
+        return self._n_external // max(self._n_modes_per_port, 1)
 
     @property
     def n_modes_per_port(self) -> int:
@@ -950,7 +1007,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             self._Z_matrix = np.zeros((nsamples, n_ext, n_ext), dtype=complex)
             omegas = 2 * np.pi * self.frequencies
 
-            import time
             t0 = time.time()
 
             if solver_type == 'direct':
@@ -958,7 +1014,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             else:
                 x_all = self._solve_iterative(omegas, n_ext, r)
 
-            pr.done(f"  Concat solve complete: {time.time() - t0:.3f}s ({nsamples} frequencies)")
+            _t_concat_solve = time.time() - t0
+            pr.done(f"  Concat solve complete: {_t_concat_solve:.3f}s ({nsamples} frequencies)")
+
+            from cavsim3d.utils.timing import get_timing_registry
+            get_timing_registry().record(
+                "concat solve", _t_concat_solve, category="CONCAT",
+                n_samples=nsamples, reduced_dofs=int(r), n_external=n_ext,
+            )
 
             self._snapshots = np.array(x_all)
 

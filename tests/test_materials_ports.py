@@ -52,17 +52,21 @@ class TestMaterialAssignment:
     def test_set_materials_pec_removes_solids(self):
         """PEC solids should be removed from the geometry."""
         geo = OCCImporter(str(STEP_FILE), unit='mm', maxh=0.05)
-        n_before = len(list(geo.geo.solids))
 
+        names_before = [s.name for s in geo.geo.solids]
         geo.set_materials({
             'hook_top': 'PEC',
             'hook_bottom': 'PEC',
             'ceramic': {'eps_r': 12.0},
         })
 
-        n_after = len(list(geo.geo.solids))
-        assert n_after < n_before, \
-            f"PEC subtraction should remove solids: {n_before} -> {n_after}"
+        names_after = [s.name for s in geo.geo.solids]
+        # PEC solids should be gone
+        assert len(names_after) < len(names_before), \
+            f"Expected fewer solids after PEC removal: {names_before} → {names_after}"
+        for pec_name in ('hook_top', 'hook_bottom'):
+            assert pec_name not in names_after, \
+                f"PEC solid '{pec_name}' should have been removed"
 
     @skip_no_file
     def test_set_materials_eps_r_alias(self):
@@ -85,6 +89,28 @@ class TestMaterialAssignment:
 
         mat = geo.get_material('hook_top')
         assert mat.get('PEC', False) is True
+
+    @skip_no_file
+    def test_pec_interface_retains_default_boundary(self):
+        """Faces shared with PEC solids must retain 'default' name, not 'interface'."""
+        geo = OCCImporter(str(STEP_FILE), unit='mm', maxh=0.05)
+        geo.set_materials({
+            'hook_top': 'PEC',
+            'hook_bottom': 'PEC',
+            'ceramic': {'eps_r': 12.0},
+        })
+        
+        solids = list(geo.geo.solids)
+        face_counts = {}
+        for solid in solids:
+            for face in solid.faces:
+                face_counts[face] = face_counts.get(face, 0) + 1
+        
+        for solid in solids:
+            for face in solid.faces:
+                if face_counts[face] == 1:
+                    assert face.name != 'interface', \
+                        f"External face on solid '{solid.name}' was incorrectly named 'interface'"
 
 
 # ============================================================

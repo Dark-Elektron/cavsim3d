@@ -177,7 +177,11 @@ class PlotMixin:
 
         ax.set_xlabel(xlabel or 'Frequency (GHz)')
         ax.set_ylabel(ylabel or f'|S| ({y_label_type})')
-        ax.set_title(title or f'{base_label} S-Parameters')
+        if title:
+            ax.set_title(title)
+        else:
+            param_str = ', '.join(f'S{p}' for p in params)
+            ax.set_title(f'{base_label} {param_str}')
         
         if legend:
             ax.legend()
@@ -269,7 +273,11 @@ class PlotMixin:
 
         ax.set_xlabel(xlabel or 'Frequency (GHz)')
         ax.set_ylabel(ylabel or f'|Z| ({y_label_type})')
-        ax.set_title(title or f'{base_label} Z-Parameters')
+        if title:
+            ax.set_title(title)
+        else:
+            param_str = ', '.join(f'Z{p}' for p in params)
+            ax.set_title(f'{base_label} {param_str}')
         
         if legend:
             ax.legend()

@@ -20,7 +20,8 @@ from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape, topods
 from OCC.Core.BRep import BRep_Builder
 from OCC.Core.BRepTools import breptools
 from OCC.Core.TopExp import TopExp_Explorer
-from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_FACE
+from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_FACE, TopAbs_IN, TopAbs_ON
+from OCC.Core.BRepClass3d import BRepClass3d_SolidClassifier
 from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.GProp import GProp_GProps
@@ -198,17 +199,29 @@ def faces_coincide(
 
 # ==================== COLOR UTILITIES ====================
 
-def generate_distinct_colors(n: int) -> List[Tuple[float, float, float]]:
-    """Generate n visually distinct colors."""
-    colors = []
-    for i in range(n):
-        hue = i / n
-        # Convert HSV to RGB (saturation=0.7, value=0.9)
-        h = hue * 6
-        c = 0.9 * 0.7
-        x = c * (1 - abs(h % 2 - 1))
-        m = 0.9 - c
+def generate_distinct_colors(n: int, seed: int = 7) -> List[Tuple[float, float, float]]:
+    """Generate *n* visually distinct colors with a fixed *seed* for reproducibility.
 
+    Red hues (0.95–1.0 and 0.0–0.05) are excluded so that red is
+    reserved for port faces.
+    """
+    rng = np.random.RandomState(seed)
+    # Golden-ratio spacing in hue gives good perceptual separation
+    golden = (1 + np.sqrt(5)) / 2
+    # Generate more candidates than needed, then filter out red-ish hues
+    candidates = [(i / golden) % 1.0 for i in range(n + 10)]
+    hues = [h for h in candidates if 0.05 < h < 0.95][:n]
+    rng.shuffle(hues)
+
+    colors = []
+    for hue in hues:
+        sat = 0.55 + rng.random() * 0.25   # 0.55 – 0.80
+        val = 0.70 + rng.random() * 0.20   # 0.70 – 0.90
+        # HSV → RGB
+        h = hue * 6.0
+        c = val * sat
+        x = c * (1.0 - abs(h % 2 - 1.0))
+        m = val - c
         if h < 1:
             r, g, b = c, x, 0
         elif h < 2:
@@ -221,7 +234,6 @@ def generate_distinct_colors(n: int) -> List[Tuple[float, float, float]]:
             r, g, b = x, 0, c
         else:
             r, g, b = c, 0, x
-
         colors.append((r + m, g + m, b + m))
     return colors
 
@@ -403,6 +415,8 @@ class OCCImporter(BaseGeometry):
         self._port_shapes: List[Tuple[TopoDS_Shape, str]] = []  # (shape, name) for port shells
         self._matched_ports: List[dict] = []          # Matched port results
         self._geometry_faces: List[dict] = []         # All face properties for inspection
+        self._internal_ports: List[str] = []          # Port names created at splitting planes
+        self._domain_materials: Dict[str, List[str]] = {}  # subdomain -> [mesh materials] (after split)
 
         # Detect file format
         import os
@@ -607,16 +621,22 @@ class OCCImporter(BaseGeometry):
                 print()
 
             # Store original solid info for split mapping
+            # Keep OCC solid references + volumes for point-in-solid
+            # containment testing in _map_sub_solid_to_parent.
             self._original_solids_info = []
             for i, solid in enumerate(solids):
                 centroid = get_solid_centroid(solid)
                 bbox_min, bbox_max = get_shape_bounding_box(solid)
                 label = self._solid_labels[i] if i < len(self._solid_labels) else f"solid_{i+1}"
+                props = GProp_GProps()
+                brepgprop.VolumeProperties(solid, props)
                 self._original_solids_info.append({
                     'label': label,
                     'centroid': centroid,
                     'bbox_min': bbox_min,
                     'bbox_max': bbox_max,
+                    'occ_solid': solid,
+                    'volume': abs(props.Mass()),
                 })
 
             # Extract port entities and shell shapes
@@ -881,13 +901,21 @@ class OCCImporter(BaseGeometry):
 
         return self.add_splitting_plane(corner1, corner2, normal_axis='z')
 
-    def split(self) -> 'OCCImporter':
+    def split(self, port_axis: Optional[str] = None) -> 'OCCImporter':
         """
         Split geometry using added planes, then auto-rebuild.
 
         After splitting, :meth:`build` is called automatically so that
         solids, ports, and wall boundaries are named deterministically.
         Call :meth:`generate_mesh` next.
+
+        Parameters
+        ----------
+        port_axis : {'X', 'Y', 'Z'}, optional
+            Axis for position-based external ports (when the geometry has no
+            STEP-defined ports).  Defaults to the longest bounding-box
+            dimension, so you usually don't need ``name_solids`` just to set
+            the port axis.
 
         Returns
         -------
@@ -903,24 +931,44 @@ class OCCImporter(BaseGeometry):
         self.geo = None
         self._bc_explicitly_set = False
 
-        splitter = BOPAlgo_Splitter()
-        splitter.SetNonDestructive(False)
-        splitter.AddArgument(self._occ_shape)
+        # Split each solid INDEPENDENTLY by the cutting planes.
+        #
+        # Running BOPAlgo_Splitter on the whole compound at once imprints
+        # every solid against every other one.  CST-style exports use a
+        # background ``vacuum`` solid that encloses (overlaps) the embedded
+        # PEC and dielectric solids, so a single compound-level split
+        # imprints all those overlaps and explodes the solid/face count
+        # (e.g. 9 solids / 206 faces -> 16 solids / 466 faces for one
+        # planar cut).  The resulting sliver-ridden geometry stalls the
+        # mesher.  Feeding one solid at a time to the splitter confines
+        # each boolean to a single argument plus the planes, so only the
+        # genuine planar cuts are made and overlaps are left for Glue()
+        # to resolve at build time — exactly as in the un-split path.
+        builder = BRep_Builder()
+        result = TopoDS_Compound()
+        builder.MakeCompound(result)
+        for solid in get_solids(self._occ_shape):
+            splitter = BOPAlgo_Splitter()
+            splitter.SetNonDestructive(False)
+            splitter.AddArgument(solid)
+            for plane in self._planes:
+                splitter.AddTool(plane.Shape())
+            splitter.Perform()
+            for sub_solid in get_solids(splitter.Shape()):
+                builder.Add(result, sub_solid)
 
-        for plane in self._planes:
-            splitter.AddTool(plane.Shape())
-
-        splitter.Perform()
-        self._occ_shape = splitter.Shape()
+        self._occ_shape = result
         self._is_split = True
-
+        print('Done splitting')
         # Record in history
         self._record('split')
 
         # Auto-rebuild: build() will name solids, ports, and walls
-        self.build()
+        self.build(port_axis=port_axis)
 
+        print('Done rebuilding')
         return self
+
 
     @staticmethod
     def _pyocc_to_netgen(occ_shape: TopoDS_Shape) -> OCCGeometry:
@@ -949,7 +997,7 @@ class OCCImporter(BaseGeometry):
             if os.path.exists(tmp):
                 os.remove(tmp)
 
-    def build(self) -> None:
+    def build(self, port_axis: Optional[str] = None) -> None:
         """
         Build NGSolve geometry from OCC shape.
 
@@ -965,12 +1013,42 @@ class OCCImporter(BaseGeometry):
           ``cell_1``, ``cell_2``, etc.
         - Port faces are named ``port1``, ``port2``, etc.
         - ``self.bc`` is set to ``'default'``
+
+        Parameters
+        ----------
+        port_axis : {'X', 'Y', 'Z'}, optional
+            Axis along which to place position-based ports (used only when the
+            geometry has no STEP-defined ports).  Defaults to the geometry's
+            longest bounding-box dimension (auto-detected), so an X-aligned
+            structure gets X-facing ports without extra configuration.
         """
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
 
+        # Resolve / remember the port axis (auto-detect longest extent).
+        self._port_axis = (port_axis or getattr(self, '_port_axis', None)
+                           or self._detect_main_axis())
+
         # Transfer from PythonOCC to netgen.occ via BREP
         occ_geo = self._pyocc_to_netgen(self._occ_shape)
+
+        # --- Name solids BEFORE Glue ---
+        # Before Glue there is a 1:1 mapping between the netgen solids
+        # and the original STEP solids (BREP transfer preserves topology
+        # and ordering).  Assigning .mat() names here means Glue() will
+        # propagate each name to every fragment derived from that solid.
+        # This correctly handles the case where a base solid (e.g. vacuum)
+        # is split into multiple disconnected pieces by the Glue
+        # fragmentation — all pieces keep the parent's material name.
+        pre_named = False
+        if hasattr(occ_geo, 'solids'):
+            solids = list(occ_geo.solids)
+            if (self._original_solids_info
+                    and len(solids) == len(self._original_solids_info)):
+                for solid, info in zip(solids, self._original_solids_info):
+                    solid.name = _simplify_label(info['label'])
+                    solid.mat(_simplify_label(info['label']))
+                pre_named = True
 
         if self._is_split and hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
             # Glue solids together for mesh connectivity
@@ -986,14 +1064,14 @@ class OCCImporter(BaseGeometry):
         # Step 1: Name ALL faces 'default' (PEC)
         self._name_all_faces_wall()
 
-        # Step 2: Name solids (using STEP labels or cell_N)
+        # Step 2: Name solids (always auto-name to correct Glue scrambled names)
         self._auto_name_solids()
 
         # Step 3: Detect and assign ports
         if self._port_shapes:
             self._auto_detect_ports()
         else:
-            self._auto_assign_ports_by_position()
+            self._auto_assign_ports_by_position(port_axis=self._port_axis)
 
         # Step 4: Set boundary condition
         self.bc = 'default'
@@ -1004,6 +1082,15 @@ class OCCImporter(BaseGeometry):
             pec_labels = [k for k, v in self._materials.items() if v == 'PEC']
             if pec_labels:
                 self._subtract_pec_solids(pec_labels)
+
+        # Step 6: Promote splitting-plane cuts to internal ports.
+        # A planar cut produces an internal cross-section shared by the two
+        # sub-domains.  That cross-section is an *internal port* used for
+        # domain-decomposition / S-parameter work, not a passive material
+        # interface, so give it a real port name.
+        if self._is_split and self._plane_corners:
+            self._name_split_plane_ports()
+            self._assign_split_subdomains()
 
     def finalize(self, maxh: Optional[float] = None) -> 'OCCImporter':
         """
@@ -1151,6 +1238,7 @@ class OCCImporter(BaseGeometry):
 
         # Show the renderer
         rnd.Display()
+        self._fix_renderer_grid_euler(rnd)
 
         # return rnd
 
@@ -1191,6 +1279,7 @@ class OCCImporter(BaseGeometry):
             print(f"Plane {i+1}: z={c1[2]:.4f}")
 
         rnd.Display()
+        self._fix_renderer_grid_euler(rnd)
         return rnd
 
     def show_split_preview(self, **kwargs):
@@ -1289,6 +1378,19 @@ class OCCImporter(BaseGeometry):
             raise RuntimeError("No OCC shape loaded.")
         return get_shape_bounding_box(self._occ_shape)
 
+    def _detect_main_axis(self) -> str:
+        """Return the longest bounding-box dimension as 'X', 'Y' or 'Z'.
+
+        Used as the default port axis for position-based port assignment so
+        that e.g. an X-aligned structure gets X-facing ports automatically.
+        """
+        try:
+            pmin, pmax = get_shape_bounding_box(self._occ_shape)
+            extents = [pmax[i] - pmin[i] for i in range(3)]
+            return ['X', 'Y', 'Z'][int(np.argmax(extents))]
+        except Exception:
+            return 'Z'
+
     def get_info(self) -> Dict:
         """Get geometry information."""
         if self._occ_shape is None:
@@ -1381,6 +1483,10 @@ class OCCImporter(BaseGeometry):
         if self.geo is None:
             self.build()
 
+        # Step 0: Clear any colours left by a previous build()/split() pass so
+        # that overwritten port/interface faces don't keep a stale red colour.
+        self._reset_face_colors()
+
         # Step 1: Name all faces 'wall' first
         self._name_all_faces_wall()
 
@@ -1403,12 +1509,79 @@ class OCCImporter(BaseGeometry):
         self.bc = 'default'
         self._bc_explicitly_set = True
 
+        # Step 5: For split geometries, re-establish the sub-domain materials
+        # (subdomainN/...) that the auto-naming above overwrote, so the mesh
+        # materials stay in sync with _domain_materials and the structure is
+        # still recognised as compound.  Port assignment by position already
+        # gives the shared split face an internal port, so no separate
+        # split-plane port pass is needed here.
+        if self._is_split and self._plane_corners:
+            # The shared split face is named like any other position port; the
+            # solver detects it as internal via mesh adjacency, so drop any
+            # stale named split-plane ports recorded by a prior split() pass.
+            self._internal_ports = []
+            self._assign_split_subdomains()
+
         self._record('name_solids', sort_axis=sort_axis, port_axis=port_axis,
                      port_prefix=port_prefix, print_info=print_info)
 
         return self
 
     # ==================== INTERNAL NAMING HELPERS ====================
+
+    def _is_solid_pec(self, solid) -> bool:
+        """Check if a solid is configured as PEC."""
+        if not hasattr(self, '_materials') or not self._materials:
+            return False
+        solid_name = getattr(solid, 'name', None)
+        if not solid_name:
+            return False
+        for k, v in self._materials.items():
+            if v == 'PEC' and self._resolve_material_key(k, solid_name):
+                return True
+        return False
+
+    @staticmethod
+    def _fix_renderer_grid_euler(renderer) -> None:
+        """Work around an OCC JupyterRenderer / pythreejs version mismatch.
+
+        The renderer's grid keeps a lowercase Euler rotation order (``'xyz'``)
+        which newer pythreejs rejects during widget sync, raising a
+        ``TraitError`` and blocking the preview from rendering.  Coerce any
+        such order to upper-case (``'XYZ'``).  Best-effort and never raises.
+        """
+        for attr in ('horizontal_grid', 'vertical_grid'):
+            grid = getattr(renderer, attr, None)
+            g = getattr(grid, 'grid', None)
+            if g is None:
+                continue
+            try:
+                rot = list(g.rotation)
+                if len(rot) >= 4 and isinstance(rot[3], str) and rot[3].islower():
+                    rot[3] = rot[3].upper()
+                    g.rotation = tuple(rot)
+            except Exception:
+                pass
+
+    def _reset_face_colors(self, color: Tuple[float, float, float] = (0.7, 0.7, 0.7)) -> None:
+        """Reset every face colour to a neutral default.
+
+        Used before re-naming so that port/interface faces coloured red by a
+        previous build()/split() pass don't keep a stale colour after they are
+        renamed to ordinary ('default') boundaries.
+        """
+        if self.geo is None:
+            return
+        try:
+            for solid in self.geo.solids:
+                for face in solid.faces:
+                    face.col = color
+        except AttributeError:
+            try:
+                for face in self.geo.faces:
+                    face.col = color
+            except AttributeError:
+                pass
 
     def _name_all_faces_wall(self) -> None:
         """
@@ -1422,9 +1595,30 @@ class OCCImporter(BaseGeometry):
 
         try:
             solids = list(self.geo.solids)
+            face_solids = {}
             for solid in solids:
                 for face in solid.faces:
-                    face.name = 'default'
+                    if face not in face_solids:
+                        face_solids[face] = []
+                    face_solids[face].append(solid)
+
+            for solid in solids:
+                for face in solid.faces:
+                    sharing = face_solids.get(face, [solid])
+                    if len(sharing) == 1:
+                        face.name = 'default'
+                    else:
+                        # If any sharing solid is PEC, it is a PEC boundary
+                        if any(self._is_solid_pec(s) for s in sharing):
+                            face.name = 'default'
+                        else:
+                            # print('it is heresdfsdf', face.name)
+                            if face.name:
+                                if 'port' not in face.name:
+                                    face.name = 'interface'
+                            else:
+                                face.name = 'interface'
+
         except AttributeError:
             # Single OCC shape without .solids
             try:
@@ -1433,32 +1627,105 @@ class OCCImporter(BaseGeometry):
             except AttributeError:
                 pass
 
-    def _map_sub_solid_to_parent(self, sub_solid_centroid: Tuple[float, float, float]) -> str:
-        """Map a sub-solid's centroid to its parent label using bounding box containment.
+    def _find_point_inside_solid(self, solid) -> Tuple[float, float, float]:
+        """Find a point that is geometrically inside a Netgen/OCC solid."""
+        import tempfile
+        from OCC.Core.TopoDS import TopoDS_Shape
+        from OCC.Core.BRep import BRep_Builder
+        from OCC.Core.BRepTools import breptools
+        
+        fd, path = tempfile.mkstemp(suffix='.brep')
+        try:
+            os.close(fd)
+            solid.WriteBrep(path)
+            pyocc_solid = TopoDS_Shape()
+            builder = BRep_Builder()
+            breptools.Read(pyocc_solid, path, builder)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+                
+        # Try center first
+        c = solid.center
+        pt = gp_Pnt(c.x, c.y, c.z)
+        classifier = BRepClass3d_SolidClassifier(pyocc_solid, pt, 1e-6)
+        if classifier.State() == TopAbs_IN:
+            return (c.x, c.y, c.z)
+            
+        # Sample points in bounding box
+        import random
+        pmin, pmax = solid.bounding_box
+        random.seed(42)
+        for _ in range(100):
+            x = pmin[0] + random.random() * (pmax[0] - pmin[0])
+            y = pmin[1] + random.random() * (pmax[1] - pmin[1])
+            z = pmin[2] + random.random() * (pmax[2] - pmin[2])
+            pt = gp_Pnt(x, y, z)
+            classifier = BRepClass3d_SolidClassifier(pyocc_solid, pt, 1e-6)
+            if classifier.State() == TopAbs_IN:
+                return (x, y, z)
+        return (c.x, c.y, c.z)
+
+    def _map_sub_solid_to_parent(self, sub_solid) -> str:
+        """Map a sub-solid to its parent label using point-in-solid testing.
+
+        Uses OCC's ``BRepClass3d_SolidClassifier`` to check which original
+        solid(s) contain a point inside the sub-solid. When a point lies
+        inside multiple parents (e.g. a vacuum base solid and a ceramic
+        insert that occupies a sub-region), the **smallest** parent by
+        volume wins. This mirrors CST's priority model where specific
+        materials override the background vacuum.
+
+        Falls back to bounding-box + nearest-centroid matching when
+        point-in-solid testing is unavailable (e.g. after a split that
+        replaced the OCC shape).
 
         Parameters
         ----------
-        sub_solid_centroid : tuple
-            (x, y, z) centroid of the sub-solid after splitting.
+        sub_solid : TopoDS_Shape
+            The sub-solid after Glue.
 
         Returns
         -------
         str
             The label of the parent solid that contains this sub-solid.
         """
-        cx, cy, cz = sub_solid_centroid
+        cx, cy, cz = self._find_point_inside_solid(sub_solid)
+        point = gp_Pnt(cx, cy, cz)
+
+        # --- Primary: point-in-solid containment on original OCC shapes ---
+        containing = []
+        for info in self._original_solids_info:
+            occ_solid = info.get('occ_solid')
+            if occ_solid is None:
+                continue
+            try:
+                classifier = BRepClass3d_SolidClassifier(
+                    occ_solid, point, 1e-6
+                )
+                state = classifier.State()
+                if state in (TopAbs_IN, TopAbs_ON):
+                    containing.append(info)
+            except Exception:
+                continue
+
+        if containing:
+            # Prefer the smallest containing solid (most specific material).
+            # E.g. ceramic (small) wins over vacuum (large) in the overlap.
+            containing.sort(key=lambda info: info['volume'])
+            return containing[0]['label']
+
+        # --- Fallback: bounding-box containment + nearest centroid ---
         best_label = None
         best_dist = float('inf')
 
         for info in self._original_solids_info:
             bmin = info['bbox_min']
             bmax = info['bbox_max']
-            # Check containment with small tolerance
             tol = 1e-8
             if (bmin[0] - tol <= cx <= bmax[0] + tol and
                 bmin[1] - tol <= cy <= bmax[1] + tol and
                 bmin[2] - tol <= cz <= bmax[2] + tol):
-                # Inside this parent's bounding box — pick closest centroid
                 pc = info['centroid']
                 dist = ((cx - pc[0])**2 + (cy - pc[1])**2 + (cz - pc[2])**2)
                 if dist < best_dist:
@@ -1466,7 +1733,6 @@ class OCCImporter(BaseGeometry):
                     best_label = info['label']
 
         if best_label is None:
-            # Fallback: find nearest parent centroid
             for info in self._original_solids_info:
                 pc = info['centroid']
                 dist = ((cx - pc[0])**2 + (cy - pc[1])**2 + (cz - pc[2])**2)
@@ -1506,10 +1772,7 @@ class OCCImporter(BaseGeometry):
             if n_solids <= 1:
                 solid = solids[0] if n_solids == 1 else self.geo
                 if has_parent_info:
-                    bb = solid.bounding_box
-                    pmin, pmax = bb
-                    centroid = ((pmin[0]+pmax[0])/2, (pmin[1]+pmax[1])/2, (pmin[2]+pmax[2])/2)
-                    mat_name = _simplify_label(self._map_sub_solid_to_parent(centroid))
+                    mat_name = _simplify_label(self._map_sub_solid_to_parent(solid))
                 elif naming_func is not None:
                     mat_name = naming_func(0, solid)
                 else:
@@ -1528,25 +1791,16 @@ class OCCImporter(BaseGeometry):
 
             # Determine material names
             if has_parent_info:
-                raw_names = []
-                label_counts = {}
-                for orig_idx, solid in solids_sorted:
-                    bb = solid.bounding_box
-                    centroid = tuple((bb[0][j]+bb[1][j])/2 for j in range(3))
-                    parent = self._map_sub_solid_to_parent(centroid)
-                    short = _simplify_label(parent)
-                    label_counts[short] = label_counts.get(short, 0) + 1
-                    raw_names.append(short)
-
-                seen = {}
-                needs_suffix = {k for k, v in label_counts.items() if v > 1}
                 mat_names = []
-                for name in raw_names:
-                    if name in needs_suffix:
-                        seen[name] = seen.get(name, 0) + 1
-                        mat_names.append(f"{name}_{seen[name]}")
-                    else:
-                        mat_names.append(name)
+                for orig_idx, solid in solids_sorted:
+                    parent = self._map_sub_solid_to_parent(solid)
+                    short = _simplify_label(parent)
+                    mat_names.append(short)
+                # NOTE: Multiple solids may share the same name when a
+                # parent solid is split into fragments.  This is correct —
+                # NGSolve's mesh.Materials('name') returns the union of
+                # all elements with that name, and Draw(mesh) will assign
+                # the same color to all elements sharing a material name.
             else:
                 mat_names = [naming_func(i, s) if naming_func else f"cell_{i+1}"
                              for i, (_, s) in enumerate(solids_sorted)]
@@ -1555,7 +1809,8 @@ class OCCImporter(BaseGeometry):
                 solid.mat(mat_names[new_idx])
 
             if print_info:
-                print(f"Named {n_solids} solids:")
+                unique_names = sorted(set(mat_names))
+                print(f"Named {n_solids} solids ({len(unique_names)} unique materials):")
                 for i, name in enumerate(mat_names):
                     print(f"  solid {i}: '{name}'")
 
@@ -1715,7 +1970,7 @@ class OCCImporter(BaseGeometry):
                     try:
                         bb = face.bounding_box
                         fc = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
-                        netgen_faces.append({"face": face, "center": fc})
+                        netgen_faces.append({"face": face, "center": fc, "solid": solid})
                     except Exception:
                         continue
         except AttributeError:
@@ -1723,7 +1978,7 @@ class OCCImporter(BaseGeometry):
                 try:
                     bb = face.bounding_box
                     fc = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
-                    netgen_faces.append({"face": face, "center": fc})
+                    netgen_faces.append({"face": face, "center": fc, "solid": None})
                 except Exception:
                     continue
 
@@ -1731,13 +1986,23 @@ class OCCImporter(BaseGeometry):
             pc = port["center"]
             best_face = None
             best_dist = float('inf')
+            best_is_pec = True
 
             for nf in netgen_faces:
                 fc = nf["center"]
                 dist = sum((pc[j] - fc[j])**2 for j in range(3))
-                if dist < best_dist:
+                solid = nf.get("solid")
+                is_pec = self._is_solid_pec(solid) if solid is not None else False
+
+                if dist < 1e-5:
+                    if is_pec < best_is_pec or dist < best_dist - 1e-10:
+                        best_dist = dist
+                        best_face = nf["face"]
+                        best_is_pec = is_pec
+                elif dist < best_dist:
                     best_dist = dist
                     best_face = nf["face"]
+                    best_is_pec = is_pec
 
             if best_face is not None:
                 best_face.name = port["name"]
@@ -1799,6 +2064,165 @@ class OCCImporter(BaseGeometry):
             self.geo.faces.Max(ax).name = f'{port_prefix}2'
             self.geo.faces.Max(ax).col = (1, 0, 0)
             print(f"Ports: {port_prefix}1, {port_prefix}2 (by position)")
+
+    def _name_split_plane_ports(self, tol: float = 1e-4) -> 'OCCImporter':
+        """Rename faces lying on splitting planes to internal port names.
+
+        Each splitting plane added before :meth:`split` produces a planar
+        internal cross-section where the geometry was cut.  By default the
+        boundary-naming pass labels such shared faces ``'interface'``.  This
+        method finds those faces — flat faces sitting on a splitting plane —
+        and renames them to a fresh ``portN`` (continuing the existing port
+        numbering), recording the names in :attr:`internal_ports`.
+
+        Only faces that are (a) perpendicular to the plane normal, (b) at the
+        plane's coordinate, and (c) currently ``'interface'`` are converted,
+        so genuine material interfaces (e.g. vacuum↔ceramic) elsewhere keep
+        their name.
+
+        Parameters
+        ----------
+        tol : float
+            Position tolerance (metres) for matching a face to a plane.
+        """
+        if self.geo is None or not self._plane_corners:
+            return self
+
+        axis_index = {'x': 0, 'y': 1, 'z': 2}
+
+        # Gather all faces (per-solid; a shared face appears on both solids).
+        try:
+            faces = [f for solid in self.geo.solids for f in solid.faces]
+        except AttributeError:
+            try:
+                faces = list(self.geo.faces)
+            except AttributeError:
+                return self
+
+        # Continue numbering after the highest existing port.
+        max_port = 0
+        for f in faces:
+            if f.name and f.name.startswith('port'):
+                suffix = f.name[4:]
+                if suffix.isdigit():
+                    max_port = max(max_port, int(suffix))
+
+        self._internal_ports = []
+        next_port = max_port + 1
+
+        for corner1, _corner2, normal_axis in self._plane_corners:
+            ax = axis_index.get(str(normal_axis).lower(), 2)
+            plane_pos = corner1[ax]
+            port_name = f'port{next_port}'
+            n_faces = 0
+            for f in faces:
+                if f.name != 'interface':
+                    continue
+                bb = f.bounding_box
+                extent = bb[1][ax] - bb[0][ax]
+                center = (bb[0][ax] + bb[1][ax]) / 2
+                if extent < tol and abs(center - plane_pos) < tol:
+                    f.name = port_name
+                    f.col = (1, 0, 0)
+                    n_faces += 1
+
+            if n_faces:
+                self._internal_ports.append(port_name)
+                next_port += 1
+                print(f"Internal port '{port_name}' created at "
+                      f"{str(normal_axis).upper()}={plane_pos:.6f} "
+                      f"({n_faces} face(s))")
+
+        # Mesh is now stale relative to the renamed boundaries.
+        self.mesh = None
+        self._ports = None
+        self._boundaries = None
+        return self
+
+    def _assign_split_subdomains(self) -> 'OCCImporter':
+        """Label the regions created by splitting as distinct sub-domains.
+
+        A splitting plane partitions the geometry into independent regions
+        connected only through the internal (split-plane) ports.  This method
+        groups the resulting solids by which side of each plane they lie on
+        and prefixes each solid's material with a region tag
+        (``subdomain1/...``, ``subdomain2/...``), ordered along the primary
+        split axis.  The mapping is recorded in :attr:`_domain_materials` so a
+        downstream solver can treat the split geometry as a compound, multi
+        sub-domain structure (per-domain FOM + concatenation across the
+        shared interface ports).
+
+        The material *physics* is unchanged — ``get_material`` strips the
+        region prefix — so dielectric properties are preserved.
+        """
+        if self.geo is None or not self._plane_corners:
+            return self
+
+        axis_index = {'x': 0, 'y': 1, 'z': 2}
+        try:
+            solids = list(self.geo.solids)
+        except AttributeError:
+            return self
+        if not solids:
+            return self
+
+        # Side signature of each solid: which side of every plane it lies on.
+        centers = []
+        sigs = []
+        for solid in solids:
+            bb = solid.bounding_box
+            c = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
+            centers.append(c)
+            sig = tuple(
+                1 if c[axis_index[str(na).lower()]] >= corner1[axis_index[str(na).lower()]]
+                else 0
+                for corner1, _c2, na in self._plane_corners
+            )
+            sigs.append(sig)
+
+        # Only one region -> nothing meaningful to decompose.
+        if len(set(sigs)) < 2:
+            self._domain_materials = {}
+            return self
+
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for i, sig in enumerate(sigs):
+            groups[sig].append(i)
+
+        primary_axis = axis_index[str(self._plane_corners[0][2]).lower()]
+
+        def _mean_pos(sig):
+            idxs = groups[sig]
+            return sum(centers[i][primary_axis] for i in idxs) / len(idxs)
+
+        ordered_sigs = sorted(groups.keys(), key=_mean_pos)
+        region_of_sig = {sig: f"subdomain{n + 1}" for n, sig in enumerate(ordered_sigs)}
+
+        self._domain_materials = {region_of_sig[sig]: [] for sig in ordered_sigs}
+        for i, solid in enumerate(solids):
+            region = region_of_sig[sigs[i]]
+            base_mat = solid.name or 'solid'
+            # Strip a stale region prefix so repeated builds don't stack tags.
+            if '/' in base_mat and base_mat.split('/', 1)[0].startswith('subdomain'):
+                base_mat = base_mat.split('/', 1)[1]
+            new_mat = f"{region}/{base_mat}"
+            solid.mat(new_mat)
+            if new_mat not in self._domain_materials[region]:
+                self._domain_materials[region].append(new_mat)
+
+        print(f"Split sub-domains: {list(self._domain_materials.keys())}")
+        return self
+
+    @property
+    def internal_ports(self) -> List[str]:
+        """Port names created at splitting planes (internal cross-sections)."""
+        return list(self._internal_ports)
+
+    @property
+    def domains(self) -> List[str]:
+        """Sub-domain names created by splitting (empty if not decomposed)."""
+        return list(self._domain_materials.keys())
 
     # ==================== PORT INSPECTION & MANUAL ASSIGNMENT ====================
 
@@ -1955,6 +2379,7 @@ class OCCImporter(BaseGeometry):
             # Non-port planar faces shown as-is (part of geometry)
 
         rnd.Display()
+        self._fix_renderer_grid_euler(rnd)
 
     def _show_planar_faces_occ(self, port_indices, highlight_ports, **kwargs):
         """Standalone OCC viewer for planar face inspection."""
@@ -2166,10 +2591,21 @@ class OCCImporter(BaseGeometry):
 
         This lets material keys reference a solid by its simplified mesh name,
         the full STEP path, or any segment of it (e.g. ``hook_top|lh4``).
+
+        For solids that were suffixed after PEC subtraction (e.g.
+        ``solid1_1``, ``solid1_2``), the base name without suffix
+        (``solid1``) is also included so that material config keys
+        written against the original name still match.
         """
         names = {solid_name}
+        # Strip a split sub-domain prefix (``subdomain1/vacuum`` -> ``vacuum``)
+        # so material lookups still resolve after a split decomposition.
+        if '/' in solid_name and solid_name.split('/', 1)[0].startswith('subdomain'):
+            solid_name = solid_name.split('/', 1)[1]
+            names.add(solid_name)
         # Strip auto-generated suffix (_1, _2) to find the base
         base = solid_name.rsplit('_', 1)[0] if '_' in solid_name else solid_name
+        names.add(base)
         # Look up the original STEP label for this solid
         for info in self._original_solids_info:
             full_label = info['label']
@@ -2201,12 +2637,20 @@ class OCCImporter(BaseGeometry):
         return mat_key in candidates
 
     def _subtract_pec_solids(self, pec_labels: List[str]) -> None:
-        """Remove PEC solids from the geometry and name exposed faces as BC.
+        """Remove PEC solids from the geometry.
 
-        PEC solids are identified by matching *pec_labels* against the
-        netgen solid names.  The remaining (non-PEC) solids are re-glued
-        and the faces that were shared with PEC solids automatically
-        become external boundary faces named ``self.bc`` (the Dirichlet BC).
+        PEC solids are dropped; the remaining non-PEC solids (dielectrics,
+        vacuum fillers) are re-Glued.  Faces that were shared with PEC
+        solids automatically become external boundaries named ``self.bc``.
+
+        After re-Glue, solids are re-named by mapping each resulting
+        fragment back to its parent solid via centroid proximity.  This
+        ensures that a solid split into disjointed pieces (e.g. vacuum
+        surrounding a PEC hook) retains its material identity on every
+        fragment.
+
+        Any port face that existed only on a PEC solid is reassigned to
+        the closest face on the remaining non-PEC geometry.
         """
         if self.geo is None:
             return
@@ -2218,6 +2662,7 @@ class OCCImporter(BaseGeometry):
             return
 
         keep = []
+        pec_solids = []
         removed_names = []
         for solid in all_solids:
             is_pec = False
@@ -2227,6 +2672,7 @@ class OCCImporter(BaseGeometry):
                     break
             if is_pec:
                 removed_names.append(solid.name)
+                pec_solids.append(solid)
             else:
                 keep.append(solid)
 
@@ -2239,28 +2685,179 @@ class OCCImporter(BaseGeometry):
 
         print(f"Subtracting {len(removed_names)} PEC solid(s): {removed_names}")
 
-        # Rebuild geometry from non-PEC solids
+        # Record pre-Glue solid identities for post-Glue re-naming.
+        # Each kept solid's name and centroid are saved so that fragments
+        # produced by Glue() can be mapped back to their parent.
+        pre_glue_info = []
+        for solid in keep:
+            bb = solid.bounding_box
+            centroid = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
+            pre_glue_info.append({
+                'name': solid.name,
+                'centroid': centroid,
+            })
+
+        # Collect port faces that live on PEC solids
+        pec_port_info = []  # [(port_name, center_arr), ...]
+        pec_faces = set()
+        for solid in pec_solids:
+            for face in solid.faces:
+                pec_faces.add(face)
+                if face.name and 'port' in face.name.lower():
+                    c = face.center
+                    pec_port_info.append((
+                        face.name,
+                        np.array([c.x, c.y, c.z]),
+                    ))
+
+        # Any face shared with a PEC solid should become a PEC boundary ('default')
+        for solid in keep:
+            for face in solid.faces:
+                if face in pec_faces:
+                    face.name = 'default'
+
+        # Rebuild geometry from non-PEC solids only
         if len(keep) == 1:
             self.geo = keep[0]
         else:
             self.geo = Glue(keep)
 
-        # Name all faces as PEC boundary (exposed interfaces get this automatically)
+        # --- Re-name solids after Glue ---
+        # Glue() can split a parent solid into disconnected fragments.
+        # Map each resulting solid back to its nearest parent by centroid
+        # distance and assign .mat(parent_name).  Multiple fragments
+        # sharing the same parent get the SAME name — NGSolve handles
+        # this correctly and Draw(mesh) will color them identically.
+        try:
+            result_solids = list(self.geo.solids)
+        except AttributeError:
+            result_solids = []
+
+        if result_solids:
+            for solid in result_solids:
+                bb = solid.bounding_box
+                centroid = tuple((bb[0][j] + bb[1][j]) / 2 for j in range(3))
+                best_idx = 0
+                best_dist = float('inf')
+                for idx, info in enumerate(pre_glue_info):
+                    pc = info['centroid']
+                    dist = sum((centroid[j] - pc[j]) ** 2 for j in range(3))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
+                solid.mat(pre_glue_info[best_idx]['name'])
+
+        # For ports that were on PEC solids, find the closest face on
+        # the remaining geometry and reassign the port name there.
+        if pec_port_info:
+            try:
+                remaining_solids = list(self.geo.solids)
+            except AttributeError:
+                remaining_solids = []
+
+            for port_name, port_center in pec_port_info:
+                best_face = None
+                best_dist = float('inf')
+                for solid in remaining_solids:
+                    for face in solid.faces:
+                        fc = face.center
+                        fc_arr = np.array([fc.x, fc.y, fc.z])
+                        dist = np.linalg.norm(fc_arr - port_center)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_face = face
+                if best_face is not None:
+                    best_face.name = port_name
+                    best_face.col = (1, 0, 0)
+                    print(f"  Reassigned {port_name} to nearest non-PEC face "
+                          f"(dist={best_dist*1000:.1f} mm)")
+
+        # Name all unnamed/default faces as PEC boundary
         bc_name = self.bc or 'default'
         try:
-            for solid in self.geo.solids:
+            solids = list(self.geo.solids)
+            face_counts = {}
+            for solid in solids:
                 for face in solid.faces:
-                    if face.name == 'default' or face.name == '':
-                        face.name = bc_name
+                    face_counts[face] = face_counts.get(face, 0) + 1
+
+            for solid in solids:
+                for face in solid.faces:
+                    if face.name == 'default' or face.name == '' or face.name is None:
+                        if face_counts.get(face, 1) == 1:
+                            face.name = bc_name
+                        else:
+                            # print('it is here', face.name)
+                            if face.name:
+                                if 'port' not in face.name:
+                                    face.name = 'interface'
+                            else:
+                                face.name = 'interface'
         except AttributeError:
             for face in self.geo.faces:
-                if face.name == 'default' or face.name == '':
+                if face.name == 'default' or face.name == '' or face.name is None:
                     face.name = bc_name
+
+        # Assign deterministic colors by material group
+        self._apply_material_colors()
 
         # Invalidate mesh — must re-mesh after PEC subtraction
         self.mesh = None
         self._ports = None
         self._boundaries = None
+
+
+    def _apply_material_colors(self) -> None:
+        """Assign deterministic colors grouped by material type.
+
+        Solids with the same material get the same color.
+        Port faces stay red.
+
+        Vacuum solids are colored first, then dielectric solids, so that
+        dielectric colors win on shared faces created by ``Glue``.
+        """
+        if self.geo is None:
+            return
+
+        try:
+            solids = list(self.geo.solids)
+        except AttributeError:
+            return
+
+        if not solids:
+            return
+
+        # Build material key for each solid
+        # After PEC subtraction only non-PEC solids remain, so keys are
+        # either 'vacuum' or 'eps_r=<value>'.
+        mat_keys = []
+        for solid in solids:
+            mat = self.get_material(solid.name)
+            if mat.get('eps_r', 1.0) != 1.0:
+                mat_keys.append(f"eps_r={mat['eps_r']}")
+            else:
+                mat_keys.append('vacuum')
+
+        # Unique materials → deterministic color
+        unique_mats = sorted(set(mat_keys))
+        colors = generate_distinct_colors(len(unique_mats))
+        mat_color = {m: colors[i] for i, m in enumerate(unique_mats)}
+
+        # Color vacuum solids first, then dielectric, so dielectric
+        # colors take priority on shared (Glue) faces.
+        pairs = list(zip(solids, mat_keys))
+        pairs.sort(key=lambda p: 0 if p[1] == 'vacuum' else 1)
+
+        bc_name = self.bc or 'default'
+        for solid, mk in pairs:
+            col = mat_color[mk]
+            for face in solid.faces:
+                if face.name and 'port' in face.name.lower():
+                    continue  # keep red
+                elif face.name == bc_name:
+                    face.col = (0.5, 0.5, 0.5)  # color PEC faces grey
+                else:
+                    face.col = col
 
     def get_material(self, domain_name: str) -> dict:
         """

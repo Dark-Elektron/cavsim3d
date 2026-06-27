@@ -16,8 +16,8 @@ class ColorFormatter(logging.Formatter):
 
     COLORS = {
         logging.ERROR: '\x1b[31m',     # Red
-        logging.WARNING: '\x1b[33m',   # Yellow
-        MILESTONE: '\x1b[35m',         # Magenta for milestones
+        logging.WARNING: '\x1b[38;5;214m',  # Gold/Amber
+        MILESTONE: '\x1b[32m',         # Green for milestones
         logging.INFO: '\x1b[34m',      # Blue (Information/Basics)
         'RUNNING': '\x1b[36m',         # Cyan
         'DONE': '\x1b[32m',            # Green
@@ -37,13 +37,13 @@ class ColorFormatter(logging.Formatter):
         msg = super().format(record)
 
         if record.levelno == logging.ERROR:
-            return f"{color}ERROR:: {msg}{self.COLORS['RESET']}"
+            return f"{color}\u274c ERROR:: {msg}{self.COLORS['RESET']}"
         elif record.levelno == logging.WARNING:
-            return f"{color}WARNING:: {msg}{self.COLORS['RESET']}"
+            return f"{color}\u26a0\ufe0f  WARNING:: {msg}{self.COLORS['RESET']}"
         elif hasattr(record, 'sublevel'):
              return f"{color}{msg}{self.COLORS['RESET']}"
         elif record.levelno == MILESTONE:
-            return f"{color}{msg}{self.COLORS['RESET']}"
+            return f"{color}\u2705 {msg}{self.COLORS['RESET']}"
         elif record.levelno == logging.INFO:
             return f"{color}INFO:: {msg}{self.COLORS['RESET']}"
 
@@ -136,6 +136,24 @@ def stop_file_log(handler: logging.FileHandler):
     logger.removeHandler(handler)
     handler.flush()
     handler.close()
+
+
+def close_all_file_logs():
+    """Detach and close every active file handler.
+
+    Useful on Windows before deleting a project directory: an open log file
+    handle keeps the file locked, which makes ``shutil.rmtree`` fail.
+    """
+    for handler in list(_active_file_handlers):
+        try:
+            logger.removeHandler(handler)
+            handler.flush()
+            handler.close()
+        except Exception:
+            pass
+        finally:
+            if handler in _active_file_handlers:
+                _active_file_handlers.remove(handler)
 
 
 def read_log(log_path: Path) -> str:

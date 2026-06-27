@@ -63,7 +63,28 @@ class EMProject:
         # Overwrite protection: if overwrite=True, delete existing project folder
         if overwrite and self.project_path.exists():
             pr.info(f"Project '{self.name}' already exists and overwrite=True. Deleting old project...")
-            shutil.rmtree(self.project_path)
+            self._force_rmtree(self.project_path)
+            if self.project_path.exists():
+                raise RuntimeError(
+                    f"Could not fully delete existing project at {self.project_path} "
+                    f"(a file may be locked by another program or a still-open file "
+                    f"handle). Close anything using it and retry, or delete it manually."
+                )
+
+        # A fresh project must also start from a clean in-memory state: the
+        # solution cache and timing registry are module-level singletons that
+        # otherwise survive across project re-creations in the same kernel and
+        # can return stale results.  NOTE: this does NOT reload edited library
+        # code — in Jupyter, changes to cavsim3d source only take effect after a
+        # kernel restart or `%autoreload 2`.
+        if overwrite:
+            try:
+                from cavsim3d.geometry.component_registry import get_global_cache
+                get_global_cache().clear()
+            except Exception:
+                pass
+            from cavsim3d.utils.timing import get_timing_registry
+            get_timing_registry().clear()
             
         self._geometry = geometry
         self.bc = bc
@@ -445,6 +466,84 @@ class EMProject:
             "bc": self.bc,
         }
         ProjectManager.save_json(self.project_path, metadata, filename="project.json")
+
+        # 5. Save timing analysis
+        try:
+            from cavsim3d.utils.timing import get_timing_registry
+            reg = get_timing_registry()
+            if reg.entries:
+                reg.save(self.project_path / "timing.json")
+        except Exception:
+            pass
+
+    @property
+    def timing(self):
+        """Shared timing registry (FOM / ROM / concat records)."""
+        from cavsim3d.utils.timing import get_timing_registry
+        return get_timing_registry()
+
+    def timing_summary(self, save: bool = True) -> str:
+        """Return (and print) a comparison table of FOM / ROM / concat timing.
+
+        Includes per-stage wall-clock times, the achieved model-order
+        reduction (full -> reduced DOFs, % compression) and the per-sample
+        speed-up of the ROM / concatenated solves over the full-order solve.
+
+        Parameters
+        ----------
+        save : bool
+            Also write ``timing.json`` to the project directory.
+        """
+        from cavsim3d.utils.timing import get_timing_registry
+        reg = get_timing_registry()
+        text = reg.summary(title=f"TIMING SUMMARY - {self.name}")
+        print(text)
+        if save and reg.entries:
+            try:
+                reg.save(self.project_path / "timing.json")
+            except Exception:
+                pass
+        return text
+
+    @staticmethod
+    def _force_rmtree(path: Path) -> None:
+        """Robustly delete a directory tree, even on Windows.
+
+        Closes any open log-file handles first (an open handle locks the file
+        and makes deletion fail on Windows), clears read-only bits via an
+        error handler, and retries briefly to ride out transient locks.
+        """
+        import time
+        import stat
+
+        # Release our own file handles (e.g. solve.log) so they aren't locked.
+        try:
+            pr.close_all_file_logs()
+        except Exception:
+            pass
+
+        def _on_error(func, p, exc_info):
+            # Clear read-only attribute and retry the operation once.
+            try:
+                os.chmod(p, stat.S_IWRITE)
+                func(p)
+            except Exception:
+                pass
+
+        for attempt in range(5):
+            if not path.exists():
+                return
+            try:
+                # onexc (3.12+) / onerror (older) — pass whichever is supported.
+                try:
+                    shutil.rmtree(path, onexc=lambda f, p, e: _on_error(f, p, e))
+                except TypeError:
+                    shutil.rmtree(path, onerror=lambda f, p, e: _on_error(f, p, e))
+            except Exception:
+                pass
+            if not path.exists():
+                return
+            time.sleep(0.3)
 
     @classmethod
     def load(cls, name: str, base_dir: Optional[Union[str, Path]] = None, overwrite: bool = False) -> EMProject:

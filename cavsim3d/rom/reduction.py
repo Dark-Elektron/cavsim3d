@@ -108,12 +108,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             self._all_ports = solver.all_ports
             self._external_ports = solver.external_ports
             self.domain_port_map = {'global': solver.external_ports}
+            self._internal_ports = []
+            self._port_domain_adjacency = {}
         else:
             self.domains = solver.domains
             self.n_domains = solver.n_domains
             self._all_ports = solver.all_ports
             self._external_ports = solver.external_ports
             self.domain_port_map = solver.domain_port_map
+            self._internal_ports = list(getattr(solver, 'internal_ports', []))
+            self._port_domain_adjacency = dict(
+                getattr(solver, '_port_domain_adjacency', {}) or {})
         self._n_ports_total = len(self._all_ports)
         self._n_ports_external = len(self._external_ports)
         self.port_modes = solver.port_modes
@@ -563,6 +568,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             # Validate snapshots
             self._validate_snapshots_for_reduction()
 
+            _t_reduce_start = time.time()
             total_full = 0
             total_reduced = 0
 
@@ -658,8 +664,16 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 total_full += n
                 total_reduced += r
 
-            pr.done(f"Reduction complete: {total_full} → {total_reduced} DOFs ({100*(1-total_reduced/total_full):.1f}% compression)")
+            _t_reduce = time.time() - _t_reduce_start
+            pr.done(f"Reduction complete: {total_full} -> {total_reduced} DOFs ({100*(1-total_reduced/total_full):.1f}% compression)")
             pr.info("=" * 60)
+
+            from cavsim3d.utils.timing import get_timing_registry
+            get_timing_registry().record(
+                "reduction", _t_reduce, category="ROM",
+                full_dofs=int(total_full), reduced_dofs=int(total_reduced),
+                n_domains=self.n_domains,
+            )
 
             self._is_reduced = True
 
@@ -750,19 +764,48 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             # --- Rerun protection ---
             has_results = (self._Z_matrix is not None)
 
+            # For multi-domain, also check per-domain results
+            if not has_results and self.n_domains > 1:
+                per_domain = getattr(self, '_per_domain_results', None)
+                has_results = per_domain is not None and len(per_domain) > 0
+
             # Check disk if in-memory is missing
             if not has_results and not rerun and self.solver and getattr(self.solver, '_project_path', None):
                 sub_folder = "fom/rom" if self.n_domains == 1 else "foms/roms"
                 rom_dir = Path(self.solver._project_path) / "fds" / sub_folder
-                z_path = rom_dir / "z" / "z.h5"
+
+                if self.n_domains == 1:
+                    z_path = rom_dir / "z" / f"z_{self.domains[0]}.h5"
+                else:
+                    # Multi-domain: check for per-domain files
+                    first_domain = self.domains[0].replace('/', '_')
+                    z_path = rom_dir / "z" / f"z_{first_domain}.h5"
+
                 if z_path.exists():
                     try:
-                        with h5py.File(z_path, "r") as f:
-                            self._Z_matrix = H5Serializer.load_dataset(f["data"])
-                        s_path = rom_dir / "s" / "s.h5"
-                        if s_path.exists():
-                            with h5py.File(s_path, "r") as f:
-                                self._S_matrix = H5Serializer.load_dataset(f["data"])
+                        if self.n_domains == 1:
+                            with h5py.File(z_path, "r") as f:
+                                self._Z_matrix = H5Serializer.load_dataset(f["data"])
+                            s_path = rom_dir / "s" / f"s_{self.domains[0]}.h5"
+                            if s_path.exists():
+                                with h5py.File(s_path, "r") as f:
+                                    self._S_matrix = H5Serializer.load_dataset(f["data"])
+                        else:
+                            # Load per-domain results
+                            self._per_domain_results = {}
+                            for domain in self.domains:
+                                safe_name = domain.replace('/', '_')
+                                zp = rom_dir / "z" / f"z_{safe_name}.h5"
+                                sp_path = rom_dir / "s" / f"s_{safe_name}.h5"
+                                res = {}
+                                if zp.exists():
+                                    with h5py.File(zp, "r") as f:
+                                        res['Z'] = H5Serializer.load_dataset(f["data"])
+                                if sp_path.exists():
+                                    with h5py.File(sp_path, "r") as f:
+                                        res['S'] = H5Serializer.load_dataset(f["data"])
+                                if res:
+                                    self._per_domain_results[domain] = res
 
                         # Load frequencies
                         snap_path = rom_dir / "snapshots" / "snapshots.h5"
@@ -792,10 +835,19 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
             self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
 
+            _t_rom_solve = time.time()
             if self.n_domains == 1:
-                return self._solve_single_domain(solver_type=solver_type)
+                result = self._solve_single_domain(solver_type=solver_type)
             else:
-                return self._solve_multi_domain(solver_type=solver_type)
+                result = self._solve_multi_domain(solver_type=solver_type)
+
+            from cavsim3d.utils.timing import get_timing_registry
+            get_timing_registry().record(
+                "ROM solve", time.time() - _t_rom_solve, category="ROM",
+                n_samples=nsamples,
+                reduced_dofs=int(sum(self._r.values())) if getattr(self, '_r', None) else None,
+            )
+            return result
         finally:
             if _file_handler:
                 pr.stop_file_log(_file_handler)
@@ -810,6 +862,15 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
     def _build_results_dict(self) -> Dict:
         """Build results dictionary for reduced solver."""
+        if self.n_domains > 1:
+            per_domain = getattr(self, '_per_domain_results', None)
+            return {
+                'frequencies': self.frequencies,
+                'per_domain': per_domain,
+                'Z_dict': self.Z_dict,
+                'S_dict': self.S_dict,
+                'x_r': getattr(self, '_x_r_snapshots', None),
+            }
         return {
             'frequencies': self.frequencies,
             'Z': self._Z_matrix,
@@ -863,29 +924,28 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                              H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
         # 2. Save S and Z results
-        # Global (concatenated) results
-        if self._Z_matrix is not None:
-             z_file = "z.h5"
-             if self.n_domains == 1: z_file = f"z_{self.domains[0]}.h5"
-             with h5py.File(z_path_dir / z_file, "a") as f:
-                H5Serializer.save_dataset(f, "data", self._Z_matrix)
-        if self._S_matrix is not None:
-             s_file = "s.h5"
-             if self.n_domains == 1: s_file = f"s_{self.domains[0]}.h5"
-             with h5py.File(s_path_dir / s_file, "a") as f:
-                H5Serializer.save_dataset(f, "data", self._S_matrix)
-
-        # Per-domain results (for multi-domain)
-        per_domain = getattr(self, '_per_domain_results', None)
-        if per_domain:
-            for domain, res in per_domain.items():
-                safe_name = domain.replace('/', '_')
-                if res.get('Z') is not None:
-                    with h5py.File(z_path_dir / f"z_{safe_name}.h5", "a") as f:
-                        H5Serializer.save_dataset(f, "data", res['Z'])
-                if res.get('S') is not None:
-                    with h5py.File(s_path_dir / f"s_{safe_name}.h5", "a") as f:
-                        H5Serializer.save_dataset(f, "data", res['S'])
+        if self.n_domains == 1:
+            # Single-domain: save as z_<domain>.h5 / s_<domain>.h5
+            if self._Z_matrix is not None:
+                z_file = f"z_{self.domains[0]}.h5"
+                with h5py.File(z_path_dir / z_file, "a") as f:
+                    H5Serializer.save_dataset(f, "data", self._Z_matrix)
+            if self._S_matrix is not None:
+                s_file = f"s_{self.domains[0]}.h5"
+                with h5py.File(s_path_dir / s_file, "a") as f:
+                    H5Serializer.save_dataset(f, "data", self._S_matrix)
+        else:
+            # Multi-domain: only per-domain files (no global z.h5/s.h5)
+            per_domain = getattr(self, '_per_domain_results', None)
+            if per_domain:
+                for domain, res in per_domain.items():
+                    safe_name = domain.replace('/', '_')
+                    if res.get('Z') is not None:
+                        with h5py.File(z_path_dir / f"z_{safe_name}.h5", "a") as f:
+                            H5Serializer.save_dataset(f, "data", res['Z'])
+                    if res.get('S') is not None:
+                        with h5py.File(s_path_dir / f"s_{safe_name}.h5", "a") as f:
+                            H5Serializer.save_dataset(f, "data", res['S'])
 
         # 3. Save snapshots and frequencies
         snap_file = "snapshots.h5"
@@ -1256,7 +1316,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         if others is None and self.n_domains > 1:
             structures = self.get_all_structures()
-            connections = self._build_sequential_connections()
+            connections = self._build_connections()
         elif others is not None:
             all_roms = [self] + list(others)
             structures = []
@@ -1293,17 +1353,52 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         return concat
 
-    def _build_sequential_connections(self) -> List[Tuple]:
-        """Build connections for sequential domains."""
-        connections = []
+    def _build_connections(self) -> List[Tuple]:
+        """Build concatenation connections from shared interface ports.
+
+        Each internal port is shared by two (or more) domains; for every such
+        port the corresponding domain structures are connected *at that port*.
+        This handles arbitrary multiport topologies — a domain may carry any
+        number of external ports plus its interface port(s) — rather than
+        assuming a linear chain where each domain has exactly two ports.
+
+        Falls back to the legacy sequential chain only when no adjacency
+        information is available.
+        """
+        adj = getattr(self, '_port_domain_adjacency', {}) or {}
+        internal = getattr(self, '_internal_ports', []) or []
+        domain_index = {d: i for i, d in enumerate(self.domains)}
+
+        connections: List[Tuple] = []
+        for port in internal:
+            doms = sorted(
+                (d for d in adj.get(port, set()) if d in domain_index),
+                key=lambda d: domain_index[d],
+            )
+            # Couple each further domain sharing this port back to the first,
+            # so a port shared by N domains yields N-1 constraints.
+            for other in doms[1:]:
+                connections.append((
+                    (domain_index[doms[0]], port),
+                    (domain_index[other], port),
+                ))
+
+        if connections or adj:
+            return connections
+
+        # Legacy fallback: sequential chain (each domain's last port to the
+        # next domain's first port).  Used only without adjacency data.
         for i in range(self.n_domains - 1):
             ports_i = self.domain_port_map[self.domains[i]]
             ports_next = self.domain_port_map[self.domains[i + 1]]
             connections.append((
                 (i, ports_i[-1]),
-                (i + 1, ports_next[0])
+                (i + 1, ports_next[0]),
             ))
         return connections
+
+    # Backwards-compatible alias
+    _build_sequential_connections = _build_connections
 
     def solve_per_domain(
         self,

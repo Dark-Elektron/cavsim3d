@@ -12,106 +12,86 @@ class ParameterConverter:
     """Static utility methods for network parameter conversions."""
 
     @staticmethod
+    def _z0_to_matrix(Z0_ref: Union[complex, np.ndarray], n: int) -> np.ndarray:
+        """Normalize a scalar / vector / matrix Z0 spec into an n x n complex matrix."""
+        if np.isscalar(Z0_ref):
+            return Z0_ref * np.eye(n, dtype=complex)
+        Z0_ref = np.asarray(Z0_ref)
+        if Z0_ref.ndim == 1:
+            return np.diag(Z0_ref.astype(complex))
+        return Z0_ref.astype(complex)
+
+    @staticmethod
     def z_to_s(Z: np.ndarray, Z0_ref: Union[complex, np.ndarray]) -> np.ndarray:
         """
-        Convert Z-parameters to S-parameters.
+        Convert Z-parameters to S-parameters using the generalized
+        pseudo-wave definition (Marks & Williams), valid for complex
+        per-port reference impedances, including purely reactive Z0
+        (e.g. waveguide modes below cutoff):
 
-        Uses the generalized formula that works with complex reference impedance:
-        S = (Z - Z0) @ (Z + Z0)^{-1}
+            S = sqrt(Y0) (Z - Z0) (Z + Z0)^-1 sqrt(Z0)
 
-        For diagonal Z0: S_ij = (Z_ij - δ_ij * Z0_i) / (Z_ij + δ_ij * Z0_i)
-
-        Parameters
-        ----------
-        Z : ndarray
-            Z-parameter matrix (n x n) or batch (n_freq x n x n)
-        Z0_ref : complex or ndarray
-            Reference impedance (scalar, diagonal array, or matrix)
-
-        Returns
-        -------
-        S : ndarray
-            S-parameter matrix
+        Note: unlike Kurokawa power-waves, this does NOT require
+        Re(Z0) > 0 -- it is the convention used by CST/HFSS for
+        generalized (multimode) S-parameters.
         """
-        # Handle batch dimension
         if Z.ndim == 3:
             n_freq = Z.shape[0]
             S = np.zeros_like(Z, dtype=complex)
             for k in range(n_freq):
-                Z0_k = Z0_ref[k] if isinstance(Z0_ref, np.ndarray) and Z0_ref.ndim == 3 else Z0_ref
+                Z0_k = Z0_ref[k] if isinstance(Z0_ref, np.ndarray) and Z0_ref.ndim >= 2 and Z0_ref.shape[0] == n_freq else Z0_ref
                 S[k] = ParameterConverter.z_to_s(Z[k], Z0_k)
             return S
 
         n = Z.shape[0]
+        Z0_mat = ParameterConverter._z0_to_matrix(Z0_ref, n)
 
-        # Normalize Z0 to matrix form
-        if np.isscalar(Z0_ref):
-            Z0_mat = Z0_ref * np.eye(n, dtype=complex)
-        elif Z0_ref.ndim == 1:
-            Z0_mat = np.diag(Z0_ref.astype(complex))
-        else:
-            Z0_mat = Z0_ref.astype(complex)
+        z0_diag = np.diag(Z0_mat).astype(complex)
+        sqrt_z0 = np.diag(np.sqrt(z0_diag))      # principal branch, complex OK
+        sqrt_y0 = np.diag(1.0 / np.sqrt(z0_diag))
 
-        # Generalized S-parameter formula: S = (Z - Z0)(Z + Z0)^{-1}
-        # This works for both real and complex reference impedance
         Zn = Z - Z0_mat
         Zd = Z + Z0_mat
 
         try:
-            S = Zn @ np.linalg.inv(Zd)
+            S = sqrt_y0 @ Zn @ np.linalg.inv(Zd) @ sqrt_z0
         except np.linalg.LinAlgError:
-            S = Zn @ np.linalg.pinv(Zd)
+            S = sqrt_y0 @ Zn @ np.linalg.pinv(Zd) @ sqrt_z0
 
         return S
 
     @staticmethod
     def s_to_z(S: np.ndarray, Z0_ref: Union[complex, np.ndarray]) -> np.ndarray:
         """
-        Convert S-parameters to Z-parameters.
-
-        Uses the generalized formula: Z = Z0 @ (I + S) @ (I - S)^{-1}
-        For scalar Z0: Z = Z0 * (I + S)(I - S)^{-1}
-
-        Parameters
-        ----------
-        S : ndarray
-            S-parameter matrix (n x n) or batch (n_freq x n x n)
-        Z0_ref : complex or ndarray
-            Reference impedance
-
-        Returns
-        -------
-        Z : ndarray
-            Z-parameter matrix
+        Inverse pseudo-wave conversion:
+            T = sqrt(Z0) S sqrt(Y0)
+            Z = (I - T)^-1 (I + T) Z0
         """
-        # Handle batch dimension
         if S.ndim == 3:
             n_freq = S.shape[0]
             Z = np.zeros_like(S, dtype=complex)
             for k in range(n_freq):
-                Z0_k = Z0_ref[k] if isinstance(Z0_ref, np.ndarray) and Z0_ref.ndim == 3 else Z0_ref
+                Z0_k = Z0_ref[k] if isinstance(Z0_ref, np.ndarray) and Z0_ref.ndim >= 2 and Z0_ref.shape[0] == n_freq else Z0_ref
                 Z[k] = ParameterConverter.s_to_z(S[k], Z0_k)
             return Z
 
         n = S.shape[0]
         I = np.eye(n, dtype=complex)
+        Z0_mat = ParameterConverter._z0_to_matrix(Z0_ref, n)
 
-        # Normalize Z0 to matrix form
-        if np.isscalar(Z0_ref):
-            Z0_mat = Z0_ref * np.eye(n, dtype=complex)
-        elif Z0_ref.ndim == 1:
-            Z0_mat = np.diag(Z0_ref.astype(complex))
-        else:
-            Z0_mat = Z0_ref.astype(complex)
+        z0_diag = np.diag(Z0_mat).astype(complex)
+        sqrt_z0 = np.diag(np.sqrt(z0_diag))
+        sqrt_y0 = np.diag(1.0 / np.sqrt(z0_diag))
 
-        # Z = Z0 @ (I + S) @ (I - S)^{-1}
+        T = sqrt_z0 @ S @ sqrt_y0
+
         try:
-            Z = Z0_mat @ (I + S) @ np.linalg.inv(I - S)
+            Z = np.linalg.inv(I - T) @ (I + T) @ Z0_mat
         except np.linalg.LinAlgError:
-            Z = Z0_mat @ (I + S) @ np.linalg.pinv(I - S)
+            Z = np.linalg.pinv(I - T) @ (I + T) @ Z0_mat
 
         return Z
-
+    
     @staticmethod
     def cascade_s_matrices(S1: np.ndarray, S2: np.ndarray) -> np.ndarray:
         """
@@ -129,7 +109,6 @@ class ParameterConverter:
         S : ndarray
             Cascaded S-matrix (size 2n x 2n)
         """
-        # Dimensions: 2n x 2n. Split into n x n blocks.
         n1 = S1.shape[0] // 2
         n2 = S2.shape[0] // 2
 
@@ -146,14 +125,6 @@ class ParameterConverter:
         I1 = np.eye(n1, dtype=complex)
         I2 = np.eye(n2, dtype=complex)
 
-        # Generalized cascade formulas
-        # S11 = S11_1 + S12_1 @ inv(I - S11_2 @ S22_1) @ S11_2 @ S21_1
-        # S12 = S12_1 @ inv(I - S11_2 @ S22_1) @ S12_2
-        # S21 = S21_2 @ inv(I - S22_1 @ S11_2) @ S21_1
-        # S22 = S22_2 + S21_2 @ inv(I - S22_1 @ S11_2) @ S22_1 @ S12_2
-
-        # Standard matrix cascade (T-matrix approach or direct block)
-        # We use the direct block inversion form:
         inv1 = np.linalg.inv(I2 - S11_2 @ S22_1)
         inv2 = np.linalg.inv(I1 - S22_1 @ S11_2)
 
@@ -162,11 +133,9 @@ class ParameterConverter:
         S21_c = S21_2 @ inv2 @ S21_1
         S22_c = S22_2 + S21_2 @ inv2 @ S22_1 @ S12_2
 
-        # Combine into 2x2 block matrix
         S_top = np.hstack([S11_c, S12_c])
         S_bot = np.hstack([S21_c, S22_c])
         return np.vstack([S_top, S_bot])
-
 
 class BaseEMSolver(ABC):
     """
@@ -302,25 +271,29 @@ class BaseEMSolver(ABC):
             raise ValueError("No Z-matrix available. Call solve() first.")
 
         n_total = self._Z_matrix.shape[1]
+        from cavsim3d.core.constants import Z0
+
+        # Preferred: explicit per-port-mode ordering (correct for non-uniform
+        # modes per port).
+        order = getattr(self, '_port_mode_order', None)
+        if order and len(order) == n_total:
+            return np.diag([
+                self._get_port_impedance(port_name, mode_idx, freq)
+                for (port_name, mode_idx) in order
+            ])
+
+        # Fallback: uniform modes per port.
         n_modes = self._n_modes_per_port if self._n_modes_per_port is not None else 1
         n_ports = len(self.ports)
-
         Z0_diag = []
-
         for idx in range(n_total):
             port_idx = idx // n_modes
             mode_idx = idx % n_modes
-
             if port_idx < n_ports:
-                port_name = self.ports[port_idx]
-                Zw = self._get_port_impedance(port_name, mode_idx, freq)
+                Zw = self._get_port_impedance(self.ports[port_idx], mode_idx, freq)
             else:
-                # Fallback for edge cases
-                from cavsim3d.core.constants import Z0
                 Zw = Z0
-
             Z0_diag.append(Zw)
-
         return np.diag(Z0_diag)
 
     def _invalidate_cache(self) -> None:
@@ -348,18 +321,36 @@ class BaseEMSolver(ABC):
         self._Z_dict = {'frequencies': self.frequencies}
         self._S_dict = {'frequencies': self.frequencies} if self._S_matrix is not None else None
 
+        # (port_number, mode_number) label for each matrix index.  When ports
+        # have different numbers of modes, use the recorded port-mode order;
+        # otherwise fall back to uniform indexing (port = idx // n_modes).
+        labels = self._matrix_index_labels(n_total, n_modes)
+
         for row in range(n_total):
-            port_row = row // n_modes + 1
-            mode_row = row % n_modes + 1
-
+            port_row, mode_row = labels[row]
             for col in range(n_total):
-                port_col = col // n_modes + 1
-                mode_col = col % n_modes + 1
-
+                port_col, mode_col = labels[col]
                 key = f'{port_col}({mode_col}){port_row}({mode_row})'
                 self._Z_dict[key] = self._Z_matrix[:, row, col]
                 if self._S_matrix is not None:
                     self._S_dict[key] = self._S_matrix[:, row, col]
+
+    def _matrix_index_labels(self, n_total: int, n_modes: int):
+        """Return [(port_number, mode_number), ...] for each Z/S matrix index.
+
+        Honours a per-port mode order (``_port_mode_order``) when present so
+        labels are correct with non-uniform modes per port; falls back to
+        uniform ``idx // n_modes`` indexing otherwise.
+        """
+        order = getattr(self, '_port_mode_order', None)
+        if order and len(order) == n_total:
+            uniq = []
+            for p, _m in order:
+                if p not in uniq:
+                    uniq.append(p)
+            pnum = {p: i + 1 for i, p in enumerate(uniq)}
+            return [(pnum[p], m + 1) for (p, m) in order]
+        return [(i // n_modes + 1, i % n_modes + 1) for i in range(n_total)]
 
     def _compute_s_from_z(self) -> None:
         """Compute S-parameters from Z-parameters using port impedances."""

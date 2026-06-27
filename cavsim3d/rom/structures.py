@@ -1,7 +1,7 @@
 """Data structures for reduced-order models."""
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, TYPE_CHECKING
+from typing import List, Dict, Optional, Any, Tuple, TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
@@ -59,7 +59,8 @@ class ReducedStructure:
         if self.r is None:
             self.r = self.Ard.shape[0]
 
-        # Compute n_modes_per_port from port_modes dict
+        # Compute modes-per-port from port_modes dict (first port = back-compat
+        # scalar; per-port counts may differ — see port_mode_pairs).
         self._n_port_modes = 1  # default
         if self.port_modes and self.ports:
             for port in self.ports:
@@ -73,11 +74,11 @@ class ReducedStructure:
         if self.Brd.shape[0] != self.r:
             raise ValueError(f"Brd rows ({self.Brd.shape[0]}) must match r ({self.r})")
 
-        expected_cols = len(self.ports) * self._n_port_modes
+        expected_cols = len(self.port_mode_pairs)
         if self.Brd.shape[1] != expected_cols:
             raise ValueError(
-                f"Brd columns ({self.Brd.shape[1]}) must match "
-                f"n_ports × n_modes = {len(self.ports)} × {self._n_port_modes} = {expected_cols}"
+                f"Brd columns ({self.Brd.shape[1]}) must match the total number "
+                f"of port-modes ({expected_cols}) for ports={self.ports}"
             )
 
     @property
@@ -87,8 +88,33 @@ class ReducedStructure:
 
     @property
     def n_port_modes(self) -> int:
-        """Number of modes per port."""
+        """Modes on the first port (back-compat scalar; use port_mode_pairs
+        for the per-port breakdown when ports have different mode counts)."""
         return self._n_port_modes
+
+    @property
+    def port_mode_pairs(self) -> List[Tuple[str, int]]:
+        """Ordered ``(port_name, mode_index)`` list aligned with Brd columns.
+
+        Supports a different number of modes per port.  Falls back to a
+        uniform layout (``n_ports × n_port_modes``) if per-port mode data is
+        unavailable.
+        """
+        if self.port_modes and self.ports:
+            pairs = []
+            for p in self.ports:
+                if p in self.port_modes:
+                    for m in sorted(self.port_modes[p].keys()):
+                        pairs.append((p, m))
+            if pairs:
+                return pairs
+        # Uniform fallback.
+        return [(p, m) for p in self.ports for m in range(self._n_port_modes)]
+
+    @property
+    def n_total_port_modes(self) -> int:
+        """Total number of port-modes (sum over ports)."""
+        return len(self.port_mode_pairs)
 
     @property
     def compression_ratio(self) -> Optional[float]:
@@ -122,8 +148,11 @@ class ReducedStructure:
 
     def get_port_mode_column(self, port_name: str, mode: int = 0) -> int:
         """Get column index in Brd for a specific port-mode combination."""
-        port_idx = self.get_port_index(port_name)
-        return port_idx * self._n_port_modes + mode
+        try:
+            return self.port_mode_pairs.index((port_name, mode))
+        except ValueError:
+            # Uniform fallback.
+            return self.get_port_index(port_name) * self._n_port_modes + mode
 
     def copy(self) -> 'ReducedStructure':
         """Create a deep copy."""
