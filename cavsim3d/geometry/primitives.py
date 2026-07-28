@@ -401,3 +401,81 @@ class Box(BaseGeometry):
 
         with open(geo_dir / 'history.json', 'w') as f:
             json.dump(meta, f, indent=2, default=str)
+
+
+class Sphere(BaseGeometry):
+    """Spherical cavity resonator (closed PEC wall, no ports)."""
+
+    def __init__(
+            self,
+            radius: float,
+            maxh: float = 0.05,
+            material: str = 'vacuum'
+    ):
+        super().__init__()
+        self.radius = radius
+        self.maxh = maxh
+        self.material = material
+
+        self.build()
+        self.generate_mesh(maxh=maxh)
+        self._record('__init__', radius=radius, maxh=maxh, material=material)
+
+    def build(self) -> None:
+        from netgen.occ import Sphere as OCCSphere, Pnt
+
+        self.geo = OCCSphere(Pnt(0, 0, 0), self.radius)
+        for f in self.geo.faces:
+            f.name = 'wall'
+        self.geo.mat(self.material)
+        self.bc = 'wall'
+        self._bc_explicitly_set = True
+        self.invalidate_tag()
+
+    def _get_geometry_params(self) -> Dict[str, Any]:
+        return {
+            'class': 'Sphere',
+            'radius': float(self.radius),
+            'material': self.material,
+        }
+
+    @classmethod
+    def _rebuild_from_history(
+        cls,
+        history: List[dict],
+        project_path: Path,
+        source_file=None,
+    ) -> 'Sphere':
+        """Reconstruct from operation history."""
+        params = {}
+        for entry in history:
+            if entry['op'] == '__init__':
+                params = entry
+                break
+        return cls(radius=params.get('radius', 0.1),
+                   maxh=params.get('maxh', 0.05),
+                   material=params.get('material', 'vacuum'))
+
+    def save_geometry(self, project_path) -> None:
+        """Save primitive geometry as STEP + history."""
+        project_path = Path(project_path)
+        geo_dir = project_path / 'geometry'
+        geo_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.geo is not None:
+            try:
+                self.geo.WriteStep(str(geo_dir / 'cavsim3d.geometry.step'))
+            except Exception:
+                pass
+
+        meta = {
+            'type': self.__class__.__name__,
+            'module': self.__class__.__module__,
+            'source_link': None,
+            'source_filename': 'cavsim3d.geometry.step',
+            'source_hash': None,
+            'history': self._history,
+        }
+
+        with open(geo_dir / 'history.json', 'w') as f:
+            json.dump(meta, f, indent=2, default=str)

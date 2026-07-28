@@ -9,12 +9,13 @@ import shutil
 from cavsim3d.utils.io_utils import get_user_confirmation
 import cavsim3d.utils.printing as pr
 from cavsim3d.geometry.assembly import Assembly
-from cavsim3d.utils.io_utils import get_user_confirmation
 from cavsim3d.geometry.importers import OCCImporter
 import cavsim3d.geometry.primitives as primitives
 from cavsim3d.geometry.base import BaseGeometry
 from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
-from ngsolve import Mesh
+from ngsolve import Mesh, BoundaryFromVolumeCF # type: ignore
+from ngsolve.webgui import Draw
+
 
 class EMProject:
     """
@@ -298,6 +299,14 @@ class EMProject:
         self.mesh = self.geometry.generate_mesh(**kwargs)
         self.save()
         return self.mesh
+    
+    def draw_material_cf(self, which='eps'):
+
+        eps_r_cf, mu_r_cf = self._fds.build_material_cfs()
+        if which == 'eps':
+            Draw(BoundaryFromVolumeCF(eps_r_cf), self.mesh)
+        elif which == 'mu':
+            Draw(BoundaryFromVolumeCF(mu_r_cf), self.mesh)
 
     def has_mesh(self) -> bool:
         """Check if mesh exists (either in memory or on disk)."""

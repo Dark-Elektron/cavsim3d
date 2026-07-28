@@ -282,6 +282,16 @@ class FOMResult(PlotMixin):
         mor = ModelOrderReduction(self._solver_ref)
         mor.reduce(tol=tol, max_rank=max_rank)
         self._rom_cache = mor
+        # Persist to the standard single-solid ROM location so the reduced
+        # model can be reused / imported later (load-if-exists), mirroring the
+        # multi-solid foms.reduce() save.
+        pp = getattr(self._solver_ref, '_project_path', None)
+        if pp:
+            try:
+                mor.save(Path(pp) / "fds" / "fom" / "rom")
+            except Exception as e:
+                warnings.warn(f"Could not save ROM to project: {e}",
+                              UserWarning, stacklevel=2)
         return mor
 
     def concatenate(self):
@@ -1579,3 +1589,148 @@ def build_fom_collection(fds) -> FOMCollection:
 
     fom_list = [build_fom_result(fds, domain=d) for d in fds.domains]
     return FOMCollection(fom_list, _fds_ref=fds)
+
+
+# =============================================================================
+# Assembly-netlist collections (repeat-N sections, imported projects)
+# =============================================================================
+
+class NetlistFOMs:
+    """Per-component FOM stage of an assembly NETLIST.
+
+    Produced by ``fds.solve()`` when the project geometry is an assembly whose
+    components carry repeat counts (``n > 1``) and/or reference already-run
+    projects.  Mirrors the standard fluent chain:
+
+        proj.fds.solve(config=...)                # FOM per unique component
+        roms  = proj.fds.foms.reduce(tol=...)     # ROM per unique component
+        concat = roms.concatenate()               # coupled system (netlist expanded)
+        concat.solve(...); concat.reduce(...)     # sweep / further reduction
+
+    Each unique component is computed ONCE regardless of its repeat count;
+    imported components are loaded, never recomputed.
+    """
+
+    def __init__(self, assembly, components: Dict[str, Dict], fds_ref, fom_config: Dict):
+        self._assembly = assembly
+        self._components = components          # base_name -> {kind, path, project?}
+        self._fds_ref = fds_ref
+        self._config = fom_config
+
+    # -- introspection -----------------------------------------------------
+    @property
+    def keys(self) -> List[str]:
+        return list(self._components.keys())
+
+    def __len__(self) -> int:
+        return len(self._components)
+
+    def __getitem__(self, name: str) -> Dict:
+        return self._components[name]
+
+    def __repr__(self) -> str:
+        parts = ", ".join(f"{b}({r['kind']})" for b, r in self._components.items())
+        return f"NetlistFOMs([{parts}])"
+
+    # -- stages ------------------------------------------------------------
+    def reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> "NetlistROMs":
+        """ROM stage: reduce each unique section once and stage its ROM into the
+        single flat ``fds/foms/roms`` tree (``matrices/A_r_<domain>.h5`` …).
+
+        Live sections are reduced from their scratch FOM (no recompute of the
+        FOM); imported sections are copied from their already-run ROM.  The
+        merged ``foms/roms/structures.json`` lists every section with its own
+        fingerprints/band/impedance so the sections stay distinct.
+        """
+        from cavsim3d.solvers import netlist_persistence as npz
+        import shutil as _shutil
+
+        project_root = Path(self._fds_ref._project_path)
+        entries = []
+        for base, rec in self._components.items():
+            if rec["kind"] == "imported":
+                src = Path(rec["source"])
+                try:
+                    npz.find_rom_dir(src)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Imported section '{base}' has no saved reduced model "
+                        f"under {src}. Reduce it in its own project first "
+                        "(fds.fom.reduce / fds.foms.reduce).")
+                entries.append(npz.stage_rom(src, base, project_root))
+            else:
+                sub = rec["project"]
+                if getattr(sub.fds, "is_compound", False):
+                    sub.fds.foms.reduce(tol=tol)
+                else:
+                    sub.fds.fom.reduce(tol=tol, max_rank=max_rank)
+                sub.save()
+                entries.append(npz.stage_rom(Path(rec["scratch"]), base,
+                                             project_root))
+                # ROM staged: the scratch project is no longer needed.
+                _shutil.rmtree(rec.get("_work", ""), ignore_errors=True)
+                rec.pop("project", None)
+        npz.write_flat_structures(project_root, entries)
+        return NetlistROMs(self._assembly, self._components, self._fds_ref,
+                           self._config, tol)
+
+    def concatenate(self):
+        """FOM-level concatenation of a netlist is not supported.
+
+        The logical pipeline is FOM -> ROM -> Concatenation; reduce first:
+        ``fds.foms.reduce(tol).concatenate()``.
+        """
+        raise NotImplementedError(
+            "FOM-level concatenation of an assembly netlist is not supported "
+            "(sections live on different meshes and would couple as dense "
+            "full-order blocks). Reduce first: fds.foms.reduce(tol).concatenate().")
+
+
+class NetlistROMs:
+    """Per-component ROM stage of an assembly netlist (see NetlistFOMs)."""
+
+    def __init__(self, assembly, components, fds_ref, fom_config, tol):
+        self._assembly = assembly
+        self._components = components
+        self._fds_ref = fds_ref
+        self._config = fom_config
+        self._tol = tol
+        self._concat_cache = None
+
+    @property
+    def keys(self) -> List[str]:
+        return list(self._components.keys())
+
+    def __len__(self) -> int:
+        return len(self._components)
+
+    def __repr__(self) -> str:
+        return f"NetlistROMs([{', '.join(self._components.keys())}])"
+
+    def concatenate(self):
+        """Couple the netlist: expand repeat counts, load each component's ROM
+        (from its run under fds/foms/<name>/ or from its LINKED project),
+        validate the joins (port-mode counts, mode fingerprints, training
+        bands) and return the coupled system (with .solve() / .reduce()).
+
+        The coupled system is saved into the module project's standard
+        location: ``<project>/fds/foms/roms/concat/``.
+        """
+        from cavsim3d.solvers.concatenation import ConcatenatedSystem
+        base_dir = Path(self._fds_ref._project_path) / "fds" / "foms"
+        self._concat_cache = ConcatenatedSystem.from_flat_roms(
+            self._assembly, base_dir / "roms")
+        try:
+            self._concat_cache.save(base_dir / "roms" / "concat")
+        except Exception as e:
+            warnings.warn(f"Could not save concatenated system: {e}",
+                          UserWarning, stacklevel=2)
+        return self._concat_cache
+
+    @property
+    def concat(self):
+        """The cached concatenated system (call concatenate() first)."""
+        if self._concat_cache is None:
+            raise RuntimeError("No concatenated system yet: call "
+                               "roms.concatenate() first.")
+        return self._concat_cache

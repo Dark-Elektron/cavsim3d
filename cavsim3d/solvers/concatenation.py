@@ -173,6 +173,93 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
 
+    # =========================================================================
+    # Construction from a netlist's flat fds/foms/roms tree
+    # =========================================================================
+
+    @classmethod
+    def from_flat_roms(cls, assembly, roms_dir,
+                       from_port: str = "port2", to_port: str = "port1"):
+        """Build the coupled system from a netlist's flat ``fds/foms/roms`` tree.
+
+        Every unique section already lives as a domain in ``roms_dir``
+        (``matrices/A_r_<domain>.h5`` + a merged ``structures.json``).  This
+        loads them once, expands the assembly netlist (respecting repeat counts
+        ``n`` and sub-assemblies), makes a lightweight per-instance copy that
+        shares the reduced operators, wires consecutive connections, validates
+        the joins and couples.
+        """
+        from cavsim3d.rom.reduction import load_reduced_structures
+
+        roms_dir = Path(roms_dir)
+        loaded, _ = load_reduced_structures(roms_dir)
+        by_domain = {s.domain: s for s in loaded}
+
+        # ---- flatten the netlist into an ordered instance list --------------
+        instances = []          # (instance_name, component_key, base_name)
+
+        def _flatten(asm, prefix=""):
+            for key in asm._component_order:
+                entry = asm._components[key]
+                comp = entry.geometry
+                n = int(entry.metadata.get("n", 1))
+                for i in range(n):
+                    suffix = f"_{i + 1}" if n > 1 else ""
+                    iname = f"{prefix}{key}{suffix}"
+                    if isinstance(comp, type(asm)):
+                        _flatten(comp, prefix=iname + "/")
+                    else:
+                        instances.append((iname, key, entry.base_name))
+
+        _flatten(assembly)
+        if not instances:
+            raise ValueError("Assembly contains no components.")
+
+        def _instance_copy(s, domain):
+            c = ReducedStructure(
+                Ard=s.Ard, Brd=s.Brd, ports=list(s.ports),
+                port_modes=s.port_modes, domain=domain,
+                r=s.r, n_full=s.n_full, is_full_order=s.is_full_order,
+                W=s.W, Q_L_inv=s.Q_L_inv, fes=s.fes, mesh=s.mesh)
+            for attr in ("port_fingerprints", "training_band", "impedance_func"):
+                if hasattr(s, attr):
+                    setattr(c, attr, getattr(s, attr))
+            # Keep the SOURCE (base) domain so a per-section field can find its
+            # saved mesh (mesh/mesh_<base>.pkl) for 3D reconstruction.
+            c.base_domain = s.domain
+            return c
+
+        structures = []
+        inst_keys = []
+        for iname, key, base in instances:
+            if base not in by_domain:
+                raise KeyError(
+                    f"Section '{base}' has no reduced model in {roms_dir}. "
+                    "Did the ROM stage (foms.reduce) run for it?")
+            structures.append(_instance_copy(by_domain[base], iname))
+            inst_keys.append(key)
+
+        # ---- consecutive connections (ports from the assembly's netlist) ----
+        conn_ports = {(c.from_key, c.to_key): (c.from_port, c.to_port)
+                      for c in getattr(assembly, "_connections", [])}
+        connections = []
+        for i in range(len(structures) - 1):
+            fp, tp = conn_ports.get((inst_keys[i], inst_keys[i + 1]),
+                                    (from_port, to_port))
+            connections.append(((i, fp), (i + 1, tp)))
+
+        concat = cls(structures=structures,
+                     mesh=structures[0].mesh, fes=structures[0].fes)
+        concat.define_connections(connections)
+        concat.couple()
+        # Where each section's saved mesh/FES live (project/mesh/{mesh,fes}_<base>.pkl),
+        # so a 3D field can later be reconstructed per section for visualization.
+        try:
+            concat._project_mesh_dir = Path(roms_dir).parents[2] / "mesh"
+        except Exception:
+            concat._project_mesh_dir = None
+        return concat
+
     def _resolve_mesh_and_fes(self) -> None:
         """Resolve mesh and fes from available sources."""
         # Try to get mesh from structures
@@ -520,11 +607,83 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         n_modes_A = self.port_to_mode_range[(sA_idx, pA)][1]
         n_modes_B = self.port_to_mode_range[(sB_idx, pB)][1]
+        domA = getattr(self.structures[sA_idx], 'domain', sA_idx)
+        domB = getattr(self.structures[sB_idx], 'domain', sB_idx)
         if n_modes_A != n_modes_B:
             raise ValueError(
-                f"Mode count mismatch: ({sA_idx}, '{pA}') has {n_modes_A} modes, "
-                f"({sB_idx}, '{pB}') has {n_modes_B} modes"
+                "The number of port modes must match at connected interfaces. "
+                f"Interface '{domA}'.{pA} has {n_modes_A} mode(s) but "
+                f"'{domB}'.{pB} has {n_modes_B} mode(s). "
+                "Re-run/import the connected sections with the same nportmodes "
+                "on the interface ports."
             )
+        # Per-mode fit-check: mode k on both interfaces must be the SAME physical
+        # mode (type + cutoff kc + polarization).  Matching cross-section
+        # dimensions give matching kc; polarization guards against coupling e.g.
+        # a cos-oriented degenerate mode to its sin partner (numeric modes).
+        fpA = getattr(self.structures[sA_idx], 'port_fingerprints', None)
+        fpB = getattr(self.structures[sB_idx], 'port_fingerprints', None)
+        if fpA and fpB and pA in fpA and pB in fpB:
+            for m in range(n_modes_A):
+                a = fpA[pA].get(m)
+                b = fpB[pB].get(m)
+                if not a or not b:
+                    continue
+                bad = None
+                if str(a.get("type")) != str(b.get("type")):
+                    bad = f"type {a.get('type')} vs {b.get('type')}"
+                elif list(a.get("indices", [])) != list(b.get("indices", [])):
+                    bad = f"indices {a.get('indices')} vs {b.get('indices')}"
+                else:
+                    ka, kb = float(a.get("kc", 0)), float(b.get("kc", 0))
+                    if abs(ka - kb) > 1e-3 * max(abs(ka), abs(kb), 1e-30):
+                        bad = f"cutoff kc {ka:.6g} vs {kb:.6g} (cross-sections differ)"
+                    elif abs(float(a.get("pol", 0)) - float(b.get("pol", 0))) > 1e-3:
+                        bad = (f"polarization {np.degrees(a.get('pol',0)):.1f}deg vs "
+                               f"{np.degrees(b.get('pol',0)):.1f}deg")
+                if bad:
+                    raise ValueError(
+                        "Interface port modes do not correspond at "
+                        f"'{domA}'.{pA} <-> '{domB}'.{pB}, mode {m}: {bad}. "
+                        "The connected cross-sections must share the same mode "
+                        "basis (matching dimensions and, for degenerate modes, "
+                        "the same polarization/orientation convention)."
+                    )
+
+    def _validate_bands(self) -> None:
+        """Warn/error on incompatible ROM training bands across structures.
+
+        Each ROM is only valid over the frequency window its snapshots covered;
+        coupling is trustworthy only in the INTERSECTION of the sections'
+        bands.  Empty intersection -> error; otherwise record it for solve() to
+        warn when a sweep extrapolates beyond it.
+        """
+        bands = [getattr(s, 'training_band', None) for s in self.structures]
+        bands = [b for b in bands if b]
+        self._training_band = None
+        if len(bands) < 2:
+            if bands:
+                self._training_band = (bands[0]["fmin_GHz"], bands[0]["fmax_GHz"])
+            return
+        lo = max(b["fmin_GHz"] for b in bands)
+        hi = min(b["fmax_GHz"] for b in bands)
+        if lo >= hi:
+            ranges = ", ".join(f"[{b['fmin_GHz']:.4g}, {b['fmax_GHz']:.4g}] GHz"
+                               for b in bands)
+            raise ValueError(
+                "Sections were reduced over disjoint frequency bands and cannot "
+                f"be coupled: {ranges}. A ROM is only valid over its training "
+                "band; reduce all sections over a common (overlapping) range."
+            )
+        self._training_band = (lo, hi)
+        widest = max(b["fmax_GHz"] - b["fmin_GHz"] for b in bands)
+        if (hi - lo) < 0.5 * widest:
+            import warnings
+            warnings.warn(
+                f"Section training bands overlap only in [{lo:.4g}, {hi:.4g}] GHz, "
+                "much narrower than the sections' individual bands. Coupled "
+                "results outside this window may be inaccurate or wrong.",
+                UserWarning, stacklevel=2)
 
     def _validate_connections(self) -> None:
         """Validate all connections."""
@@ -580,6 +739,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """
         if self.connections is None:
             raise ValueError("Must call define_connections() first")
+
+        # Physical fit-check across sections: the ROMs must share a compatible
+        # (overlapping) training frequency band, else coupling is meaningless.
+        self._validate_bands()
 
         _t_couple = time.time()
 
@@ -719,17 +882,26 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def ports(self) -> List[str]:
         return list(self._external_port_mode_map.keys())
 
+    def _impedance_for(self, struct_idx: int, port: str, mode: int, freq: float) -> complex:
+        """Port wave impedance, preferring the structure's OWN impedance
+        function (attached by import/load — sections from different projects
+        may carry different media/cross-sections)."""
+        func = getattr(self.structures[struct_idx], 'impedance_func', None)
+        if func is not None:
+            return func(port, mode, freq)
+        return self._port_impedance_func(port, mode, freq)
+
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
         if port not in self._external_port_mode_map:
             raise KeyError(f"Port '{port}' not found. Available: {self.ports}")
-        _, orig_port, orig_mode = self._external_port_mode_map[port]
-        return self._port_impedance_func(orig_port, orig_mode, freq)
+        struct_idx, orig_port, orig_mode = self._external_port_mode_map[port]
+        return self._impedance_for(struct_idx, orig_port, orig_mode, freq)
 
     def _get_impedance_matrix(self, freq: float) -> np.ndarray:
         Z0_diag = []
         for global_idx in self._external_port_modes:
             struct_idx, port_name, mode_idx = self._global_to_local[global_idx]
-            Zw = self._port_impedance_func(port_name, mode_idx, freq)
+            Zw = self._impedance_for(struct_idx, port_name, mode_idx, freq)
             Z0_diag.append(Zw)
         return np.diag(Z0_diag)
 
@@ -939,6 +1111,19 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
             if self.A_coupled is None:
                 raise ValueError("Must call couple() first")
+
+            # Warn if the sweep extrapolates beyond the ROMs' shared training band.
+            band = getattr(self, '_training_band', None)
+            if band is not None:
+                lo, hi = band
+                if fmin < lo - 1e-9 or fmax > hi + 1e-9:
+                    import warnings
+                    warnings.warn(
+                        f"Sweeping {fmin:.4g}-{fmax:.4g} GHz extends beyond the "
+                        f"sections' shared training band [{lo:.4g}, {hi:.4g}] GHz; "
+                        "reduced-order results outside it are extrapolated and "
+                        "may be inaccurate or wrong.",
+                        UserWarning, stacklevel=2)
 
             # --- Rerun protection ---
             has_results = (self._Z_matrix is not None)
@@ -1533,6 +1718,93 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             draw_kwargs['euler_angles'] = euler_angles
 
         Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
+
+    # =========================================================================
+    # Per-section field reconstruction (netlist concat: independent meshes)
+    # =========================================================================
+
+    def _section_mesh_fes(self, section_idx: int, mesh_dir=None):
+        """Load (and cache) a section's saved mesh + FE space for reconstruction.
+
+        Netlist sections live on independent meshes saved as
+        ``<project>/mesh/{mesh,fes}_<base>.pkl``.  Returns ``(mesh, fes)``.
+        """
+        import pickle
+        struct = self.structures[section_idx]
+        if struct.mesh is not None and struct.fes is not None:
+            return struct.mesh, struct.fes
+        base = getattr(struct, 'base_domain', struct.domain)
+        mesh_dir = Path(mesh_dir) if mesh_dir is not None else getattr(
+            self, '_project_mesh_dir', None)
+        if mesh_dir is None:
+            raise FileNotFoundError(
+                "No mesh directory known for section field reconstruction. "
+                "Pass mesh_dir=<project>/mesh.")
+        if not hasattr(self, '_section_mesh_cache'):
+            self._section_mesh_cache = {}
+        if base in self._section_mesh_cache:
+            mesh, fes = self._section_mesh_cache[base]
+        else:
+            mf, ff = mesh_dir / f"mesh_{base}.pkl", mesh_dir / f"fes_{base}.pkl"
+            if not mf.exists() or not ff.exists():
+                raise FileNotFoundError(
+                    f"Section '{base}' mesh/FES not found in {mesh_dir} "
+                    f"(need mesh_{base}.pkl and fes_{base}.pkl).")
+            with open(mf, "rb") as fh:
+                mesh = pickle.load(fh)
+            with open(ff, "rb") as fh:
+                fes = pickle.load(fh)
+            self._section_mesh_cache[base] = (mesh, fes)
+        struct.mesh, struct.fes = mesh, fes
+        return mesh, fes
+
+    def reconstruct_section_field(
+        self,
+        section_idx: int = 0,
+        freq_idx: int = 0,
+        excitation_port: Optional[str] = None,
+        excitation_mode: int = 0,
+        field_type: Literal['E', 'H'] = 'E',
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+    ):
+        """Reconstruct one section's 3D field FROM THE COUPLED ROM solution.
+
+        The coupled sweep gives the reduced state; this maps that section's
+        slice back through its reduced basis (``W @ Q_L_inv``) onto the
+        section's own mesh.  Returns ``(coefficient_function, mesh, label)``
+        ready for ``WebguiComponent.draw`` / ``netgen.webgui.Draw``.
+        """
+        from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF
+        if not self.has_snapshots:
+            raise ValueError("No coupled solution — call solve() first.")
+        if not (0 <= section_idx < self.n_structures):
+            raise IndexError(f"section_idx {section_idx} out of range "
+                             f"[0, {self.n_structures - 1}]")
+        if excitation_port is None:
+            excitation_port = self.ports[0]
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found: {self.ports}")
+
+        col = self.ports.index(excitation_port)
+        x_uncoupled = self.W_coupled @ self._snapshots[freq_idx, :, col]
+        struct = self.structures[section_idx]
+        start = self._structure_dof_offsets[section_idx]
+        x_full = struct.reconstruct(x_uncoupled[start:start + struct.r])
+
+        mesh, fes = self._section_mesh_fes(section_idx)
+        E_gf = GridFunction(fes, complex=True)
+        vec = E_gf.vec.FV().NumPy()
+        n = min(len(vec), len(x_full))
+        vec[:] = 0
+        vec[:n] = x_full[:n]
+
+        omega = 2 * np.pi * self.frequencies[freq_idx]
+        field_cf = E_gf if field_type == 'E' else (1 / (1j * omega * mu0)) * curl(E_gf)
+        cf = {'abs': Norm(field_cf), 'real': field_cf.real,
+              'imag': field_cf.imag}[component]
+        label = f"{component}({field_type}) — {struct.domain} @ " \
+                f"{self.frequencies[freq_idx] / 1e9:.3f} GHz"
+        return BoundaryFromVolumeCF(cf), mesh, label
 
     def plot_field_at_frequency(self, freq: float, **kwargs) -> None:
         """

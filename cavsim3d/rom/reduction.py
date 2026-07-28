@@ -972,6 +972,68 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         }
         ProjectManager.save_json(path, metadata)
 
+        # 4b. Save per-structure metadata (ports, port-modes, sizes) + analytic
+        #     port-impedance parameters, so the reduced model can be rebuilt as
+        #     ReducedStructures and concatenated WITHOUT a live solver (import /
+        #     reuse across projects).  Requires the solver at save time.
+        try:
+            solver = getattr(self, 'solver', None)
+            if solver is not None and self._is_reduced:
+                ps = getattr(solver, 'port_solver', None)
+                struct_meta = {"structures": []}
+                imp = {"cutoff": {}, "mtype": {}, "eps": {}, "zpv": {}}
+                # Per (port, mode) fingerprint for the interface fit-check.
+                fingerprints = {}
+                for domain in self.domains:
+                    if domain not in self._A_r:
+                        continue
+                    s = self.get_reduced_structure(domain)
+                    struct_meta["structures"].append({
+                        "domain": domain,
+                        "ports": list(s.ports),
+                        "port_modes": {p: [int(m) for m in s.port_modes[p]]
+                                       for p in s.port_modes},
+                        "r": int(s.r), "n_full": int(s.n_full),
+                        "is_full_order": bool(s.is_full_order),
+                    })
+                    if ps is not None:
+                        ck = getattr(ps, 'port_cutoff_kc', {})
+                        mt = getattr(ps, 'port_mode_types', {})
+                        mi = getattr(ps, 'port_mode_indices', {})
+                        mp = getattr(ps, 'port_mode_polarizations', {})
+                        for p in s.ports:
+                            if p in ck:
+                                imp["cutoff"][p] = {int(m): float(ck[p][m]) for m in ck[p]}
+                                imp["mtype"][p] = {int(m): str(mt[p][m]) for m in mt[p]}
+                                fingerprints[p] = {
+                                    int(m): {
+                                        "kc": float(ck[p][m]),
+                                        "type": str(mt[p].get(m, "")),
+                                        "indices": list(mi.get(p, {}).get(m, ())),
+                                        "pol": float(mp.get(p, {}).get(m, 0.0)),
+                                    } for m in ck[p]}
+                            imp["eps"][p] = float(
+                                (getattr(ps, 'port_media_eps', {}) or {}).get(p, 1.0))
+                            zli = (getattr(ps, 'port_line_impedance', {}) or {}).get(p)
+                            if zli:
+                                imp["zpv"][p] = {int(m): complex(zli[m]) for m in zli}
+                struct_meta["impedance"] = imp
+                struct_meta["fingerprints"] = fingerprints
+                # Training frequency band (validity window of the ROM).
+                fr = getattr(self, 'frequencies', None)
+                if fr is None:
+                    fr = getattr(solver, 'frequencies', None)
+                if fr is not None and len(fr):
+                    struct_meta["band"] = {
+                        "fmin_GHz": float(np.min(fr)) / 1e9,
+                        "fmax_GHz": float(np.max(fr)) / 1e9,
+                        "n_snapshots": int(len(fr)),
+                    }
+                with open(path / "structures.json", "w") as fh:
+                    json.dump(struct_meta, fh, indent=2)
+        except Exception as e:
+            warnings.warn(f"Could not save ROM structure metadata: {e}")
+
         # 5. Save eigenmodes
         try:
             self.save_eigenmodes(path=eig_path_dir)
@@ -1284,7 +1346,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         if hasattr(self.solver, '_fes'):
             fes = self.solver._fes.get(domain)
 
-        return ReducedStructure(
+        struct = ReducedStructure(
             Ard=self._A_r[domain],
             Brd=self._B_r[domain],
             ports=domain_ports,
@@ -1297,6 +1359,33 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             fes=fes,
             mesh=mesh,
         )
+        # Attach interface fit-check metadata (per-mode fingerprint + training
+        # band) so both live and imported structures validate the same way.
+        ps = getattr(self.solver, 'port_solver', None)
+        if ps is not None:
+            ck = getattr(ps, 'port_cutoff_kc', {})
+            mt = getattr(ps, 'port_mode_types', {})
+            mi = getattr(ps, 'port_mode_indices', {})
+            mp = getattr(ps, 'port_mode_polarizations', {})
+            fp = {}
+            for p in domain_ports:
+                if p in ck:
+                    fp[p] = {int(m): {
+                        "kc": float(ck[p][m]), "type": str(mt[p].get(m, "")),
+                        "indices": list(mi.get(p, {}).get(m, ())),
+                        "pol": float(mp.get(p, {}).get(m, 0.0)),
+                    } for m in ck[p]}
+            struct.port_fingerprints = fp
+        fr = getattr(self, 'frequencies', None)
+        if fr is None:
+            fr = getattr(self.solver, 'frequencies', None)
+        if fr is not None and len(fr):
+            struct.training_band = {
+                "fmin_GHz": float(np.min(fr)) / 1e9,
+                "fmax_GHz": float(np.max(fr)) / 1e9,
+                "n_snapshots": int(len(fr)),
+            }
+        return struct
 
     def get_all_structures(self) -> List[ReducedStructure]:
         """Get reduced structures for all domains."""
@@ -2096,3 +2185,134 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             info['concatenated'] = self._concatenated.get_reconstruction_info()
 
         return info
+
+
+# =============================================================================
+# Standalone reduced-structure loading (import / reuse across projects)
+# =============================================================================
+
+def _load_matrix(fpath: Path):
+    """Read a single-dataset matrix file ('data') written by ROM save."""
+    with h5py.File(fpath, "r") as f:
+        return H5Serializer.load_dataset(f["data"])
+
+
+def load_reduced_structures(rom_dir, fes=None, mesh=None):
+    """Rebuild a saved ROM's :class:`ReducedStructure` list WITHOUT a live solver.
+
+    Reads the reduced operators (``matrices/{A_r,B_r,W,Q_L_inv}_{domain}.h5``)
+    plus the ``structures.json`` metadata written by
+    :meth:`ModelOrderReduction.save`, so a previously-run project's reduced
+    model can be imported and concatenated (or further reduced).
+
+    Parameters
+    ----------
+    rom_dir : path-like
+        A saved ROM directory (e.g. ``<project>/fds/foms/roms``).
+    fes, mesh : optional
+        Attach an FE space / mesh to the structures (needed only for field
+        reconstruction; not required for S-/Z-/eigenvalue concatenation).
+
+    Returns
+    -------
+    (structures, impedance_func) : (list[ReducedStructure], callable | None)
+        The reduced structures and a standalone port wave-impedance function
+        rebuilt from the persisted analytic parameters (``None`` if absent).
+    """
+    from cavsim3d.solvers.ports import make_analytic_port_impedance
+
+    rom_dir = Path(rom_dir)
+    meta_file = rom_dir / "structures.json"
+    if not meta_file.exists():
+        raise FileNotFoundError(
+            f"No structures.json in {rom_dir}. This ROM was saved without "
+            "standalone structure metadata (re-run reduce()/save with a solver)."
+        )
+    with open(meta_file) as fh:
+        meta = json.load(fh)
+
+    mat = rom_dir / "matrices"
+    # Fingerprints/band/impedance may be stored at the TOP level (multi-solid:
+    # globally-unique port names) OR PER STRUCTURE (netlist: each section has
+    # its own port1/port2, which would collide in a shared dict).  Prefer the
+    # per-structure entry, fall back to the top level.
+    top_fingerprints = meta.get("fingerprints", {})
+    top_band = meta.get("band")
+    top_imp = meta.get("impedance")
+    structures = []
+    impedance_func = make_analytic_port_impedance(top_imp) if top_imp else None
+    for sm in meta["structures"]:
+        d = sm["domain"]
+        W = None
+        Q = None
+        wf = mat / f"W_{d}.h5"
+        qf = mat / f"Q_L_inv_{d}.h5"
+        if wf.exists():
+            W = _load_matrix(wf)
+        if qf.exists():
+            Q = _load_matrix(qf)
+        port_modes = {p: {int(m): None for m in sm["port_modes"][p]}
+                      for p in sm["port_modes"]}
+        struct = ReducedStructure(
+            Ard=_load_matrix(mat / f"A_r_{d}.h5"),
+            Brd=_load_matrix(mat / f"B_r_{d}.h5"),
+            ports=list(sm["ports"]), port_modes=port_modes, domain=d,
+            r=sm["r"], n_full=sm["n_full"],
+            is_full_order=sm.get("is_full_order", False),
+            W=W, Q_L_inv=Q, fes=fes, mesh=mesh,
+        )
+        # Interface fit-check metadata: per (port, mode) fingerprint {kc,type,
+        # indices,pol} keyed by int mode, and the ROM training band.
+        fingerprints = sm.get("fingerprints", top_fingerprints)
+        struct.port_fingerprints = {
+            p: {int(m): fp for m, fp in fingerprints[p].items()}
+            for p in sm["ports"] if p in fingerprints}
+        struct.training_band = sm.get("band", top_band)
+        # Per-section impedance (mixed-origin netlist) or shared top-level one.
+        sm_imp = sm.get("impedance")
+        struct.impedance_func = (make_analytic_port_impedance(sm_imp)
+                                 if sm_imp else impedance_func)
+        structures.append(struct)
+
+    return structures, impedance_func
+
+
+def import_reduced_structures(project_path, fes=None, mesh=None):
+    """Import a previously-run PROJECT's reduced structures (+ impedance).
+
+    Locates the saved ROM inside a project directory (searching the usual
+    ``fds/foms/roms`` / ``fds/fom/rom`` locations, then recursively for a
+    ``structures.json``) and returns its :class:`ReducedStructure` list, ready
+    to concatenate onto other (live or imported) sections.
+
+    Parameters
+    ----------
+    project_path : path-like
+        A project folder (or a ROM directory) produced by a previous run.
+    fes, mesh : optional
+        Attach an FE space / mesh (only needed for field reconstruction).
+
+    Returns
+    -------
+    (structures, impedance_func)
+    """
+    project_path = Path(project_path)
+    if (project_path / "structures.json").exists():
+        return load_reduced_structures(project_path, fes=fes, mesh=mesh)
+    prefer = [
+        project_path / "fds" / "foms" / "roms",
+        project_path / "fds" / "fom" / "rom",
+        project_path / "foms" / "roms",
+        project_path / "roms",
+        project_path / "rom",
+    ]
+    for d in prefer:
+        if (d / "structures.json").exists():
+            return load_reduced_structures(d, fes=fes, mesh=mesh)
+    hits = sorted(project_path.rglob("structures.json"))
+    if hits:
+        return load_reduced_structures(hits[0].parent, fes=fes, mesh=mesh)
+    raise FileNotFoundError(
+        f"No saved reduced model (structures.json) found under {project_path}. "
+        "Run and reduce the project first (fds.solve() -> reduce())."
+    )

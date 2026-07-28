@@ -27,3 +27,4 @@ test_history/
 notebooks/
 scripts/
 .claude/
+testbench_runs/

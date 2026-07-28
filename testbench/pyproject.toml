@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testbench"
+version = "0.4.0"
+description = "cavsim3d interactive test bench (ngapp): staged FOM->ROM->concat pipeline runs with ROM-reconstructed 3D fields"
+requires-python = ">=3.11"
+dependencies = [
+    "ngapp",
+    "plotly",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

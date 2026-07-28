@@ -8,6 +8,7 @@ OPTIMIZED VERSION (safe precomputation of boundary mass matrix)
 """
 
 import platform
+import re
 from typing import Dict, Tuple, List, Optional, Literal, Union
 from pathlib import Path
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from ngsolve import (
     HCurl, BilinearForm, GridFunction, BND, Cross, Integrate, InnerProduct,
     TaskManager, Preconditioner, solvers, IdentityMatrix, curl, ds,
     CoefficientFunction, specialcf, x, y, z, sin, cos, sqrt, pi,
-    H1, grad, dx as dx_vol
+    H1, grad, dx as dx_vol, ArnoldiSolver
 )
 
 from cavsim3d.core.constants import c0, mu0, eps0, Z0
@@ -29,6 +30,80 @@ import cavsim3d.utils.printing as pr
 
 # PARDISO is not available on macOS; fall back to UMFPACK
 _DIRECT_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
+
+
+def make_analytic_port_impedance(params: dict):
+    """Rebuild a standalone port wave-impedance function from persisted params.
+
+    Mirrors :meth:`PortEigenmodeSolver.get_port_wave_impedance` exactly, so a
+    reloaded reduced model (imported from disk, with no live solver) produces
+    identical Z->S.  ``params`` = {'cutoff': {port:{mode:kc}}, 'mtype':
+    {port:{mode:'TE'|'TM'|'TEM'}}, 'eps': {port:eps_r}}.
+    """
+    cutoff = {p: {int(m): v for m, v in d.items()}
+              for p, d in params.get('cutoff', {}).items()}
+    mtype = {p: {int(m): t for m, t in d.items()}
+             for p, d in params.get('mtype', {}).items()}
+    eps = dict(params.get('eps', {}))
+    zpv = {p: {int(m): complex(v) for m, v in d.items()}
+           for p, d in params.get('zpv', {}).items()}
+
+    def impedance(port: str, mode: int, freq: float) -> complex:
+        kc = cutoff[port][int(mode)]
+        mt = mtype[port][int(mode)]
+        eta = Z0 / np.sqrt(eps.get(port, 1.0))
+        # Quasi-TEM ports renormalise to their stored power-voltage line impedance.
+        if mt == 'qTEM':
+            zli = zpv.get(port, {}).get(int(mode))
+            return complex(zli) if zli is not None and np.isfinite(zli) else complex(eta)
+        if mt == 'TEM':
+            return complex(eta)
+        wc = kc * c0
+        s = 1j * 2 * np.pi * freq
+        sqrt_term = np.sqrt(s ** 2 + wc ** 2)
+        if mt == 'TE':
+            return complex(s * eta / sqrt_term)
+        return complex(eta * sqrt_term / s)
+
+    return impedance
+
+def logical_port_name(face_name: str) -> str:
+    """Logical port a boundary face belongs to (``port1_substrate`` -> ``port1``).
+
+    Faces sharing a leading ``port<N>`` token form one composite port (e.g. an
+    inhomogeneous quasi-TEM microstrip port split by material).  Names without
+    that pattern are returned unchanged.
+    """
+    m = re.match(r'(port\d+)', str(face_name), re.IGNORECASE)
+    return m.group(1) if m else str(face_name)
+
+
+def group_port_faces(boundary_names) -> Dict[str, str]:
+    """Map each logical port to a ``|``-joined mesh-region string of its faces.
+
+    ``['port1_substrate','port1_air','port2_substrate','port2_air']`` ->
+    ``{'port1': 'port1_air|port1_substrate', 'port2': ...}``.  A simple port
+    ``'port1'`` maps to itself, so callers can always resolve a logical port to
+    a region usable in ``mesh.Boundaries(...)`` / ``ds(...)``.
+    """
+    groups: Dict[str, List[str]] = {}
+    for b in boundary_names:
+        if not b or 'port' not in b.lower():
+            continue
+        lp = logical_port_name(b)
+        groups.setdefault(lp, [])
+        if b not in groups[lp]:
+            groups[lp].append(b)
+    return {lp: '|'.join(sorted(faces)) for lp, faces in groups.items()}
+
+
+def sorted_logical_ports(region_map: Dict[str, str]) -> List[str]:
+    """Logical port names sorted by their numeric index (``port2`` after ``port1``)."""
+    def _num(p):
+        digits = ''.join(filter(str.isdigit, p))
+        return int(digits) if digits else 0
+    return sorted(region_map.keys(), key=_num)
+
 
 class PortGeometryType(Enum):
     """Supported port geometry types."""
@@ -127,13 +202,30 @@ class PortEigenmodeSolver:
         self.port_mass_matrices: Dict[str, sp.csr_matrix] = {}
         self.port_mass_forms: Dict[str, BilinearForm] = {}
 
+        # Composite-port support: logical port -> mesh-region string of its
+        # faces (e.g. 'port1' -> 'port1_air|port1_substrate').  Empty for the
+        # common case where each port is a single boundary.
+        self.port_face_region: Dict[str, str] = {}
+
+        # Quasi-TEM (inhomogeneous) port data.  Populated by _solve_port_qtem;
+        # beta (propagation constant), eps_eff (effective permittivity), and
+        # the power-voltage characteristic (line) impedance used as the S-param
+        # renormalisation reference for qTEM modes.
+        self.port_beta: Dict[str, Dict[int, complex]] = {}
+        self.port_eps_eff: Dict[str, Dict[int, complex]] = {}
+        self.port_line_impedance: Dict[str, Dict[int, complex]] = {}
+
+    def _region(self, port: str) -> str:
+        """Resolve a logical port to a mesh-region string (identity if simple)."""
+        return self.port_face_region.get(port, port)
+
     # =========================================================================
     # Geometry Detection (unchanged)
     # =========================================================================
 
     def _compute_port_normal(self, port: str) -> np.ndarray:
         n = specialcf.normal(self.mesh.dim)
-        port_region = self.mesh.Boundaries(port)
+        port_region = self.mesh.Boundaries(self._region(port))
 
         nx = Integrate(n[0], self.mesh, BND, definedon=port_region)
         ny = Integrate(n[1], self.mesh, BND, definedon=port_region)
@@ -157,7 +249,7 @@ class PortEigenmodeSolver:
         return t1, t2
 
     def _compute_port_centroid_and_area(self, port: str) -> Tuple[np.ndarray, float]:
-        port_region = self.mesh.Boundaries(port)
+        port_region = self.mesh.Boundaries(self._region(port))
         area = float(Integrate(CoefficientFunction(1.0), self.mesh, BND, definedon=port_region))
         if area < 1e-14:
             raise ValueError(f"Port '{port}' has near-zero area")
@@ -368,7 +460,7 @@ class PortEigenmodeSolver:
         center, area = self._compute_port_centroid_and_area(port)
         normal = self._compute_port_normal(port)
         t1, t2 = self._compute_tangent_frame(normal)
-        port_region = self.mesh.Boundaries(port)
+        port_region = self.mesh.Boundaries(self._region(port))
 
         # Local coordinates on port plane
         u = (x - center[0]) * t1[0] + (y - center[1]) * t1[1] + (z - center[2]) * t1[2]
@@ -911,7 +1003,14 @@ class PortEigenmodeSolver:
     # =========================================================================
 
     def solve(self, nmodes: Union[int, Dict[str, int]] = 1,
-              internal_ports: Optional[List[str]] = None) -> Tuple[Dict, Dict]:
+              internal_ports: Optional[List[str]] = None,
+              qtem_ports: Optional[List[str]] = None,
+              port_eps_bnd: Optional[Dict[str, 'CoefficientFunction']] = None,
+              port_conductor_bbnd: Optional[Dict[str, str]] = None,
+              k0_ref: Optional[float] = None,
+              port_voltage_path: Optional[Dict[str, Tuple]] = None,
+              port_eps_max: Optional[Dict[str, float]] = None,
+              ) -> Tuple[Dict, Dict]:
         pr.running("Calculating Port Eigenmodes...")
         pr.info("=" * 60)
         pr.info(f"  Mode source: {self.mode_source}")
@@ -919,10 +1018,19 @@ class PortEigenmodeSolver:
         pr.info(f"  Requested modes per port: {nmodes}")
         pr.info("-" * 60)
 
-        ports = sorted([b for b in self.mesh.GetBoundaries() if 'port' in b.lower()], key=lambda x: int(x[4:])) # make sure to sort port
+        # Group boundary faces into logical ports (composite / inhomogeneous
+        # qTEM ports split by material collapse to a single logical port).
+        self.port_face_region = group_port_faces(self.mesh.GetBoundaries())
+        ports = sorted_logical_ports(self.port_face_region)
 
         if not ports:
             raise ValueError("No ports found in mesh")
+
+        _qtem = set(qtem_ports or [])
+        _eps_bnd = dict(port_eps_bnd or {})
+        _cond_bbnd = dict(port_conductor_bbnd or {})
+        _vpath = dict(port_voltage_path or {})
+        _eps_max = dict(port_eps_max or {})
 
         # Resolve modes-per-port: an int applies to every port; a dict maps
         # port name -> count (ports not listed default to 1).
@@ -951,7 +1059,8 @@ class PortEigenmodeSolver:
                 pr.debug(f"    R_outer={geometry.radius:.6f}, R_inner={geometry.inner_radius:.6f}")
 
         if self.mode_source == 'analytic':
-            unsupported = [p for p, g in self.port_geometries.items() if g.type == PortGeometryType.UNKNOWN]
+            unsupported = [p for p, g in self.port_geometries.items()
+                           if g.type == PortGeometryType.UNKNOWN and p not in _qtem]
             if unsupported:
                 raise ValueError(
                     f"Analytic modes requested but ports {unsupported} have "
@@ -967,7 +1076,7 @@ class PortEigenmodeSolver:
         self.port_mass_forms.clear()
 
         for port in ports:
-            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(port))
+            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(self._region(port)))
             with TaskManager():
                 m_form.Assemble()
             M_bnd = sp.csr_matrix(m_form.mat.CSR())
@@ -986,7 +1095,27 @@ class PortEigenmodeSolver:
             is_internal = port in _internal_ports
 
             nm_port = _nmodes_for(port)
-            if self.mode_source == 'analytic':
+            # A composite (multi-face) port is only supported as a quasi-TEM port;
+            # the analytic/numeric TE/TM/TEM solvers below take the port name as a
+            # single mesh region and would silently see an empty region otherwise.
+            if port not in _qtem and self._region(port) != port:
+                raise NotImplementedError(
+                    f"Port '{port}' groups multiple mesh faces "
+                    f"('{self._region(port)}') but is not a quasi-TEM port. "
+                    f"Multi-face composite ports are currently supported only as "
+                    f"quasi-TEM ports — add '{port}' to qtem_ports, or give the "
+                    f"port a single boundary face.")
+            if port in _qtem:
+                pr.debug(f"  Quasi-TEM calculation for port {port} ({nm_port} mode(s))")
+                self._solve_port_qtem(
+                    port, nm_port, fes_full,
+                    eps_r_bnd=_eps_bnd.get(port),
+                    cond_bbnd=_cond_bbnd.get(port),
+                    k0_ref=k0_ref,
+                    voltage_path=_vpath.get(port),
+                    eps_max=_eps_max.get(port),
+                )
+            elif self.mode_source == 'analytic':
                 if is_internal and self.mode_source_internal == 'numeric':
                     pr.debug(f"  Numeric calculation for internal port {port} ({nm_port} mode(s))")
                     self._solve_port_numeric(port, nm_port, fes_full)
@@ -1149,14 +1278,221 @@ class PortEigenmodeSolver:
 
                 mode_idx += 1
         print()
-    
+
+    # =========================================================================
+    # Quasi-TEM (inhomogeneous / microstrip) port modes
+    # =========================================================================
+
+    def _solve_port_qtem(self, port: str, nmodes: int, fes_full: HCurl,
+                         eps_r_bnd: Optional[CoefficientFunction] = None,
+                         cond_bbnd: Optional[str] = None,
+                         k0_ref: Optional[float] = None,
+                         voltage_path: Optional[Tuple] = None,
+                         eps_max: Optional[float] = None) -> None:
+        """Solve quasi-TEM modes on an inhomogeneous port cross-section.
+
+        Uses the classic mixed HCurl(Et) x H1(Ez) vector-FE formulation, solved
+        at a reference wavenumber ``k0_ref`` with the (spatially varying) port
+        permittivity ``eps_r_bnd``.  The propagation constant beta is the
+        eigenvalue's square root; modes are ordered to match CST — physical
+        propagating modes sorted by **descending real(beta)** (the fundamental
+        quasi-TEM mode first).  ``nmodes`` of them are kept.
+
+        The transverse field Et is stored as the port mode (feeds the FOM port
+        basis B); the power-voltage characteristic impedance Z_PV is stored as
+        the S-parameter renormalisation reference (see get_port_wave_impedance).
+        """
+        region = self._region(port)
+        port_region = self.mesh.Boundaries(region)
+
+        if eps_r_bnd is None:
+            eps_r_bnd = CoefficientFunction(1.0)
+        if k0_ref is None or k0_ref <= 0:
+            raise ValueError(
+                f"qTEM port '{port}' requires a positive reference wavenumber "
+                f"k0_ref (set from the solve frequency range).")
+
+        # Mixed space on the port trace, PEC (Dirichlet) on conductor edges.
+        fesEt = HCurl(self.mesh, order=self.order,
+                      definedon=port_region, complex=True,
+                      dirichlet_bbnd=(cond_bbnd or ''))
+        GEt, fesEz = fesEt.CreateGradient()
+        fes = fesEt * fesEz
+        (Et, p), (Ft, q) = fes.TnT()
+
+        k0 = float(k0_ref)
+        a = BilinearForm(fes)
+        a += (curl(Et).Trace() * curl(Ft).Trace()
+              - k0**2 * eps_r_bnd * Et.Trace() * Ft.Trace()) * ds(region)
+        a += -grad(p).Trace() * Ft.Trace() * ds(region)
+        a += (grad(p).Trace() * grad(q).Trace()
+              - k0**2 * eps_r_bnd * p.Trace() * q.Trace()) * ds(region)
+
+        m = BilinearForm(fes)
+        m += -Et.Trace() * Ft.Trace() * ds(region)
+        m += Et.Trace() * grad(q).Trace() * ds(region)
+
+        n_eig = max(30, nmodes * 8)
+        with TaskManager():
+            a.Assemble()
+            m.Assemble()
+            evecs = GridFunction(fes, multidim=n_eig, name='qtem_modes')
+            lam = ArnoldiSolver(a.mat, m.mat, fes.FreeDofs(),
+                                list(evecs.vecs), shift=1.0)
+
+        lam = np.array([complex(l) for l in lam])
+        beta = np.sqrt(lam)
+        eps_eff = lam / k0**2
+        if eps_max is None or eps_max <= 0:
+            eps_max = self._eps_bnd_max(eps_r_bnd)
+
+        # CST-matching ordering: keep physical propagating modes (real beta
+        # dominant, effective permittivity between vacuum and the max material),
+        # then sort by descending real(beta) — fundamental quasi-TEM first.
+        cand = []
+        for i in range(len(lam)):
+            b, ee = beta[i], eps_eff[i]
+            if (b.real > 1e-3 and abs(b.imag) < 0.3 * abs(b.real)
+                    and 1.0 <= ee.real <= eps_max * 1.15):
+                cand.append((i, b, ee))
+        cand.sort(key=lambda z: -z[1].real)
+
+        # Reset per-port storage
+        for d in (self.port_modes, self.port_cutoff_kc, self.port_cutoff_frequencies,
+                  self.port_basis, self.port_mode_types, self.port_phase_signs,
+                  self.port_mode_polarizations, self.port_mode_degeneracies,
+                  self.port_mode_indices, self.port_beta, self.port_eps_eff,
+                  self.port_line_impedance):
+            d[port] = {}
+
+        fes_port = HCurl(self.mesh, order=self.order, complex=False,
+                         definedon=port_region)
+        omega = k0 * c0
+
+        kept = 0
+        for (idx, b, ee) in cand:
+            if kept >= nmodes:
+                break
+            gf = GridFunction(fes)
+            gf.vec.data = evecs.vecs[idx]
+            Et_c = gf.components[0]   # complex HCurl transverse field
+
+            # De-phase to a (near-)real field so the FOM port basis stays real.
+            Et_real = self._dephase_to_real(Et_c, fes_port, port_region)
+
+            norm_sq = float(np.real(Integrate(
+                InnerProduct(Et_real, Et_real), self.mesh, BND,
+                definedon=port_region)))
+            if norm_sq < 1e-20:
+                continue
+            Et_real.vec.data /= np.sqrt(norm_sq)
+
+            # Power-voltage characteristic (line) impedance for S renormalisation
+            zpv = self._compute_qtem_zpv(Et_c, b.real, omega, port_region,
+                                         voltage_path)
+
+            basis = self._create_basis_vector(Et_real, port, fes_full)
+
+            self.port_modes[port][kept] = Et_real
+            self.port_basis[port][kept] = basis
+            self.port_cutoff_kc[port][kept] = 0.0
+            self.port_cutoff_frequencies[port][kept] = 0.0
+            self.port_mode_types[port][kept] = 'qTEM'
+            self.port_phase_signs[port][kept] = 1.0
+            self.port_mode_polarizations[port][kept] = self.polarization_angle
+            self.port_mode_degeneracies[port][kept] = 1
+            self.port_mode_indices[port][kept] = (0, 0)
+            self.port_beta[port][kept] = complex(b)
+            self.port_eps_eff[port][kept] = complex(ee)
+            self.port_line_impedance[port][kept] = complex(zpv)
+
+            print(f"\t{port} mode {kept}: qTEM, eps_eff={ee.real:.4f}, "
+                  f"beta={b.real:.3f} rad/m, Z_PV={zpv.real:.2f} ohm")
+            kept += 1
+
+        if kept == 0:
+            raise RuntimeError(
+                f"qTEM port '{port}': no physical propagating mode found. "
+                f"Check the conductor edge groups (dirichlet_bbnd) and the "
+                f"port permittivity map.")
+
+    @staticmethod
+    def _eps_bnd_max(eps_r_bnd: CoefficientFunction) -> float:
+        """Upper bound on the port permittivity for the physical-mode filter.
+
+        The caller (the frequency-domain solver) passes the exact per-port
+        maximum; this generous fallback is only used when :meth:`_solve_port_qtem`
+        is driven directly without one.
+        """
+        return 100.0
+
+    def _dephase_to_real(self, Et_complex, fes_port_real: HCurl, port_region) -> GridFunction:
+        """Rotate a complex mode by a global phase and take its real part.
+
+        A quasi-TEM cross-section mode is real up to a single global phase e^{i*phi};
+        the FOM port basis must be real, so we align the field to the real axis.
+
+        The phase must come from the **non-conjugated** self-product
+        integral(Et . Et) = e^{2i*phi} integral|Er|^2 (angle = 2*phi).  NGSolve's
+        ``InnerProduct`` is Hermitian (conjugated) and would give a real result
+        (angle 0, i.e. no rotation) — which silently drops the mode when the raw
+        eigenvector happens to carry a ~90 deg global phase.
+        """
+        dim = Et_complex.dim
+        bilinear = sum(Et_complex[k] * Et_complex[k] for k in range(dim))
+        ip = complex(Integrate(bilinear, self.mesh, BND, definedon=port_region))
+        phase = 0.5 * np.angle(ip) if abs(ip) > 1e-30 else 0.0
+        rot = CoefficientFunction(np.exp(-1j * phase)) * Et_complex
+        gf = GridFunction(fes_port_real)
+        gf.Set(rot.real, definedon=port_region)
+        return gf
+
+    def _compute_qtem_zpv(self, Et_complex, beta_real: float, omega: float,
+                          port_region, voltage_path: Optional[Tuple]) -> complex:
+        """Power-voltage characteristic impedance Z_PV = |V|^2 / (2 P).
+
+        Quasi-TEM transverse magnetic field Ht = (beta/omega/mu0) (z x Et), so
+        the time-average power flow is P = 0.5 (beta/omega/mu0) integral |Et|^2.
+        V is the line integral of Et along ``voltage_path`` (ground -> strip).
+        Z_PV is invariant to the mode's global scale/phase.
+        """
+        P = 0.5 * (beta_real / (omega * mu0)) * float(np.real(Integrate(
+            InnerProduct(Et_complex, Et_complex), self.mesh, BND,
+            definedon=port_region)))
+        if P <= 0 or voltage_path is None:
+            return complex('nan')
+
+        p0 = np.asarray(voltage_path[0], dtype=float)
+        p1 = np.asarray(voltage_path[1], dtype=float)
+        seg = p1 - p0
+        n_samp = 200
+        ts = np.linspace(0.0, 1.0, n_samp)
+        V = 0j
+        Evals = np.zeros(n_samp, dtype=complex)
+        for j, tt in enumerate(ts):
+            pt = p0 + tt * seg
+            try:
+                val = Et_complex(self.mesh(pt[0], pt[1], pt[2], BND))
+                Evals[j] = complex(np.dot([complex(v) for v in val], seg)
+                                   / (np.linalg.norm(seg) + 1e-30))
+            except Exception:
+                Evals[j] = 0j
+        dl = np.linalg.norm(seg)
+        V = np.trapz(Evals, ts) * dl
+        # Degenerate path (all point evaluations failed / near-zero voltage):
+        # return NaN so the impedance lookup falls back cleanly rather than
+        # renormalising S to ~0 ohm.
+        if not np.isfinite(V) or abs(V) < 1e-12:
+            return complex('nan')
+        return complex(abs(V) ** 2 / (2.0 * P))
+
     # =========================================================================
     # Optimized basis vector creation
     # =========================================================================
 
     def _create_basis_vector(self, mode_gf: GridFunction, port: str, fes_full: HCurl) -> np.ndarray:
         """Create mass-weighted basis vector using precomputed matrix."""
-        port_region = self.mesh.Boundaries(port)
+        port_region = self.mesh.Boundaries(self._region(port))
 
         # Use precomputed mass matrix
         M_bnd = self.port_mass_matrices[port]
@@ -1203,6 +1539,15 @@ class PortEigenmodeSolver:
             'port_mode_polarizations': {p: dict(m) for p, m in self.port_mode_polarizations.items()},
             'port_mode_degeneracies': {p: dict(m) for p, m in self.port_mode_degeneracies.items()},
             'port_mode_indices': {p: dict(m) for p, m in self.port_mode_indices.items()},
+
+            # Composite / quasi-TEM port data
+            'port_face_region': dict(self.port_face_region),
+            'port_beta': {p: {m: complex(v) for m, v in d.items()}
+                          for p, d in self.port_beta.items()},
+            'port_eps_eff': {p: {m: complex(v) for m, v in d.items()}
+                             for p, d in self.port_eps_eff.items()},
+            'port_line_impedance': {p: {m: complex(v) for m, v in d.items()}
+                                    for p, d in self.port_line_impedance.items()},
 
             # Numpy arrays
             'port_normals': {p: n.tolist() for p, n in self.port_normals.items()},
@@ -1302,6 +1647,15 @@ class PortEigenmodeSolver:
             for p, modes in data['port_mode_indices'].items()
         }
 
+        # Restore composite / quasi-TEM port data
+        solver.port_face_region = dict(data.get('port_face_region', {}))
+        solver.port_beta = {p: {int(m): complex(v) for m, v in d.items()}
+                            for p, d in data.get('port_beta', {}).items()}
+        solver.port_eps_eff = {p: {int(m): complex(v) for m, v in d.items()}
+                               for p, d in data.get('port_eps_eff', {}).items()}
+        solver.port_line_impedance = {p: {int(m): complex(v) for m, v in d.items()}
+                                      for p, d in data.get('port_line_impedance', {}).items()}
+
         # Restore numpy arrays
         solver.port_normals = {p: np.array(n) for p, n in data['port_normals'].items()}
         solver.port_polarizations = {p: np.array(n) for p, n in data['port_polarizations'].items()}
@@ -1334,7 +1688,7 @@ class PortEigenmodeSolver:
         u_full, v_full = fes_full.TnT()
 
         for port in ports:
-            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(port))
+            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(solver._region(port)))
             with TaskManager():
                 m_form.Assemble()
             M_bnd = sp.csr_matrix(m_form.mat.CSR())
@@ -1347,7 +1701,7 @@ class PortEigenmodeSolver:
             fes_port = HCurl(
                 mesh, order=data['order'],
                 dirichlet=data['bc'],
-                definedon=mesh.Boundaries(port)
+                definedon=mesh.Boundaries(solver._region(port))
             )
 
             solver.port_modes[port] = {}
@@ -1796,6 +2150,24 @@ class PortEigenmodeSolver:
     # Wave Impedance & Utility Methods
     # ────────────────────────────────────────────────────────────────────────
 
+    def _port_media_eps_for(self, port) -> float:
+        """Relative permittivity of the medium filling a (possibly composite) port.
+
+        ``port_media_eps`` is keyed by mesh FACE name; a composite qTEM port
+        (``port1`` = ``port1_substrate|port1_air``) resolves to the max eps over
+        its member faces.  Defaults to vacuum (1.0).
+        """
+        eps_map = getattr(self, 'port_media_eps', {}) or {}
+        if not eps_map:
+            return 1.0
+        key = str(port)
+        if key in eps_map:
+            return float(eps_map[key])
+        region = self.port_face_region.get(key, key)
+        faces = region.split('|')
+        vals = [float(eps_map[f]) for f in faces if f in eps_map]
+        return max(vals) if vals else 1.0
+
     def get_port_wave_impedance(self, port: str, mode: int, freq: float) -> complex:
         # Robust lookup: handle cases where port keys might be ints or strings
         try:
@@ -1817,6 +2189,17 @@ class PortEigenmodeSolver:
             # Fallback: if 'port1' is requested but keys are 'port1', 1, etc.
             # and our logic above didn't find it, just raise a more helpful error
             raise KeyError(f"Port '{port}' not found in solver data. Available: {list(self.port_cutoff_kc.keys())}")
+
+        # Quasi-TEM ports renormalise S to their power-voltage line impedance
+        # (matches CST's reference impedance), not the analytic wave impedance.
+        if mode_type == 'qTEM':
+            zpv = (self.port_line_impedance.get(p_key, {}) or {}).get(mode)
+            if zpv is not None and np.isfinite(zpv) and complex(zpv).real > 1e-6:
+                return complex(zpv)
+            # Fallback: medium wave impedance eta = eta0 / sqrt(eps_r).  Resolve
+            # eps from the port's member faces (port_media_eps is keyed by FACE
+            # name, e.g. 'port1_substrate', not the logical port 'port1').
+            return complex(Z0 / np.sqrt(self._port_media_eps_for(p_key)))
 
         wc = kc * c0
         s = 1j * 2 * np.pi * freq

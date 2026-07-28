@@ -74,7 +74,14 @@ class PlainFormatter(logging.Formatter):
 logger = logging.getLogger('cavsim3d')
 logger.setLevel(VERBOSE)  # Logger always accepts everything; handlers filter
 
-# Console handler
+# Console handler.  On Windows the console stream is often cp1252, which
+# cannot encode the emoji/box-drawing characters used in log messages and
+# makes the logging module print a traceback for every such record.  Prefer
+# UTF-8 with replacement so log emission can never fail.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except (AttributeError, ValueError, OSError):
+    pass
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(ColorFormatter('%(message)s'))
 console_handler.setLevel(MILESTONE)  # Default: show only milestones+ on console

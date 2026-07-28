@@ -18,6 +18,9 @@ from ngsolve.webgui import Draw
 from ngsolve import Mesh
 
 from .base import BaseGeometry, _display_webgui_fallback
+
+if TYPE_CHECKING:
+    from cavsim3d.core.reuse import ImportedModel
 from .component_registry import (
     TaggableMixin, ComponentTag, ComputeMethod,
     get_global_cache
@@ -63,6 +66,9 @@ class ComponentEntry:
     
     def _compute_bounds(self) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
         geo = self.geometry
+        if isinstance(geo, (str, Path)) or hasattr(geo, 'project_path'):
+            # Netlist reference to an existing project: no geometry to measure.
+            return ((0, 0, 0), (1, 1, 1))
         if isinstance(geo, Assembly):
             return geo.get_assembly_bounds()
         elif geo.geo is not None:
@@ -188,27 +194,30 @@ class Assembly(BaseGeometry):
     def add(
         self,
         name: str,
-        geometry: Union[BaseGeometry, 'Assembly'],
+        geometry: Union[BaseGeometry, 'Assembly', str, Path, 'ImportedModel'],
         position: Optional[Tuple[float, float, float]] = None,
         rotation: Optional[Tuple[float, float, float]] = None,
         after: Optional[str] = None,
         before: Optional[str] = None,
         align_port: Optional[str] = None,
+        n: int = 1,
         **metadata
     ) -> 'Assembly':
         """
-        Add a component (geometry or sub-assembly) to the assembly.
-        
+        Add a component (geometry, sub-assembly, or existing-project path).
+
         Duplicate names are allowed and automatically suffixed with _1, _2, etc.
         Components with the same base name are tracked for solver optimization
         (compute once, reuse for identical geometries).
-        
+
         Parameters
         ----------
         name : str
             Component name (duplicates allowed, will be auto-suffixed)
-        geometry : BaseGeometry or Assembly
-            Component to add (can be another Assembly!)
+        geometry : BaseGeometry, Assembly, or str/Path
+            Component to add.  A str/Path refers to an already-run project
+            folder whose saved results (FOM/ROM) are loaded at concatenation
+            time instead of recomputed (netlist reference).
         position : tuple, optional
             Explicit position (x, y, z)
         rotation : tuple, optional
@@ -219,21 +228,29 @@ class Assembly(BaseGeometry):
             Place before this component along main axis (can use base name)
         align_port : str, optional
             Port to use for alignment
+        n : int
+            Number of consecutive repetitions of this component (default 1).
+            The component is computed ONCE and referenced n times.
         **metadata
             Additional metadata
-        
+
         Returns
         -------
         self : Assembly
-        
+
         Examples
         --------
         >>> assembly.add("midcell", midcell)           # -> "midcell_1"
-        >>> assembly.add("midcell", midcell)           # -> "midcell_2"  
-        >>> assembly.add("midcell", midcell)           # -> "midcell_3"
+        >>> assembly.add("midcell", midcell)           # -> "midcell_2"
+        >>> assembly.add("cavity", cavity, n=8)        # 8x, computed once
+        >>> assembly.add("hom", "path/to/hom_project") # reuse existing results
         >>> assembly.get_identical_components()
         {'midcell': ['midcell_1', 'midcell_2', 'midcell_3']}
         """
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        metadata["n"] = int(n)
+
         base_name = name
         
         # Generate unique key if name already exists
@@ -256,8 +273,11 @@ class Assembly(BaseGeometry):
             self._base_name_groups[base_name] = []
         self._base_name_groups[base_name].append(key)
         
-        # Handle sub-assemblies
-        if isinstance(geometry, Assembly):
+        # Handle sub-assemblies / netlist references (project path or an
+        # ImportedModel handle from fds.import_model()).
+        if isinstance(geometry, (str, Path)) or hasattr(geometry, 'project_path'):
+            pass  # existing-project reference; resolved at concatenation time
+        elif isinstance(geometry, Assembly):
             if not geometry._is_built:
                 geometry.build()
         elif geometry.geo is None:
@@ -328,10 +348,11 @@ class Assembly(BaseGeometry):
         self._is_built = False
         self.invalidate_tag()
         self._record(
-            'add', 
-            name=name, 
+            'add',
+            name=name,
             geometry_type=type(geometry).__name__,
-            geometry_history=geometry.get_history(),
+            geometry_history=(str(geometry) if isinstance(geometry, (str, Path))
+                              else geometry.get_history()),
             position=position,
             rotation=rotation,
             after=after,
@@ -396,7 +417,7 @@ class Assembly(BaseGeometry):
         # Try as base name - return last instance
         if ref in self._base_name_groups and self._base_name_groups[ref]:
             return self._base_name_groups[ref][-1]
-        
+
         raise ValueError(f"Component '{ref}' not found")
     
     def get_identical_components(self) -> Dict[str, List[str]]:
