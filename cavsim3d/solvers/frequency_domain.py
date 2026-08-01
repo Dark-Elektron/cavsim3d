@@ -1867,7 +1867,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Build spatially-varying material CoefficientFunctions
         eps_r_cf, mu_r_cf = self._build_material_cfs()
-        # print("eps r cf", eps_r_cf)
 
         if st == 'iterative':
             fes = self._prepare_iterative(fes, iter_opts)
@@ -1966,7 +1965,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if st == 'direct':
                 with TaskManager():
                     a_form.Assemble()
-                    # print('direct solder is ', _DIRECT_SOLVER)
                     inv_a = a_form.mat.Inverse(
                         freedofs=freedofs,
                         inverse=_DIRECT_SOLVER
@@ -1983,12 +1981,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 else:
                     print('Preconditioner not found, defaulting to local.')
                     precond = preconditioners.Local(a_form)
-                # start = time.time()
                 with TaskManager():
                     a_form.Assemble() # only assemble a_form after attaching a preconditioner
                     if iter_opts['precond'].lower() == 'direct':
                         precond = a_form.mat.Inverse(fes.FreeDofs(), inverse=_DIRECT_SOLVER)
-                # print('assy time', time.time() - start)
             # Solve for all excitations
             x_all = np.zeros((fes.ndof, n_excitations))
 

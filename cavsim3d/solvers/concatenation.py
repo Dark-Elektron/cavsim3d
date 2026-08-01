@@ -443,10 +443,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             matched = {m for m in all_mats if m == domain_name or m.startswith(domain_name + '/')}
             return matched if matched else {domain_name}
 
-        # Debug: print all mesh material names
-        all_mesh_mats = set(self.mesh.GetMaterials())
-        print(f"  [DEBUG] All mesh materials: {sorted(all_mesh_mats)}")
-
         for struct_idx, struct in enumerate(self.structures):
             domain_name = struct.domain
             domain_mats = _get_domain_mats(domain_name)
