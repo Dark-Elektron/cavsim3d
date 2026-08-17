@@ -95,7 +95,7 @@ nav:
           - Creating Models from Primitives: tutorials/creating_primitives.ipynb
           - Creating Geometry from the Project: tutorials/creating_geometry_from_project.ipynb
           - Persistence: tutorials/persistence.md
-  - Mathematical Theory: theory.md
+  # - Mathematical Theory: theory.md   # temporarily excluded from nav (content kept in docs/theory.md)
   - API Reference:
       - Project Management: api/project.md
       - Geometry & Assembly: api/geometry.md

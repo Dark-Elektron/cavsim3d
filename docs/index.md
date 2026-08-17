@@ -66,6 +66,7 @@ The resulting ROM enables the frequency domain problem to be evaluated over a mu
 
     [:octicons-arrow-right-24: Tutorials](tutorials/pathway1_single_solid.ipynb)
 
+<!-- Theory section temporarily excluded from docs (content kept in theory.md).
 -   :material-function-variant:{ .lg } **Mathematical Theory**
 
     ---
@@ -73,6 +74,7 @@ The resulting ROM enables the frequency domain problem to be evaluated over a mu
     The physics and numerics behind the solver.
 
     [:octicons-arrow-right-24: Theory](theory.md)
+-->
 
 -   :material-api:{ .lg } **API Reference**
 
