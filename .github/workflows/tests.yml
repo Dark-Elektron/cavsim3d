@@ -35,9 +35,15 @@ jobs:
         shell: bash -el {0}
         run: |
           python -m pip install --upgrade pip
-          conda install -y pythonocc-core pythreejs ipywidgets --no-update-deps
-          pip install -e .
-          pip install pytest pytest-cov
+          # Install ngsolve + pythonocc-core from conda-forge: ngsolve pulls in
+          # MKL (libmkl_rt) and netgen and is ABI-matched to the conda OCC. The
+          # PyPI ngsolve wheel needs libmkl_rt.so.2, which is absent otherwise
+          # -> ImportError at collection.
+          conda install -y -c conda-forge ngsolve pythonocc-core pythreejs ipywidgets
+          # Editable install WITHOUT deps so pip does not replace the conda
+          # ngsolve with an MKL-less PyPI build; then the pure-Python deps.
+          pip install -e . --no-deps
+          pip install matplotlib scipy tqdm termcolor h5py gmsh ipython pytest pytest-cov
 
 
       - name: Run tests
@@ -47,7 +53,7 @@ jobs:
           PYTHONUTF8: 1
         run: |
           set -o pipefail
-          pytest -v --tb=short
+          pytest -v --tb=short 2>&1 | tee pytest-output.log
 
       - name: Upload test log
         if: always()
