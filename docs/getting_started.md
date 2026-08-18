@@ -58,17 +58,17 @@ a linear system at each frequency point, and computes the S- and Z-parameter mat
 rom = proj.fds.fom.reduce(tol=1e-6)
 
 # Solve the ROM over a much finer frequency grid (fast — milliseconds)
-cavsim3d.rom.solve(fmin=1.5, fmax=3.0, nsamples=500)
+rom.solve(fmin=1.5, fmax=3.0, nsamples=500)
 ```
 
 ### Step 4: Plot Results
 
 ```python
 # Plot S-parameters
-cavsim3d.rom.plot_s(plot_type='db')
+rom.plot_s(plot_type='db', show=True)
 
 # Plot Z-parameters
-cavsim3d.rom.plot_z(plot_type='db')
+rom.plot_z(plot_type='db', show=True)
 ```
 
 ## Next Steps
