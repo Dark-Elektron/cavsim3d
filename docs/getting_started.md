@@ -20,7 +20,7 @@ pip install -e .
 
 ## Your First Simulation
 
-This example creates a rectangular waveguide, runs an FEM frequency sweep, reduces it via proper orthogonal decomposition (POD), and plots S-parameters.
+This example creates a rectangular waveguide, inspects it, runs an FEM frequency sweep, reduces it via proper orthogonal decomposition (POD), and plots S-parameters.
 
 ### Step 1: Create the Geometry
 
@@ -41,7 +41,54 @@ proj.geometry = wg
 # proj.create_primitive('rwg', a=0.1, L=0.2, maxh=0.04)
 ```
 
-### Step 2: Solve the Full-Order Model (FOM)
+### Step 2: Inspect the Geometry
+
+Before committing to a solve, check that the geometry and its mesh are what you expect.
+Primitives build and mesh themselves on construction (using the `maxh` you passed), so
+nothing extra is needed here.
+
+```python
+# Interactive 3D view of the CAD solid
+proj.geo.show()
+
+# ...or view the mesh the solver will actually use
+proj.geo.show('mesh')
+
+# Text summary: mesh size, port boundaries, geometry tag
+proj.geo.print_info()
+```
+
+```text
+======================================================================
+RectangularWaveguide Geometry Information
+======================================================================
+Geometry type:          RectangularWaveguide
+Compute method:         numeric
+Supports analytical:    True
+Boundary condition:     left|right|top|bottom
+
+Component Tag:
+  Full:                 RectangularWaveguide:a9dccab0
+  Geometry hash:        a9dccab0e52c9952...
+
+Cache status:           NOT CACHED
+
+Mesh generated:         True
+  Vertices:             48
+  Elements:             90
+  Ports:                ['port1', 'port2']
+======================================================================
+```
+
+The two `port*` faces are the boundaries the solver excites, so this waveguide yields a
+2 x 2 S-matrix. If the mesh looks too coarse, recreate the geometry with a smaller `maxh`.
+
+!!! note
+    `show()` renders through NGSolve's WebGUI, so it displays inside Jupyter (or the
+    rendered notebook tutorials). Called from a plain `.py` script it opens no viewer —
+    use `print_info()` there instead.
+
+### Step 3: Solve the Full-Order Model (FOM)
 
 ```python
 # Run an FEM frequency sweep from 1.5 to 3.0 GHz with 30 sample points
@@ -51,7 +98,7 @@ results = proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30)
 This assembles the stiffness ($\mathbf{K}$), mass ($\mathbf{M}$), and port excitation ($\mathbf{B}$) matrices, solves
 a linear system at each frequency point, and computes the S- and Z-parameter matrices.
 
-### Step 3: Reduce to a ROM
+### Step 4: Reduce to a ROM
 
 ```python
 # Create a Reduced Order Model using POD (Proper Orthogonal Decomposition)
@@ -61,7 +108,7 @@ rom = proj.fds.fom.reduce(tol=1e-6)
 rom.solve(fmin=1.5, fmax=3.0, nsamples=500)
 ```
 
-### Step 4: Plot Results
+### Step 5: Plot Results
 
 ```python
 # Plot S-parameters
