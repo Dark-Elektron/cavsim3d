@@ -23,7 +23,7 @@ setup(
     author_email='numurho@gmail.com',
     url=r'https://github.com/Dark-Elektron/cavsim3d',
     license='LGPL',
-    python_requires='>=3.9,<3.13',
+    python_requires='>=3.9,<3.14',
     install_requires=[
         'matplotlib',
         'numpy',

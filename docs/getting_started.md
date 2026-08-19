@@ -5,7 +5,7 @@ This guide walks you through a simple simulation.
 ## 📦 Installation
 ### Prerequisites
 
-- Python 3.9-3.12
+- Python 3.9-3.13
 - Conda environment
 
 To install `cavsim3d` from source, clone the repository and install it using `pip` in editable or normal mode:
