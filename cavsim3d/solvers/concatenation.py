@@ -758,27 +758,32 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         F = self._build_incidence_matrix()
         C = B_int @ F
 
-        CtC = C.T.conj() @ C
-        # With no internal connections (e.g. a single-section netlist) C is
-        # (n, 0) and CtC is 0x0, so the constraint projector below degenerates
-        # to the identity. SciPy >= 1.15 returns an empty pinvh here, but
-        # older SciPy (i.e. every Python 3.9 build) raises inside eigh:
-        #   _flapack.error: (il>=1&&il<=n) failed ... zheevr:il=1
-        # Short-circuit so the result is the same on every SciPy version.
-        if CtC.size == 0:
-            CtC_inv = np.zeros_like(CtC)
+        if C.shape[1] == 0:
+            # No internal connections (e.g. a single-section netlist). There
+            # are no Kirchhoff constraints, so the projector K and the null
+            # space basis M are both the identity and KM leaves the
+            # block-diagonal system untouched (verified: null_space of a (0,n)
+            # matrix IS exactly I_n, and K reduces to I).
+            #
+            # Building them explicitly would hand 0-sized arrays to pinvh and
+            # null_space. SciPy >= 1.15 tolerates that; every Python 3.9 build
+            # (SciPy <= 1.13) fails deep inside LAPACK, first in eigh
+            #   _flapack.error: (il>=1&&il<=n) failed ... zheevr:il=1
+            # and then in the SVD workspace query
+            #   ValueError: Internal work array size computation failed: -5
+            KM = np.eye(A_blk.shape[0], dtype=complex)
         else:
-            CtC_inv = sl.pinvh(CtC)
+            CtC_inv = sl.pinvh(C.T.conj() @ C)
 
-        I = np.eye(A_blk.shape[0], dtype=complex)
-        K = I - C @ CtC_inv @ C.T.conj()
+            I = np.eye(A_blk.shape[0], dtype=complex)
+            K = I - C @ CtC_inv @ C.T.conj()
 
-        # Null space basis
-        M = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
-        if M.size == 0:
-            raise RuntimeError("Null space empty; constraints overconstrained.")
+            # Null space basis
+            M = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
+            if M.size == 0:
+                raise RuntimeError("Null space empty; constraints overconstrained.")
 
-        KM = K @ M
+            KM = K @ M
 
         # Project system onto constraint-satisfying subspace
         self.A_coupled = KM.T.conj() @ A_blk @ KM

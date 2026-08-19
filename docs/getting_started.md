@@ -21,7 +21,7 @@ pip install -e .
 ## Your First Simulation
 
 This example creates a rectangular waveguide, inspects it, runs an FEM frequency sweep, reduces it via proper orthogonal decomposition (POD), and plots S-parameters. To keep the installation folder clean, navigate to a folder where you want your
-simulation saved and either create a `getting_stated.py` file or a Jupyter Notebook in order to follow the example.
+simulation saved and either create a `getting_started.py` file or a Jupyter Notebook in order to follow the example.
 
 ### Step 1: Create the Geometry
 
