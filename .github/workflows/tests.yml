@@ -35,15 +35,20 @@ jobs:
         shell: bash -el {0}
         run: |
           python -m pip install --upgrade pip
-          # Install ngsolve + pythonocc-core from conda-forge: ngsolve pulls in
-          # MKL (libmkl_rt) and netgen and is ABI-matched to the conda OCC. The
-          # PyPI ngsolve wheel needs libmkl_rt.so.2, which is absent otherwise
-          # -> ImportError at collection.
-          conda install -y -c conda-forge ngsolve pythonocc-core pythreejs ipywidgets
-          # Editable install WITHOUT deps so pip does not replace the conda
-          # ngsolve with an MKL-less PyPI build; then the pure-Python deps.
-          pip install -e . --no-deps
-          pip install matplotlib scipy tqdm termcolor h5py gmsh ipython pytest pytest-cov
+          # pythonocc-core has NO PyPI distribution, so it must come from
+          # conda-forge (it brings its own occt).
+          conda install -y -c conda-forge pythonocc-core pythreejs
+          # ngsolve is NOT packaged on conda-forge -- only the stale, abandoned
+          # `ngsolve` channel (6.2.2201, 2022) has it, hence the previous
+          # PackagesNotFoundInChannelsError. Use the official PyPI wheels:
+          # 6.2.2506 ships cp39-cp313 for linux/macOS/Windows and pulls in
+          # netgen-mesher + netgen-occt AND the `mkl` runtime (the wheel
+          # declares it), so libmkl_rt is present. This mirrors the local dev
+          # environment: pip ngsolve + conda-forge pythonocc-core.
+          # NOTE: ngsolve >= 6.2.2606 requires Python >= 3.10; bumping the pin
+          # in setup.py means dropping 3.9 from the matrix below.
+          pip install -e .
+          pip install pytest pytest-cov
 
 
       - name: Run tests

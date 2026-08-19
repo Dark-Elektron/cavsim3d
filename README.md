@@ -30,7 +30,7 @@ To install `cavsim3d` from source, clone the repository and install it using `pi
 git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
 pip install --upgrade pip
-conda install -y pythonocc-core pythreejs ipywidgets --no-update-deps
+conda install -y -c conda-forge pythonocc-core pythreejs ipywidgets --no-update-deps
 pip install -e .
 ```
 
