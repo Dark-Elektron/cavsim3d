@@ -28,8 +28,19 @@ from ngsolve import (
 from cavsim3d.core.constants import c0, mu0, eps0, Z0
 import cavsim3d.utils.printing as pr
 
-# PARDISO is not available on macOS; fall back to UMFPACK
-_DIRECT_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
+# PARDISO ships with MKL, which the macOS ngsolve wheels do not link, so a
+# fallback is needed there. UMFPACK is NOT it: it aborts with "Numeric
+# factorization failed" on the near-singular A(w) of an open structure (the
+# microstrip qTEM port), where PARDISO survives by perturbing tiny pivots.
+# sparsecholesky is NGSolve's built-in LDL^T -- always compiled into the wheel,
+# no external dependency -- and factors those systems fine.
+_DIRECT_SOLVER = "sparsecholesky" if platform.system() == "Darwin" else "pardiso"
+
+# NumPy 2.0 removed np.trapz in favour of np.trapezoid (identical signature).
+# Bind once so this module works on both NumPy 1.x and 2.x.
+_trapezoid = getattr(np, "trapezoid", None)
+if _trapezoid is None:  # NumPy < 2.0
+    _trapezoid = np.trapz
 
 
 def make_analytic_port_impedance(params: dict):
@@ -1478,7 +1489,7 @@ class PortEigenmodeSolver:
             except Exception:
                 Evals[j] = 0j
         dl = np.linalg.norm(seg)
-        V = np.trapz(Evals, ts) * dl
+        V = _trapezoid(Evals, ts) * dl
         # Degenerate path (all point evaluations failed / near-zero voltage):
         # return NaN so the impedance lookup falls back cleanly rather than
         # renormalising S to ~0 ohm.

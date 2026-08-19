@@ -33,8 +33,13 @@ from cavsim3d.solvers.ports import (
 import cavsim3d.utils.printing as pr
 from cavsim3d.core.persistence import *
 
-# PARDISO is not available on macOS; fall back to UMFPACK
-_DIRECT_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
+# PARDISO ships with MKL, which the macOS ngsolve wheels do not link, so a
+# fallback is needed there. UMFPACK is NOT it: it aborts with "Numeric
+# factorization failed" on the near-singular A(w) of an open structure (the
+# microstrip qTEM port), where PARDISO survives by perturbing tiny pivots.
+# sparsecholesky is NGSolve's built-in LDL^T -- always compiled into the wheel,
+# no external dependency -- and factors those systems fine.
+_DIRECT_SOLVER = "sparsecholesky" if platform.system() == "Darwin" else "pardiso"
 
 class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     """
