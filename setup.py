@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 # -*- coding: utf-8 -*-
 
 
-with open(os.path.join(os.path.dirname(__file__), 'README.md')) as f:
+with open(os.path.join(os.path.dirname(__file__), 'README.md'), encoding="utf-8") as f: #<- important to explictly state format
     readme = f.read()
 
 with open(os.path.join(os.path.dirname(__file__), 'LICENSE')) as f:
@@ -32,7 +32,7 @@ setup(
         'termcolor',
         'h5py',
         'gmsh',
-        'ngsolve',
+        'ngsolve==6.2.2506',
         'ipython',
         'ipywidgets',
     ],

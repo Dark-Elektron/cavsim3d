@@ -1,0 +1,68 @@
+{
+    "project_name": "my_first_sim",
+    "fmin": 1.5,
+    "fmax": 3.0,
+    "nsamples": 30,
+    "order": 3,
+    "bc": "left|right|top|bottom",
+    "use_wave_impedance": true,
+    "is_compound": false,
+    "n_domains": 1,
+    "domains": [
+        "vacuum"
+    ],
+    "n_ports": 2,
+    "ports": [
+        "port1",
+        "port2"
+    ],
+    "external_ports": [
+        "port1",
+        "port2"
+    ],
+    "internal_ports": [],
+    "n_modes_per_port": 1,
+    "port_mode_order": [
+        [
+            "port1",
+            0
+        ],
+        [
+            "port2",
+            0
+        ]
+    ],
+    "global_matrices_assembled": true,
+    "per_domain_matrices_assembled": false,
+    "current_global_method": "coupled",
+    "has_results": true,
+    "solver_history": [
+        {
+            "op": "solve",
+            "fmin": 1.5,
+            "fmax": 3.0,
+            "nsamples": 30,
+            "solver_type": "iterative",
+            "global_method": "coupled",
+            "per_domain": false,
+            "timestamp": "2026-08-18T11:51:41.226140"
+        }
+    ],
+    "geometry_history": [
+        {
+            "op": "generate_mesh",
+            "timestamp": "2026-08-18T11:50:57.342918",
+            "maxh": 0.04,
+            "curve_order": 3
+        },
+        {
+            "op": "__init__",
+            "timestamp": "2026-08-18T11:50:57.342918",
+            "a": 0.1,
+            "L": 0.2,
+            "maxh": 0.04,
+            "compute_method": "numeric"
+        }
+    ],
+    "timestamp": "2026-08-18T11:51:41.399031"
+}

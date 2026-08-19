@@ -1,0 +1,23 @@
+{
+  "type": "RectangularWaveguide",
+  "module": "cavsim3d.geometry.primitives",
+  "source_link": null,
+  "source_filename": "cavsim3d.geometry.step",
+  "source_hash": null,
+  "history": [
+    {
+      "op": "generate_mesh",
+      "timestamp": "2026-08-18T11:50:57.342918",
+      "maxh": 0.04,
+      "curve_order": 3
+    },
+    {
+      "op": "__init__",
+      "timestamp": "2026-08-18T11:50:57.342918",
+      "a": 0.1,
+      "L": 0.2,
+      "maxh": 0.04,
+      "compute_method": "numeric"
+    }
+  ]
+}

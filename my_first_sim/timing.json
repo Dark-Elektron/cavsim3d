@@ -1,0 +1,21 @@
+{
+  "entries": [
+    {
+      "stage": "coupled solve",
+      "category": "FOM",
+      "seconds": 43.771403312683105,
+      "n_samples": 30,
+      "n_dofs": 2900,
+      "n_ports": 2,
+      "solver_type": "iterative"
+    },
+    {
+      "stage": "reduction",
+      "category": "ROM",
+      "seconds": 0.022671222686767578,
+      "full_dofs": 2900,
+      "reduced_dofs": 14,
+      "n_domains": 1
+    }
+  ]
+}

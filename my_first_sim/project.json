@@ -1,0 +1,10 @@
+{
+    "name": "my_first_sim",
+    "timestamp": "2026-08-18T11:51:41.504927",
+    "has_geometry": true,
+    "has_mesh": true,
+    "has_fds": true,
+    "order": 3,
+    "n_port_modes": 1,
+    "bc": null
+}

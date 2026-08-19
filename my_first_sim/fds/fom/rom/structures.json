@@ -1,0 +1,74 @@
+{
+  "structures": [
+    {
+      "domain": "global",
+      "ports": [
+        "port1",
+        "port2"
+      ],
+      "port_modes": {
+        "port1": [
+          0
+        ],
+        "port2": [
+          0
+        ]
+      },
+      "r": 14,
+      "n_full": 2900,
+      "is_full_order": false
+    }
+  ],
+  "impedance": {
+    "cutoff": {
+      "port1": {
+        "0": 31.415926535897924
+      },
+      "port2": {
+        "0": 31.415926535897924
+      }
+    },
+    "mtype": {
+      "port1": {
+        "0": "TE"
+      },
+      "port2": {
+        "0": "TE"
+      }
+    },
+    "eps": {
+      "port1": 1.0,
+      "port2": 1.0
+    },
+    "zpv": {}
+  },
+  "fingerprints": {
+    "port1": {
+      "0": {
+        "kc": 31.415926535897924,
+        "type": "TE",
+        "indices": [
+          1,
+          0
+        ],
+        "pol": 0.0
+      }
+    },
+    "port2": {
+      "0": {
+        "kc": 31.415926535897924,
+        "type": "TE",
+        "indices": [
+          1,
+          0
+        ],
+        "pol": 0.0
+      }
+    }
+  },
+  "band": {
+    "fmin_GHz": 1.5,
+    "fmax_GHz": 3.0,
+    "n_snapshots": 500
+  }
+}
