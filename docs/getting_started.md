@@ -93,7 +93,7 @@ The two `port*` faces are the boundaries the solver excites, so this waveguide y
 
 ```python
 # Run an FEM frequency sweep from 1.5 to 3.0 GHz with 30 sample points
-results = proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30)
+results = proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30, rerun=True)
 ```
 
 This assembles the stiffness ($\mathbf{K}$), mass ($\mathbf{M}$), and port excitation ($\mathbf{B}$) matrices, solves
@@ -106,7 +106,7 @@ a linear system at each frequency point, and computes the S- and Z-parameter mat
 rom = proj.fds.fom.reduce(tol=1e-6)
 
 # Solve the ROM over a much finer frequency grid (fast — milliseconds)
-rom.solve(fmin=1.5, fmax=3.0, nsamples=500)
+rom.solve(fmin=1.5, fmax=3.0, nsamples=500, rerun=True)
 ```
 
 ### Step 5: Plot Results
