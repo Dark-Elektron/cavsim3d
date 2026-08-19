@@ -33,6 +33,11 @@ setup(
         'h5py',
         'gmsh',
         'ngsolve==6.2.2506',
+        # ngsolve 6.2.2506 links libmkl_rt.so.2 (Linux) / mkl_rt.2.dll (Windows).
+        # mkl >= 2026 renamed these to .so.3 / mkl_rt.3.dll, so ngsolve's ctypes
+        # preload no longer satisfies its DT_NEEDED -> ImportError on import.
+        # macOS ngsolve wheels do not link MKL at all.
+        'mkl<2026; platform_system != "Darwin"',
         'ipython',
         'ipywidgets',
     ],

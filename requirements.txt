@@ -3,6 +3,7 @@ numpy
 scipy
 ipython
 ngsolve
+mkl<2026; platform_system != "Darwin"
 gmsh
 ipywidgets
 h5py

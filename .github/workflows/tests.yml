@@ -39,16 +39,45 @@ jobs:
           # conda-forge (it brings its own occt).
           conda install -y -c conda-forge pythonocc-core pythreejs
           # ngsolve is NOT packaged on conda-forge -- only the stale, abandoned
-          # `ngsolve` channel (6.2.2201, 2022) has it, hence the previous
+          # `ngsolve` channel (6.2.2201, 2022) has it, hence the earlier
           # PackagesNotFoundInChannelsError. Use the official PyPI wheels:
           # 6.2.2506 ships cp39-cp313 for linux/macOS/Windows and pulls in
-          # netgen-mesher + netgen-occt AND the `mkl` runtime (the wheel
-          # declares it), so libmkl_rt is present. This mirrors the local dev
-          # environment: pip ngsolve + conda-forge pythonocc-core.
+          # netgen-mesher, netgen-occt and the MKL runtime. setup.py pins
+          # mkl<2026 because ngsolve links libmkl_rt.so.2 / mkl_rt.2.dll and
+          # mkl 2026 renamed those to .so.3 / mkl_rt.3.dll.
           # NOTE: ngsolve >= 6.2.2606 requires Python >= 3.10; bumping the pin
           # in setup.py means dropping 3.9 from the matrix below.
           pip install -e .
+          # Install the MKL runtime EXPLICITLY (not just as ngsolve's transitive
+          # dep). ngsolve/__init__.py preloads MKL via ctypes using
+          # importlib.metadata.files('mkl') / files('intel_openmp') and silently
+          # skips the whole preload on PackageNotFoundError. On Windows that
+          # skip is fatal: since Python 3.8 the loader ignores PATH for
+          # extension-module dependencies, so libngsolve.dll can only find
+          # mkl_rt.2.dll if it was preloaded. Naming both here guarantees the
+          # metadata exists.
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            pip install "mkl<2026" "intel-openmp<2026"
+          fi
           pip install pytest pytest-cov
+
+      - name: Verify ngsolve imports
+        shell: bash -el {0}
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md, os
+          for pkg in ('mkl', 'intel-openmp', 'tbb'):
+              try:
+                  print(f"{pkg} {md.version(pkg)}")
+                  for f in md.files(pkg) or []:
+                      s = str(f)
+                      if 'mkl_rt' in s or 'iomp' in s:
+                          print(f"    {s} exists={os.path.exists(f.locate())}")
+              except md.PackageNotFoundError:
+                  print(f"{pkg}: NOT INSTALLED")
+          import ngsolve
+          print("ngsolve", ngsolve.__version__, "imported OK")
+          PY
 
 
       - name: Run tests
