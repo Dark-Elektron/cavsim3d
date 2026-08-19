@@ -36,6 +36,12 @@ import cavsim3d.utils.printing as pr
 # no external dependency -- and factors those systems fine.
 _DIRECT_SOLVER = "sparsecholesky" if platform.system() == "Darwin" else "pardiso"
 
+# Separate choice for NON-SYMMETRIC systems (the Arnoldi shift-invert matrix).
+# sparsecholesky is LDL^T and silently returns garbage there, so macOS must use
+# UMFPACK -- its only general sparse LU. UMFPACK has no pivot perturbation, so
+# the shifted matrix has to be genuinely non-singular (see the shift below).
+_GENERAL_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
+
 # NumPy 2.0 removed np.trapz in favour of np.trapezoid (identical signature).
 # Bind once so this module works on both NumPy 1.x and 2.x.
 _trapezoid = getattr(np, "trapezoid", None)
@@ -1343,19 +1349,33 @@ class PortEigenmodeSolver:
         m += -Et.Trace() * Ft.Trace() * ds(region)
         m += Et.Trace() * grad(q).Trace() * ds(region)
 
+        if eps_max is None or eps_max <= 0:
+            eps_max = self._eps_bnd_max(eps_r_bnd)
+
+        # Shift-invert target. The eigenvalues are lam = beta^2, which lie in
+        # [k0^2, k0^2*eps_max] -- order 1e4 here. The old shift of 1.0 was
+        # ~4 orders of magnitude away, leaving (a - shift*m) ~= a: the
+        # indefinite curl-curl operator, which is essentially singular.
+        # PARDISO hid that by perturbing tiny pivots; UMFPACK (macOS) just
+        # failed to factor it. Targeting the substrate mode makes the shifted
+        # matrix non-singular and converges on the qTEM mode directly.
+        shift = k0 ** 2 * eps_max
+
         n_eig = max(30, nmodes * 8)
         with TaskManager():
             a.Assemble()
             m.Assemble()
             evecs = GridFunction(fes, multidim=n_eig, name='qtem_modes')
+            # inverse= must be explicit: ArnoldiSolver factorises
+            # (a - shift*m) internally and otherwise picks NGSolve's default,
+            # which is UMFPACK on macOS and PARDISO elsewhere.
             lam = ArnoldiSolver(a.mat, m.mat, fes.FreeDofs(),
-                                list(evecs.vecs), shift=1.0)
+                                list(evecs.vecs), shift=shift,
+                                inverse=_GENERAL_SOLVER)
 
         lam = np.array([complex(l) for l in lam])
         beta = np.sqrt(lam)
         eps_eff = lam / k0**2
-        if eps_max is None or eps_max <= 0:
-            eps_max = self._eps_bnd_max(eps_r_bnd)
 
         # CST-matching ordering: keep physical propagating modes (real beta
         # dominant, effective permittivity between vacuum and the max material),

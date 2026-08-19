@@ -759,7 +759,16 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         C = B_int @ F
 
         CtC = C.T.conj() @ C
-        CtC_inv = sl.pinvh(CtC)
+        # With no internal connections (e.g. a single-section netlist) C is
+        # (n, 0) and CtC is 0x0, so the constraint projector below degenerates
+        # to the identity. SciPy >= 1.15 returns an empty pinvh here, but
+        # older SciPy (i.e. every Python 3.9 build) raises inside eigh:
+        #   _flapack.error: (il>=1&&il<=n) failed ... zheevr:il=1
+        # Short-circuit so the result is the same on every SciPy version.
+        if CtC.size == 0:
+            CtC_inv = np.zeros_like(CtC)
+        else:
+            CtC_inv = sl.pinvh(CtC)
 
         I = np.eye(A_blk.shape[0], dtype=complex)
         K = I - C @ CtC_inv @ C.T.conj()
