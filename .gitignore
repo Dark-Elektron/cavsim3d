@@ -28,3 +28,7 @@ notebooks/
 scripts/
 .claude/
 testbench_runs/
+
+# Python build artifacts
+build/
+dist/

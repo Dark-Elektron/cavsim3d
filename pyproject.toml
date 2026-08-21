@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cavsim3d"
+dynamic = ["version"]
+description = "A set of python codes for 3D rf structure analysis."
+readme = "README.md"
+requires-python = ">=3.9,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Sosoho-Abasi Udongwo", email = "numurho@gmail.com" },
+]
+keywords = [
+    "electromagnetics",
+    "finite-element",
+    "rf-cavity",
+    "model-order-reduction",
+    "waveguide",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "tqdm",
+    "termcolor",
+    "h5py",
+    "gmsh",
+    "ngsolve==6.2.2506",
+    # ngsolve 6.2.2506 links libmkl_rt.so.2 (Linux) / mkl_rt.2.dll (Windows).
+    # mkl >= 2026 renamed these to .so.3 / mkl_rt.3.dll, so ngsolve's ctypes
+    # preload no longer satisfies its DT_NEEDED -> ImportError on import.
+    # macOS ngsolve wheels do not link MKL at all.
+    'mkl<2026; platform_system != "Darwin"',
+    "ipython",
+    "ipywidgets",
+]
+
+# NOTE: pythonocc-core (imported as `OCC`) is a hard runtime requirement of
+# cavsim3d.geometry, but it is conda-forge only -- the PyPI name is a
+# registration with no uploaded distributions -- so it cannot be listed here.
+# Install it first with:  conda install -c conda-forge pythonocc-core
+
+[project.optional-dependencies]
+full = [
+    "ipython",
+    "ipywidgets",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/Dark-Elektron/cavsim3d"
+Documentation = "https://dark-elektron.github.io/cavsim3d/"
+Repository = "https://github.com/Dark-Elektron/cavsim3d"
+
+[tool.setuptools.dynamic]
+version = { attr = "cavsim3d.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["cavsim3d*"]
