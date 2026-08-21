@@ -81,25 +81,22 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     solver_ref : object, optional
         Reference to original solver
 
+    Instances are obtained from ``concatenate()`` on a FOM or ROM collection,
+    which wires up the interface connections and couples the systems.  There is
+    no need to construct one directly or to call :meth:`couple` afterwards.
+
     Examples
     --------
-    >>> # Create from ROMs
-    >>> rom = ModelOrderReduction(solver)
-    >>> rom.reduce(tol=1e-6)
-    >>> structures = rom.get_all_structures()
+    >>> # Reduce each domain, then couple the reduced models
+    >>> roms = proj.fds.foms.reduce(tol=1e-6)
+    >>> concat = roms.concatenate()
     >>>
-    >>> # Concatenate into unified structure
-    >>> concat = ConcatenatedSystem(
-    ...     structures,
-    ...     mesh=solver.mesh,
-    ...     fes=solver._fes_global
-    ... )
-    >>> concat.define_connections([((0, 'port2'), (1, 'port1'))])
-    >>> concat.couple()
-    >>>
-    >>> # Solve and visualize unified field
-    >>> concat.solve(fmin=1, fmax=10, nsamples=100)
+    >>> # Solve and visualise the unified field
+    >>> concat.solve(fmin=1, fmax=10, nsamples=1000)
     >>> concat.plot_field(freq_idx=50)  # Shows entire structure
+
+    >>> # Full-order equivalent (validation; builds dense matrices)
+    >>> concat = proj.fds.foms.concatenate()
     """
 
     DEFAULT_MIN_EIGENVALUE = 1.0
@@ -721,7 +718,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     # Coupling
     # =========================================================================
 
-    def couple(self, rcond_pinv: float = 1e-12, rcond_null: float = 1e-12) -> "ConcatenatedSystem":
+    def couple(self, rcond_null: float = 1e-12) -> "ConcatenatedSystem":
         """
         Perform structure coupling via null-space projection.
 
@@ -773,17 +770,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             #   ValueError: Internal work array size computation failed: -5
             KM = np.eye(A_blk.shape[0], dtype=complex)
         else:
-            CtC_inv = sl.pinvh(C.T.conj() @ C)
-
-            I = np.eye(A_blk.shape[0], dtype=complex)
-            K = I - C @ CtC_inv @ C.T.conj()
-
-            # Null space basis
-            M = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
-            if M.size == 0:
+            # The constraint-satisfying subspace is simply a basis for
+            # null(C^H). The orthogonal projector I - C(C^H C)^-1 C^H that used
+            # to be applied here acts as the identity on that basis (C^H N = 0
+            # => K_perp N = N, verified to ~5e-16), so building it cost a dense
+            # n x n product and a pinvh for nothing.
+            KM = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
+            if KM.size == 0:
                 raise RuntimeError("Null space empty; constraints overconstrained.")
-
-            KM = K @ M
 
         # Project system onto constraint-satisfying subspace
         self.A_coupled = KM.T.conj() @ A_blk @ KM

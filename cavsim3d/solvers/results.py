@@ -917,35 +917,37 @@ class FOMCollection(PlotMixin):
             M_free = M_d[np.ix_(free_dofs, free_dofs)].toarray()
             B_free = B_d[free_dofs, :]
 
-            # A = M⁻¹ K is not formed directly; for the reduced system
-            # the convention is (A_r - ω²I)x = ωB_r u
-            # where A_r = W^T K W and B_r = W^T B, with W=I here
-            # So Ard = K_free (acting on free DOFs with M factored out via the eigenproblem)
-            # Actually for consistency with the ROM convention:
-            # A_r = V^T K V where V is the POD basis. With V=I (full order),
-            # A_r = K_free. The mass matrix is implicit in the ω² I term because
-            # the ROM formulation assumes mass-orthonormal basis.
-            # For FOM W=I concatenation, we need to be consistent with how
-            # ConcatenatedSystem.solve() works: (A - ω²I)x = ωBu
-            # This means A should encode the stiffness-to-mass ratio.
+            # ConcatenatedSystem.solve() expects the MASS-ORTHONORMAL form
+            #     (A - ω²I) y = B u,
+            # which is exactly what the ROM path produces in
+            # rom/reduction.py: with M = Q Λ Qᵀ and T = Q Λ^(-1/2) we get
+            # TᵀMT = I, so (K - ω²M)x = Bu becomes (TᵀKT - ω²I)y = TᵀBu,
+            # with x = T y.
+            #
+            # Do NOT use A = M⁻¹K here: that matrix is not symmetric, so
+            # symmetrizing it silently destroys the operator and the coupled
+            # system degenerates to total reflection (|S11|=1, |S21|=0).
+            # Mirroring the ROM transformation keeps FOM and ROM
+            # concatenation on one convention.
+            if hasattr(B_free, "toarray"):
+                B_free = B_free.toarray()
+            B_free = np.asarray(B_free)
 
-            # Solve the generalized problem via: M^{-1}K x = ω² x
-            # i.e. A = M_free^{-1} @ K_free (dense, but that's the W=I path)
-            # Use Cholesky or direct solve for M^{-1} K
-            try:
-                L = sl.cholesky(M_free, lower=True)
-                M_inv_K = sl.cho_solve((L, True), K_free.T).T
-                Ard = 0.5 * (M_inv_K + M_inv_K.T)  # Symmetrize
-            except sl.LinAlgError:
-                # M may be singular on free DOFs — use pseudo-inverse
-                M_inv_K = sl.solve(M_free, K_free, assume_a='sym')
-                Ard = 0.5 * (M_inv_K + M_inv_K.T)
+            lam, Q = sl.eigh(M_free)
 
-            # B_r with W=I: B_rd = M_free^{-1} @ B_free (mass-weighted port basis)
-            try:
-                Brd = sl.cho_solve((L, True), B_free)
-            except (sl.LinAlgError, NameError):
-                Brd = sl.solve(M_free, B_free, assume_a='sym')
+            # Drop near-zero/negative mass eigenvalues (same guard as the ROM)
+            lam_max = np.max(np.abs(lam)) if lam.size else 0.0
+            valid = lam > np.finfo(float).eps * lam_max
+            if not np.all(valid):
+                lam, Q = lam[valid], Q[:, valid]
+
+            Q_L_inv = Q @ np.diag(1.0 / np.sqrt(lam))
+
+            Ard = Q_L_inv.T @ K_free @ Q_L_inv
+            Ard = 0.5 * (Ard + Ard.T)
+            Brd = Q_L_inv.T @ B_free
+
+            n_free = len(lam)
 
             domain_ports = fds.domain_port_map[domain]
             port_modes_d = {p: fds.port_modes[p] for p in domain_ports if p in fds.port_modes}

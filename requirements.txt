@@ -6,6 +6,8 @@ ngsolve
 mkl<2026; platform_system != "Darwin"
 gmsh
 ipywidgets
+ipympl
+webgui-jupyter-widgets
 h5py
 tqdm
 termcolor

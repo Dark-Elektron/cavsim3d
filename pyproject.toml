@@ -49,6 +49,13 @@ dependencies = [
     'mkl<2026; platform_system != "Darwin"',
     "ipython",
     "ipywidgets",
+    # Jupyter front-ends used by the tutorials and by geometry .show():
+    #   ipympl                  backs the `%matplotlib widget` backend
+    #   webgui-jupyter-widgets  imported by netgen.webgui, which
+    #                           cavsim3d.core.em_project imports for Draw();
+    #                           ngsolve does not declare it itself
+    "ipympl",
+    "webgui-jupyter-widgets",
 ]
 
 # NOTE: pythonocc-core (imported as `OCC`) is a hard runtime requirement of

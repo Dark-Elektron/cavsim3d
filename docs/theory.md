@@ -117,6 +117,20 @@ $$
 }
 $$
 
+!!! note "Regularisation"
+    The curl–curl operator has a large null space (gradient fields, $\nabla \times \nabla
+    \phi = \mathbf{0}$), so $\mathbf{K}$ on its own is singular. The assembly therefore adds
+    a small multiple of the same-weighted mass term,
+
+    $$
+      K_{ji} \;\rightarrow\; K_{ji} + \epsilon_{\text{reg}} \int_\Omega \frac{1}{\mu_r}\,
+      \mathbf{N}_i \cdot \mathbf{N}_j \, \mathrm{d}\Omega,
+      \qquad \epsilon_{\text{reg}} = 10^{-8},
+    $$
+
+    which shifts those null modes away from zero without measurably perturbing the
+    propagating solution.
+
 
 So Term 1 becomes $\displaystyle\sum_i K_{ji}\, x_i$.
 
@@ -253,7 +267,7 @@ $$
 $$
 
 
-So Term 3 becomes $\omega\, b_j$ and moves to the right-hand side.
+So Term 3 is $-j\omega\, b_j$, which moves to the right-hand side as $+j\omega\, b_j$.
 
 ---
 
@@ -511,6 +525,18 @@ $$
   = j\omega\,\mathbf{B}
 $$
 
+!!! note "Where the $j$ goes"
+    The solver factors the constant $j$ out of the right-hand side, solving
+
+    $$
+      \left(\mathbf{K} - \omega^2\,\mathbf{M}\right)\mathbf{X} = \omega\,\mathbf{B}
+    $$
+
+    and reinstating it during the Z-extraction of [Section 4](#4-z-parameter-extraction).
+    This keeps $\mathbf{K}$, $\mathbf{M}$, $\mathbf{B}$ and $\mathbf{X}$ real for a lossless
+    structure, which is what makes the POD basis of [Section 6](#6-model-order-reduction-pod)
+    real as well. Every subsequent section carries the $\omega\,\mathbf{B}$ form.
+
 ---
 
 ## 4. Z-Parameter Extraction
@@ -528,8 +554,10 @@ where $\mathbf{X} = [\mathbf{x}_{1,1} \mid \dots \mid \mathbf{x}_{p,m}]$ is the 
 
 ### 5.1 Characteristic (Wave) Impedance
 Each port mode has a frequency-dependent characteristic impedance. For TE modes:
+
 $$ Z_\mathrm{TE} = \frac{\eta}{\sqrt{1 - \left( \frac{f_{c,m}}{f} \right)^2}} $$
 for TM modes:
+
 $$ Z_\mathrm{TM} = \eta \sqrt{1 - \left( \frac{f_{c,m}}{f} \right)^2} $$
 
 and for TEM modes:
@@ -547,12 +575,17 @@ Z_{\mathrm{ref},1,1} & 0 & \dots & 0 \\
 where $Z_{\mathrm{ref},i,j}$ is the characteristic impedance of the $i$-th port and $j$-th mode. It could be a TE, TM, or TEM mode.
 
 ### 5.2 Z-to-S Conversion
-The S-parameters are obtained from the Z-parameters using the power-normalized conversion:
+The S-parameters are obtained from the Z-parameters using the generalised **pseudo-wave**
+conversion (Marks & Williams) -- the convention used by CST and HFSS for multimode
+S-parameters. Unlike Kurokawa power-waves it does not require $\mathrm{Re}(Z_0) > 0$, so it
+stays valid for the purely reactive $Z_0$ of a mode below cutoff:
+
 $$ \mathbf{S} = \mathbf{Z}_{\mathrm{ref}}^{-1/2} (\mathbf{Z} - \mathbf{Z}_{\mathrm{ref}})(\mathbf{Z} + \mathbf{Z}_{\mathrm{ref}})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
 
 
 ### 5.3 The Impedance Matrix (Recovery)
 The impedance matrix can be recovered from the S-matrix via:
+
 $$ \mathbf{Z} = \mathbf{Z}_{\mathrm{ref}}^{1/2} (\mathbf{I} + \mathbf{S})(\mathbf{I} - \mathbf{S})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
 
 
@@ -674,17 +707,17 @@ $$
 \mathbf{C} = \mathbf{B}_{\text{int}} \, \mathbf{F}
 $$
 
-To enforce $\mathbf{C}^H \mathbf{x} = \mathbf{0}$, the solution is projected onto the null space of $\mathbf{C}^H$. Let $\mathbf{N}$ be the null-space basis of $\mathbf{C}^H$, and define the projector:
+To enforce $\mathbf{C}^H \mathbf{x} = \mathbf{0}$, the solution is restricted to the null
+space of $\mathbf{C}^H$. The constraint-satisfying subspace basis is therefore any basis
+$\mathbf{N}$ of that null space:
 
 $$
-\mathbf{K}_\perp = \mathbf{I} - \mathbf{C}(\mathbf{C}^H \mathbf{C})^{-1}\mathbf{C}^H
+\mathbf{W}_c = \mathbf{N}, \qquad \mathbf{C}^H \mathbf{N} = \mathbf{0}
 $$
 
-The constraint-satisfying subspace basis is:
-
-$$
-\mathbf{W}_c = \mathbf{K}_\perp \, \mathbf{N}
-$$
+Applying the orthogonal projector $\mathbf{K}_\perp = \mathbf{I} - \mathbf{C}(\mathbf{C}^H
+\mathbf{C})^{-1}\mathbf{C}^H$ to $\mathbf{N}$ would leave it unchanged, since
+$\mathbf{C}^H \mathbf{N} = \mathbf{0}$ implies $\mathbf{K}_\perp \mathbf{N} = \mathbf{N}$.
 
 ### 7.4 Coupled System
 
@@ -706,8 +739,10 @@ $$
 The Z-parameters of the coupled system are extracted in exactly the same way as for a single domain:
 
 $$
-\mathbf{Z}_{\text{global}}(\omega) = j\omega \, \mathbf{B}_{\text{coupled}}^H \, \mathbf{x}_c
+\mathbf{Z}_{\text{global}}(\omega) = j \, \mathbf{B}_{\text{coupled}}^H \, \mathbf{x}_c
 $$
+
+($\mathbf{x}_c$ already carries one factor of $\omega$ from the right-hand side above.)
 
 !!! tip "Efficient direct solve"
     For small coupled systems, cavsim3d uses an eigendecomposition of $\mathbf{A}_{\text{coupled}} = \mathbf{V}\mathbf{\Lambda}\mathbf{V}^H$ to solve all frequencies in one pass:
@@ -721,8 +756,16 @@ $$
 Finally, the S-parameters are computed from the Z-parameters using the standard conversion (see [Section 5.2](#52-z-to-s-conversion)):
 
 $$
-\mathbf{S}_{\text{global}} = (\mathbf{Z}_{\text{global}} - \mathbf{Z}_0)(\mathbf{Z}_{\text{global}} + \mathbf{Z}_0)^{-1}
+\mathbf{S}_{\text{global}} = \mathbf{Z}_{\mathrm{ref}}^{-1/2}
+(\mathbf{Z}_{\text{global}} - \mathbf{Z}_{\mathrm{ref}})
+(\mathbf{Z}_{\text{global}} + \mathbf{Z}_{\mathrm{ref}})^{-1}
+\mathbf{Z}_{\mathrm{ref}}^{1/2}
 $$
+
+Here $\mathbf{Z}_{\mathrm{ref}}$ is diagonal over the **external** port-modes only -- the
+internal ones are eliminated by the coupling. The $\mathbf{Z}_{\mathrm{ref}}^{\mp 1/2}$ factors
+cancel only when every port-mode shares one reference impedance, which is not the case for
+multimode ports.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%

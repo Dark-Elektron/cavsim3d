@@ -58,10 +58,10 @@ The simplest pathway. A single component is meshed and solved globally. Best for
 | Step | Code | Description |
 |------|------|-------------|
 | Geometry | `RectangularWaveguide(a, L)` | Create a primitive or import a single CAD file |
-| Mesh | `cavsim3d.geometry.generate_mesh(maxh)` | Generate the finite element mesh |
+| Mesh | `proj.generate_mesh(maxh)` | Generate the finite element mesh |
 | Solve FOM | `fds.solve(fmin, fmax, n)` | Full-order frequency sweep (few sample points) |
 | Reduce | `fds.fom.reduce(tol)` | POD-based model order reduction |
-| Solve ROM | `cavsim3d.rom.solve(fmin, fmax, n)` | Wideband sweep on the reduced model (fast) |
+| Solve ROM | `rom.solve(fmin, fmax, n)` | Wideband sweep on the reduced model (fast) |
 
 **When to use:** Single cavities, simple waveguides, quick studies.
 
@@ -78,7 +78,7 @@ Multiple parts are assembled and fused into a single mesh. The solver treats the
 | Build | `assembly.build()` | Fuse geometry into a single solid |
 | Solve FOM | `fds.solve(fmin, fmax, n)` | Global frequency sweep |
 | Reduce | `fds.fom.reduce(tol)` | POD reduction on global matrices |
-| Solve ROM | `cavsim3d.rom.solve(fmin, fmax, n)` | Wideband sweep |
+| Solve ROM | `rom.solve(fmin, fmax, n)` | Wideband sweep |
 
 **When to use:** Small multi-component systems where global coupling is important and the mesh is manageable.
 
@@ -140,7 +140,7 @@ sequenceDiagram
     User->>FDS: fds.fom.reduce(tol)
     FDS->>MOR: create ROM from snapshots
     MOR->>MOR: SVD truncation
-    User->>MOR: cavsim3d.rom.solve(fmin, fmax, n_fine)
+    User->>MOR: rom.solve(fmin, fmax, n_fine)
     MOR-->>User: wideband Z, S (milliseconds)
 ```
 
@@ -186,7 +186,7 @@ The entire computation graph is navigable via attribute access:
 Single-Solid:
   proj.fds.fom                    → FOMResult
   proj.fds.fom.reduce()           → ModelOrderReduction
-  cavsim3d.rom.solve(fmin, fmax, n)        → (updates ROM in-place)
+  rom.solve(fmin, fmax, n)        → (updates ROM in-place)
 
 Multi-Solid:
   proj.fds.foms                   → FOMCollection (per-domain)
