@@ -14,6 +14,7 @@ Key concepts:
 
 from typing import List, Tuple, Dict, Optional, Callable, Union, Any, Literal
 import time
+import re
 import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
@@ -25,7 +26,7 @@ from ngsolve import (
 from ngsolve.webgui import Draw
 
 from cavsim3d.solvers.eigen_mixin import ConcatEigenMixin
-from cavsim3d.core.constants import Z0, mu0
+from cavsim3d.core.constants import Z0, mu0, MIN_EIGENVALUE
 from cavsim3d.solvers.base import BaseEMSolver
 from cavsim3d.utils.plot_mixin import PlotMixin
 from cavsim3d.rom.structures import ReducedStructure
@@ -99,7 +100,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     >>> concat = proj.fds.foms.concatenate()
     """
 
-    DEFAULT_MIN_EIGENVALUE = 1.0
+    DEFAULT_MIN_EIGENVALUE = MIN_EIGENVALUE  # omega^2 of 1 MHz: below is static
     ITERATIVE_SIZE_THRESHOLD = 10000
 
     def __init__(
@@ -108,6 +109,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         mesh: Optional[Mesh] = None,
         fes: Optional[HCurl] = None,
         port_impedance_func: Optional[Callable[[str, int, float], complex]] = None,
+        port_wave_impedance_func: Optional[Callable[[str, int, float], complex]] = None,
         solver_ref: Any = None,
     ):
         super().__init__()
@@ -115,6 +117,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self.structures = structures
         self.n_structures = len(structures)
         self._port_impedance_func = port_impedance_func or self._default_impedance
+        # Wave impedance the port modes were normalised to. Needed so
+        # _compute_s_from_z can rescale Z into the reported (line) reference;
+        # without it the concat's Z stays in the wave normalisation.
+        self._port_wave_impedance_func = port_wave_impedance_func
         self._solver_ref = solver_ref
 
         # Unified mesh and FEM space for the entire structure
@@ -139,6 +145,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self.A_coupled: Optional[np.ndarray] = None
         self.B_coupled: Optional[np.ndarray] = None
         self.W_coupled: Optional[np.ndarray] = None
+        # Loss operators of the coupled system (None when lossless):
+        #   (A + j w C - w^2 (I - j D)) x = w B u
+        self.C_coupled: Optional[np.ndarray] = None
+        self.D_coupled: Optional[np.ndarray] = None
 
         # Caches
         self._resonant_mode_cache = {}
@@ -217,8 +227,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 Ard=s.Ard, Brd=s.Brd, ports=list(s.ports),
                 port_modes=s.port_modes, domain=domain,
                 r=s.r, n_full=s.n_full, is_full_order=s.is_full_order,
-                W=s.W, Q_L_inv=s.Q_L_inv, fes=s.fes, mesh=s.mesh)
-            for attr in ("port_fingerprints", "training_band", "impedance_func"):
+                W=s.W, Q_L_inv=s.Q_L_inv, fes=s.fes, mesh=s.mesh,
+                Crd=s.Crd, Drd=s.Drd)
+            for attr in ("port_fingerprints", "training_band", "impedance_func",
+                         "wave_impedance_func"):
                 if hasattr(s, attr):
                     setattr(c, attr, getattr(s, attr))
             # Keep the SOURCE (base) domain so a per-section field can find its
@@ -252,9 +264,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Where each section's saved mesh/FES live (project/mesh/{mesh,fes}_<base>.pkl),
         # so a 3D field can later be reconstructed per section for visualization.
         try:
-            concat._project_mesh_dir = Path(roms_dir).parents[2] / "mesh"
+            _root = Path(roms_dir).parents[2]
+            concat._project_mesh_dir = _root / "mesh"
+            # _project_path is a READ-ONLY property proxying the parent solver,
+            # so it cannot be assigned here. Record the root separately; the
+            # eigenmode auto-save falls back to it.
+            concat._project_root = _root
         except Exception:
             concat._project_mesh_dir = None
+            concat._project_root = None
         return concat
 
     def _resolve_mesh_and_fes(self) -> None:
@@ -573,6 +591,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             self._external_port_mode_map[new_name] = (struct_idx, orig_port, mode_idx)
         self._n_external_ports = len(_port_number)
 
+        # Reverse map so the structure-qualified keys used by
+        # _port_mode_order ("s0:port2") can be resolved back to the external
+        # port name ("port2(1)").
+        self._local_to_external = {
+            loc: name for name, loc in self._external_port_mode_map.items()
+        }
+
         # Ordered (port_key, mode_idx) for the coupled Z/S matrix columns, used
         # by the base _build_dicts to label parameters correctly when ports
         # have different numbers of modes.  The composite key keeps each
@@ -746,6 +771,17 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         A_blk = sl.block_diag(*A_blocks).astype(complex, copy=False)
         B_blk = sl.block_diag(*B_blocks).astype(complex, copy=False)
 
+        # Loss operators (zero blocks for lossless sections)
+        lossy = any(getattr(s, 'is_lossy', False) for s in self.structures)
+
+        def _loss_blk(attr):
+            blocks = [np.asarray(getattr(s, attr)) if getattr(s, attr, None) is not None
+                      else np.zeros((s.r, s.r)) for s in self.structures]
+            return sl.block_diag(*blocks)
+
+        C_blk = _loss_blk('Crd') if lossy else None
+        D_blk = _loss_blk('Drd') if lossy else None
+
         # Permute to [internal | external]
         B_perm = B_blk @ self._permutation.T
         B_int = B_perm[:, :self._n_internal]
@@ -768,24 +804,35 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             #   _flapack.error: (il>=1&&il<=n) failed ... zheevr:il=1
             # and then in the SVD workspace query
             #   ValueError: Internal work array size computation failed: -5
-            KM = np.eye(A_blk.shape[0], dtype=complex)
+            KM = np.eye(A_blk.shape[0])
         else:
             # The constraint-satisfying subspace is simply a basis for
             # null(C^H). The orthogonal projector I - C(C^H C)^-1 C^H that used
             # to be applied here acts as the identity on that basis (C^H N = 0
             # => K_perp N = N, verified to ~5e-16), so building it cost a dense
             # n x n product and a pinvh for nothing.
-            KM = sl.null_space(C.T.conj(), rcond=rcond_null).astype(complex, copy=False)
+            # C = B_int F is real, so its null space has a REAL orthonormal
+            # basis.  Keeping KM real makes KM^H = KM^T: the projection is then
+            # a Galerkin projection of the bilinear (complex-symmetric) lossy
+            # system as well as of the Hermitian lossless one.
+            C_real = np.real(C) if np.allclose(np.imag(C), 0.0) else C
+            KM = sl.null_space(C_real.T.conj(), rcond=rcond_null)
             if KM.size == 0:
                 raise RuntimeError("Null space empty; constraints overconstrained.")
 
         # Project system onto constraint-satisfying subspace
         self.A_coupled = KM.T.conj() @ A_blk @ KM
         self.B_coupled = KM.T.conj() @ B_ext
-        self.W_coupled = KM
+        self.W_coupled = KM.astype(complex, copy=False)
 
         # Ensure Hermitian symmetry
         self.A_coupled = 0.5 * (self.A_coupled + self.A_coupled.T.conj())
+
+        if lossy:
+            self.C_coupled = KM.T @ C_blk @ KM
+            self.D_coupled = KM.T @ D_blk @ KM
+        else:
+            self.C_coupled = self.D_coupled = None
 
         pr.info(f"\nCoupled unified system: {A_blk.shape[0]} -> {self.A_coupled.shape[0]} DOFs")
         pr.debug(f"  External port-modes: {self._n_external}")
@@ -838,6 +885,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
     def get_eigenmodes(self, _auto_save=True, **kwargs):
         """Standardized API for eigenmode computation with auto-save."""
+        # one coupled system: domain/shift/return options do not apply
+        for k in ("return_eigenvalues", "sigma", "domain", "source"):
+            kwargs.pop(k, None)
         res = self.calculate_resonant_modes(**kwargs)
         
         # Populate the eigen caches so save_eigenmodes can find them
@@ -857,6 +907,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return res
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
+        # A netlist concat proxies _project_path from a parent solver it does
+        # not have; from_flat_roms records the project root instead.
+        if not kwargs.get("path") and not self._project_path:
+            root = getattr(self, "_project_root", None)
+            if root is not None:
+                kwargs["path"] = Path(root) / "fds" / "foms" / "roms" / "concat" / "eigenmodes"
         try:
             self.save_eigenmodes(**kwargs)
         except (ValueError, Exception) as e:
@@ -895,11 +951,46 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             return func(port, mode, freq)
         return self._port_impedance_func(port, mode, freq)
 
+    def _resolve_external_port(self, port, mode: int = 0):
+        """Accept either an external name ("port2(1)") or the composite key
+        used by _port_mode_order ("s0:port2"), and return the external name."""
+        if port in self._external_port_mode_map:
+            return port
+        m = re.match(r'^s(\d+):(.+)$', str(port))
+        if m:
+            loc = (int(m.group(1)), m.group(2), int(mode))
+            return getattr(self, '_local_to_external', {}).get(loc)
+        return None
+
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
-        if port not in self._external_port_mode_map:
+        key = self._resolve_external_port(port, mode)
+        if key is None:
             raise KeyError(f"Port '{port}' not found. Available: {self.ports}")
-        struct_idx, orig_port, orig_mode = self._external_port_mode_map[port]
+        struct_idx, orig_port, orig_mode = self._external_port_mode_map[key]
         return self._impedance_for(struct_idx, orig_port, orig_mode, freq)
+
+    def _port_wave_impedance(self, port, mode: int, freq: float):
+        """Wave impedance the coupled port basis inherited from its section.
+
+        Resolved through the same external-port map as the reference impedance,
+        so a section imported from another project keeps its own medium.
+        """
+        key = self._resolve_external_port(port, mode)
+        if key is None:
+            return None
+        struct_idx, orig_port, orig_mode = self._external_port_mode_map[key]
+        # Prefer the SECTION's own function: a concat rebuilt by from_flat_roms
+        # gets no global wave-impedance func, but each reloaded structure
+        # carries one. Testing the global one first skipped the rescale
+        # entirely on the netlist path.
+        func = (getattr(self.structures[struct_idx], 'wave_impedance_func', None)
+                or self._port_wave_impedance_func)
+        if func is None:
+            return None
+        try:
+            return func(orig_port, orig_mode, freq)
+        except Exception:
+            return None
 
     def _get_impedance_matrix(self, freq: float) -> np.ndarray:
         Z0_diag = []
@@ -939,6 +1030,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             H5Serializer.save_dataset(fb, "data", self.B_coupled)
             if self.W_coupled is not None:
                 H5Serializer.save_dataset(fw, "data", self.W_coupled)
+        for name, mat in (("C", getattr(self, 'C_coupled', None)),
+                          ("D", getattr(self, 'D_coupled', None))):
+            if mat is not None:
+                with h5py.File(mat_path / f"{name}.h5", "a") as fl:
+                    H5Serializer.save_dataset(fl, "data", mat)
 
         # 2. Save S and Z results
         if self._Z_matrix is not None:
@@ -981,6 +1077,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # Create skeleton
         cs = cls.__new__(cls)
         cs._solver_ref = solver_ref
+        cs.C_coupled = cs.D_coupled = None
         cs.n_structures = metadata["n_structures"]
         cs.domains = metadata["domains"]
         cs.n_connections = metadata["n_connections"]
@@ -1010,6 +1107,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if (mat_path / "W.h5").exists():
                 with h5py.File(mat_path / "W.h5", "r") as f:
                     cs.W_coupled = H5Serializer.load_dataset(f["data"])
+            for name in ("C", "D"):
+                fp = mat_path / f"{name}.h5"
+                val = None
+                if fp.exists():
+                    with h5py.File(fp, "r") as f:
+                        val = H5Serializer.load_dataset(f["data"])
+                setattr(cs, f"{name}_coupled", val)
         elif (path / "matrices.h5").exists():
             with h5py.File(path / "matrices.h5", "r") as f:
                 cs.A_coupled = H5Serializer.load_dataset(f["A_coupled"])
@@ -1110,8 +1214,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             _file_handler = pr.start_file_log(self._log_path)
 
         try:
-            # 4. Initialize frequency array
-            self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
+            # 4. Requested frequency grid.  NOT assigned to self.frequencies
+            # until we actually solve: an early return of cached results must
+            # keep the grid those results were computed on.
+            new_freqs = np.linspace(fmin, fmax, nsamples) * 1e9
 
             if self.A_coupled is None:
                 raise ValueError("Must call couple() first")
@@ -1131,7 +1237,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
             # --- Rerun protection ---
             has_results = (self._Z_matrix is not None)
-            rerun = cfg.get('rerun', False)
+            rerun = cfg.get('rerun', None)   # None: auto, True: force, False: keep stored
 
             # Check disk if in-memory is missing
             if not has_results and not rerun and self._solver_ref and getattr(self._solver_ref, '_project_path', None):
@@ -1169,21 +1275,23 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                         pr.warning(f"  Could not load existing Concatenated results: {e}")
 
             if has_results and not rerun:
-                import warnings
-                warnings.warn(
-                    "Results already exist for this Concatenated system. "
-                    "To overwrite, call solve(..., rerun=True).",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                return {
-                    "frequencies": self.frequencies,
-                    "Z": self._Z_matrix,
-                    "S": self._S_matrix if compute_s_params else None,
-                    "Z_dict": self.Z_dict,
-                    "S_dict": self.S_dict if compute_s_params else None,
-                }
+                stored = self.frequencies
+                if rerun is False or (stored is not None and len(stored) == len(new_freqs)
+                        and np.allclose(stored, new_freqs, rtol=1e-9, atol=0.0)):
+                    pr.milestone("  Returning existing concatenated results for "
+                                 "this sweep. (Use rerun=True to force a re-solve)")
+                    return {
+                        "frequencies": self.frequencies,
+                        "Z": self._Z_matrix,
+                        "S": self._S_matrix if compute_s_params else None,
+                        "Z_dict": self.Z_dict,
+                        "S_dict": self.S_dict if compute_s_params else None,
+                    }
+                # A coupled reduced solve is cheap: re-solve for the new band.
+                pr.info("  Requested sweep differs from the stored concatenated "
+                        "results; re-solving.")
 
+            self.frequencies = new_freqs
             n_ext = self._n_external
             r = self.A_coupled.shape[0]
 
@@ -1198,7 +1306,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
             t0 = time.time()
 
-            if solver_type == 'direct':
+            if self.is_lossy:
+                x_all = self._solve_lossy(omegas)
+            elif solver_type == 'direct':
                 x_all = self._solve_direct(omegas, n_ext, r)
             else:
                 x_all = self._solve_iterative(omegas, n_ext, r)
@@ -1249,6 +1359,27 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         return x_all
 
+    @property
+    def is_lossy(self) -> bool:
+        """True if any coupled section carries loss operators."""
+        return (getattr(self, 'C_coupled', None) is not None
+                or getattr(self, 'D_coupled', None) is not None)
+
+    def _solve_lossy(self, omegas: np.ndarray) -> List[np.ndarray]:
+        """Per-frequency dense solve of (A + jwC - w^2 (I - jD)) x = w B."""
+        r = self.A_coupled.shape[0]
+        I = np.eye(r)
+        C = self.C_coupled if self.C_coupled is not None else np.zeros((r, r))
+        D = self.D_coupled if self.D_coupled is not None else np.zeros((r, r))
+        x_all = []
+        for k, w in enumerate(omegas):
+            lhs = self.A_coupled + 1j * w * C - w ** 2 * (I - 1j * D)
+            x = np.linalg.solve(lhs, w * self.B_coupled)
+            x_all.append(x)
+            # bilinear (B real): the lossy system is complex symmetric
+            self._Z_matrix[k] = 1j * self.B_coupled.T @ x
+        return x_all
+
     def _solve_iterative(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
         """GMRES-based iterative solve."""
         I_ext = np.eye(n_ext, dtype=complex)
@@ -1291,12 +1422,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         return self._snapshots is not None
 
     def can_reconstruct(self) -> bool:
-        """Check if unified field reconstruction is possible."""
-        if not self.has_snapshots:
-            return False
+        """Check if field reconstruction is possible.
+
+        Snapshots are NOT required: reconstruction maps a reduced state back
+        through each section's basis (``W @ Q_L_inv``), which needs only the
+        bases themselves. Requiring ``has_snapshots`` here reported False for
+        systems where :meth:`reconstruct_eigenmode` and
+        :meth:`reconstruct_section_field` both work.
+        """
         if self.W_coupled is None:
-            return False
-        if self.fes is None and self.mesh is None:
             return False
         return all(s.can_reconstruct() for s in self.structures)
 
@@ -1695,7 +1829,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             field_cf = E_gf
             field_label = "E"
         elif field_type == 'H':
-            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            field_cf = (1j / (omega * mu0)) * curl(E_gf)
             field_label = "H"
         else:
             raise ValueError(f"Invalid field_type: {field_type}")
@@ -1721,6 +1855,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if euler_angles:
             draw_kwargs['euler_angles'] = euler_angles
 
+        # plot_field draws the UNIFIED structure; a netlist concat has no such
+        # mesh -- use plot_section_field()/plot_eigenmode(section_idx=...).
+        if self.mesh is None:
+            raise ValueError(
+                "This concatenated system has no unified mesh (its sections "
+                "are meshed independently). Use reconstruct_section_field() "
+                "or plot_eigenmode(..., section_idx=N) instead.")
         Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
 
     # =========================================================================
@@ -1796,19 +1937,369 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         x_full = struct.reconstruct(x_uncoupled[start:start + struct.r])
 
         mesh, fes = self._section_mesh_fes(section_idx)
-        E_gf = GridFunction(fes, complex=True)
+
+        # The saved FE space is real, and `GridFunction(fes, complex=True)` is
+        # not a real option -- NGSolve warns about the unknown flag and hands
+        # back a REAL vector, so assigning the complex coefficients silently
+        # dropped the phase. Rebuild the space as complex so the reconstructed
+        # field keeps its imaginary part (only 'abs' was unaffected).
+        if not fes.is_complex:
+            fes = HCurl(mesh, order=fes.globalorder, complex=True,
+                        dirichlet=getattr(fes, '_dirichlet', '') or '')
+        E_gf = GridFunction(fes)
         vec = E_gf.vec.FV().NumPy()
         n = min(len(vec), len(x_full))
         vec[:] = 0
         vec[:n] = x_full[:n]
 
         omega = 2 * np.pi * self.frequencies[freq_idx]
-        field_cf = E_gf if field_type == 'E' else (1 / (1j * omega * mu0)) * curl(E_gf)
+        field_cf = E_gf if field_type == 'E' else (1j / (omega * mu0)) * curl(E_gf)
         cf = {'abs': Norm(field_cf), 'real': field_cf.real,
               'imag': field_cf.imag}[component]
         label = f"{component}({field_type}) — {struct.domain} @ " \
                 f"{self.frequencies[freq_idx] / 1e9:.3f} GHz"
         return BoundaryFromVolumeCF(cf), mesh, label
+
+    def _section_coefficient_vectors(self, freq_idx, excitation_port=None):
+        """Per-section full-order coefficient vectors from the coupled state."""
+        if not self.has_snapshots:
+            raise ValueError("No coupled solution - call solve() first.")
+        if excitation_port is None:
+            excitation_port = self.ports[0]
+        if excitation_port not in self.ports:
+            raise KeyError(f"Port '{excitation_port}' not found: {self.ports}")
+        col = self.ports.index(excitation_port)
+        x_uncoupled = self.W_coupled @ self._snapshots[freq_idx, :, col]
+        vecs = []
+        for i, struct in enumerate(self.structures):
+            start = self._structure_dof_offsets[i]
+            vecs.append(struct.reconstruct(x_uncoupled[start:start + struct.r]))
+        return vecs
+
+    def reconstruct_chain_field(
+        self,
+        freq_idx: int = 0,
+        excitation_port: Optional[str] = None,
+        field_type: Literal['E', 'H'] = 'E',
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+        axis: Optional[Literal['x', 'y', 'z']] = None,
+        gap: float = 0.0,
+        boundary_only: bool = False,
+    ):
+        """Reconstruct the field over the WHOLE concatenated geometry.
+
+        :meth:`reconstruct_section_field` returns one section at a time on its
+        own mesh. This assembles every section onto a single compound mesh, so
+        the coupled solution is viewable across the entire chain.
+
+        Only valid when the sections are rigid copies of ONE reference mesh --
+        the ``asm.add(name, geo, n=N)`` case. A rigid transform preserves mesh
+        topology and DOF numbering, and an H(curl) DOF is invariant under it,
+        so each section's coefficient vector is copied verbatim onto its placed
+        copy: no interpolation and no added error.
+
+        Returns ``(coefficient_function, compound_mesh, label)`` ready for
+        ``netgen.webgui.Draw``.
+        """
+        from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
+        from cavsim3d.utils.mesh_replication import (
+            Placement, replicate_mesh, block_dof_maps, assemble_compound_field)
+
+        vecs = self._section_coefficient_vectors(freq_idx, excitation_port)
+        omega = 2 * np.pi * self.frequencies[freq_idx]
+        label = (f"{component}({field_type}) - {self.n_structures}-section chain @ "
+                 f"{self.frequencies[freq_idx] / 1e9:.3f} GHz")
+        return self._assemble_chain(vecs, omega, field_type, component, label,
+                                    axis=axis, gap=gap, boundary_only=boundary_only,
+                                    caller="reconstruct_chain_field")
+
+    def _assemble_chain(self, vecs, omega, field_type, component, label,
+                        axis=None, gap=0.0, caller="reconstruct_chain_field",
+                        boundary_only=False):
+        """Place per-section coefficient vectors on one replicated compound mesh."""
+        from ngsolve import Norm, curl, BoundaryFromVolumeCF
+        E_gf, comp_mesh = self._assemble_chain_gf(vecs, axis=axis, gap=gap,
+                                                  caller=caller)
+        field_cf = E_gf if field_type == 'E' else (1j / (omega * mu0)) * curl(E_gf)
+        cf = {'abs': Norm(field_cf), 'real': field_cf.real,
+              'imag': field_cf.imag}[component]
+        # Return the VOLUME CoefficientFunction. Wrapping it in
+        # BoundaryFromVolumeCF would keep surface values only, and an
+        # accelerating mode is axial: it peaks on the beam axis and falls to
+        # ~zero on the PEC wall (measured 9x axis-to-wall here), so the surface
+        # view shows almost nothing while a clip plane through the axis shows
+        # the real field. Pass boundary_only=True for the old surface CF.
+        if boundary_only:
+            cf = BoundaryFromVolumeCF(cf)
+        return cf, comp_mesh, label
+
+    def _assemble_chain_gf(self, vecs, axis=None, gap=0.0,
+                           caller="reconstruct_chain_field"):
+        """Compound GridFunction of the chain (vector field, complex)."""
+        from ngsolve import HCurl
+        from cavsim3d.utils.mesh_replication import (
+            Placement, replicate_mesh, block_dof_maps, assemble_compound_field)
+
+        n_sec = self.n_structures
+        bases = {getattr(st, 'base_domain', st.domain) for st in self.structures}
+        meshes = [self._section_mesh_fes(i) for i in range(n_sec)]
+        ref_mesh, ref_fes = meshes[0]
+        if any(m is not ref_mesh for m, _ in meshes):
+            raise ValueError(
+                f"{caller}() needs all sections to share one reference mesh "
+                "(the repeated-section case, asm.add(..., n=N)). Found "
+                f"{len(bases)} distinct section mesh(es): {sorted(bases)}.")
+
+        # Chain along `axis`: each copy is shifted by the reference extent.
+        # axis=None (the default) picks the section's LONGEST extent, which is
+        # the chaining direction for a beamline component. Assuming 'z' silently
+        # stacks copies across the cavity diameter when the CAD axis is x or y.
+        pts = np.array([ref_mesh[v].point for v in ref_mesh.vertices])
+        extents = pts.max(axis=0) - pts.min(axis=0)
+        ax = int(np.argmax(extents)) if axis is None else 'xyz'.index(axis)
+        span = float(extents[ax])
+        placements = []
+        for k in range(n_sec):
+            t = [0.0, 0.0, 0.0]
+            t[ax] = k * (span + gap)
+            placements.append(Placement(tuple(t)))
+
+        comp_mesh = replicate_mesh(ref_mesh, placements)
+        order = ref_fes.globalorder
+        comp_fes = HCurl(comp_mesh, order=order, complex=True)
+        if not ref_fes.is_complex:
+            ref_fes = HCurl(ref_mesh, order=order, complex=True)
+        maps = block_dof_maps(ref_fes, comp_fes, ref_mesh, comp_mesh, n_sec)
+        E_gf = assemble_compound_field(comp_fes, vecs, maps)
+        return E_gf, comp_mesh
+
+    def chain_axis_profile(
+        self,
+        mode_idx: Optional[int] = None,
+        freq_idx: Optional[int] = None,
+        excitation_port: Optional[str] = None,
+        n_points: int = 400,
+        axis: Optional[Literal['x', 'y', 'z']] = None,
+        transverse: Optional[Tuple[float, float]] = None,
+        gap: float = 0.0,
+        enforce_continuity: bool = True,
+    ):
+        """On-axis longitudinal field profile along the chain.
+
+        For an accelerating structure the quantity of interest is
+        :math:`E_z(z)` on the beam axis. Give either ``mode_idx`` (an eigenmode
+        of the coupled chain, see :meth:`chain_eigenfrequencies`) or
+        ``freq_idx`` (a sample of the coupled sweep).
+
+        Returns ``(coord, E_long, label)`` where ``coord`` is the position along
+        the chain [m] and ``E_long`` the complex longitudinal component.
+        Points falling outside the mesh come back as NaN.
+        """
+        if (mode_idx is None) == (freq_idx is None):
+            raise ValueError("give exactly one of mode_idx or freq_idx")
+
+        if mode_idx is not None:
+            if self.A_coupled is None:
+                raise ValueError("System not coupled.")
+            evals, evecs = np.linalg.eigh(self.A_coupled)
+            keep = evals > 1e-6
+            evals, evecs = evals[keep], evecs[:, keep]
+            if mode_idx >= evecs.shape[1]:
+                raise ValueError(f"mode_idx {mode_idx} out of range "
+                                 f"(max {evecs.shape[1] - 1})")
+            x_uncoupled = self.W_coupled @ evecs[:, mode_idx]
+            scales = np.ones(self.n_structures, dtype=complex)
+            if (enforce_continuity and self.n_structures > 1 and self.connections
+                    and self.mesh is not None and self.fes is not None):
+                scales = self._compute_eigenmode_scales(x_uncoupled)
+            vecs = []
+            for i, st in enumerate(self.structures):
+                start = self._structure_dof_offsets[i]
+                vecs.append(np.asarray(
+                    st.reconstruct(x_uncoupled[start:start + st.r])) * scales[i])
+            f_ghz = float(np.sqrt(evals[mode_idx]) / (2 * np.pi) / 1e9)
+            label = f"eigenmode {mode_idx} @ {f_ghz:.4f} GHz"
+        else:
+            vecs = self._section_coefficient_vectors(freq_idx, excitation_port)
+            label = f"sweep @ {self.frequencies[freq_idx] / 1e9:.4f} GHz"
+
+        E_gf, comp_mesh = self._assemble_chain_gf(
+            vecs, axis=axis, gap=gap, caller="chain_axis_profile")
+
+        pts = np.array([comp_mesh[v].point for v in comp_mesh.vertices])
+        if axis is None:
+            ref_pts = np.array([m.point for m in
+                                [comp_mesh[v] for v in comp_mesh.vertices]])
+            ax = int(np.argmax(ref_pts.max(axis=0) - ref_pts.min(axis=0)))
+        else:
+            ax = 'xyz'.index(axis)
+        lo, hi = float(pts[:, ax].min()), float(pts[:, ax].max())
+        if transverse is None:                     # centre of the cross-section
+            other = [i for i in range(3) if i != ax]
+            transverse = tuple(
+                float((pts[:, i].min() + pts[:, i].max()) / 2) for i in other)
+
+        coord = np.linspace(lo, hi, n_points)
+        E_long = np.full(n_points, np.nan, dtype=complex)
+        others = [i for i in range(3) if i != ax]
+        for k, c in enumerate(coord):
+            xyz = [0.0, 0.0, 0.0]
+            xyz[ax] = float(c)
+            xyz[others[0]], xyz[others[1]] = transverse
+            try:
+                val = E_gf(comp_mesh(*xyz))
+                E_long[k] = complex(val[ax])
+            except Exception:
+                pass                                # outside the mesh -> NaN
+        return coord, E_long, label
+
+    def chain_eigenfrequencies(self, fmin_ghz=None, fmax_ghz=None):
+        """Eigenfrequencies (GHz) of the coupled chain, with their mode indices.
+
+        The indices returned are exactly the ``mode_idx`` accepted by
+        :meth:`reconstruct_chain_eigenmode`, so a mode found here can be
+        reconstructed directly.
+        """
+        if self.A_coupled is None:
+            raise ValueError("System not coupled.")
+        evals, _ = np.linalg.eigh(self.A_coupled)
+        evals = evals[evals > 1e-6]                 # same filter as the reconstruction
+        f = np.sqrt(evals) / (2 * np.pi) / 1e9
+        idx = np.arange(len(f))
+        if fmin_ghz is not None:
+            keep = f >= fmin_ghz
+            f, idx = f[keep], idx[keep]
+        if fmax_ghz is not None:
+            keep = f <= fmax_ghz
+            f, idx = f[keep], idx[keep]
+        return idx, f
+
+    def _balance_degenerate_mode(self, evals, evecs, mode_idx, tol=1e-6):
+        """Pick the most evenly distributed member of a degenerate group.
+
+        Identical cells in a chain put the chain's modes into near-exact
+        degenerate groups, one member per cell. Every orthonormal basis of such
+        a group is an equally valid set of eigenvectors, and ``eigh`` returns an
+        arbitrary one -- in practice localised on a single cell. The exported
+        field then shows one cavity lit and the rest dark, which looks like a
+        reconstruction bug but is only the basis choice: for the 2-cavity
+        module the accelerating doublet came back as 0.090/0.996 per cavity,
+        while the sum of its two members is 0.640/0.768.
+
+        Rotate inside the group to the combination whose energy is spread as
+        evenly as possible over the sections, and return its coefficient vector
+        in the eigenvector basis.
+        """
+        lam = float(np.real(evals[mode_idx]))
+        cluster = np.flatnonzero(
+            np.abs(np.real(evals) - lam) <= tol * max(abs(lam), 1e-300))
+        if len(cluster) < 2:
+            return evecs[:, mode_idx]
+
+        U = self.W_coupled @ evecs[:, cluster]
+        blocks = [U[self._structure_dof_offsets[i]:
+                    self._structure_dof_offsets[i] + self.structures[i].r, :]
+                  for i in range(self.n_structures)]
+        d = len(cluster)
+
+        def spread(a):
+            """Smallest section share of the total energy; bigger is better."""
+            e = np.array([float(np.sum(np.abs(B @ a) ** 2)) for B in blocks])
+            tot = e.sum()
+            return 0.0 if tot <= 0 else float(e.min() / tot)
+
+        # d is one per cell, so a short random search with a shrinking local
+        # step is cheaper and more robust here than pulling in an optimiser.
+        rng = np.random.default_rng(0)
+        best_a = np.zeros(d, dtype=complex)
+        best_a[list(cluster).index(mode_idx)] = 1.0
+        best = spread(best_a)
+        for a in ([np.ones(d, dtype=complex)] +
+                  [rng.normal(size=d) + 1j * rng.normal(size=d)
+                   for _ in range(200)]):
+            a = a / max(np.linalg.norm(a), 1e-300)
+            v = spread(a)
+            if v > best:
+                best, best_a = v, a
+        step = 0.5
+        for _ in range(60):
+            improved = False
+            for _ in range(20):
+                a = best_a + step * (rng.normal(size=d)
+                                     + 1j * rng.normal(size=d))
+                a = a / max(np.linalg.norm(a), 1e-300)
+                v = spread(a)
+                if v > best:
+                    best, best_a, improved = v, a, True
+            if not improved:
+                step *= 0.6
+        pr.debug(f"  chain eigenmode {mode_idx}: degenerate group of {d}, "
+                 f"balanced to a {best * 100:.1f}% minimum section share "
+                 f"(an even split is {100 / self.n_structures:.1f}%)")
+        return evecs[:, cluster] @ best_a
+
+    def reconstruct_chain_eigenmode(
+        self,
+        mode_idx: int = 0,
+        field_type: Literal['E', 'H'] = 'E',
+        component: Literal['real', 'imag', 'abs'] = 'abs',
+        enforce_continuity: bool = True,
+        axis: Optional[Literal['x', 'y', 'z']] = None,
+        gap: float = 0.0,
+        boundary_only: bool = False,
+        balance_degenerate: bool = True,
+        degeneracy_tol: float = 1e-6,
+    ):
+        """Reconstruct an EIGENMODE of the coupled chain over the whole geometry.
+
+        :meth:`reconstruct_eigenmode` needs a single glued mesh, which a netlist
+        of repeated sections does not have. This assembles the mode onto a
+        compound mesh built by rigidly replicating the reference section, so a
+        chain eigenmode can be viewed across the full structure.
+
+        Use :meth:`chain_eigenfrequencies` to find the ``mode_idx`` of interest.
+        Returns ``(coefficient_function, compound_mesh, label)`` for
+        ``netgen.webgui.Draw``.
+        """
+        if self.A_coupled is None:
+            raise ValueError("System not coupled.")
+
+        evals, evecs = np.linalg.eigh(self.A_coupled)
+        keep = evals > 1e-6
+        evals, evecs = evals[keep], evecs[:, keep]
+        if mode_idx >= evecs.shape[1]:
+            raise ValueError(f"mode_idx {mode_idx} out of range "
+                             f"(max {evecs.shape[1] - 1})")
+
+        coeffs = evecs[:, mode_idx]
+        if balance_degenerate and self.n_structures > 1:
+            coeffs = self._balance_degenerate_mode(evals, evecs, mode_idx,
+                                                   degeneracy_tol)
+        x_uncoupled = self.W_coupled @ coeffs
+        scales = np.ones(self.n_structures, dtype=complex)
+        if enforce_continuity and self.n_structures > 1 and self.connections:
+            # The interface rescaling compares DOFs on a unified mesh, which a
+            # netlist of replicated sections does not have. The coupling has
+            # already enforced continuity in the reduced space, so fall back to
+            # unit scales rather than failing.
+            if self.mesh is not None and self.fes is not None:
+                scales = self._compute_eigenmode_scales(x_uncoupled)
+            else:
+                pr.debug("  chain eigenmode: no unified mesh, skipping "
+                         "interface rescaling (unit scales)")
+
+        vecs = []
+        for i, struct in enumerate(self.structures):
+            start = self._structure_dof_offsets[i]
+            xi = struct.reconstruct(x_uncoupled[start:start + struct.r])
+            vecs.append(np.asarray(xi) * scales[i])
+
+        omega = float(np.sqrt(evals[mode_idx]))
+        label = (f"{component}({field_type}) - chain eigenmode {mode_idx} @ "
+                 f"{omega / (2 * np.pi) / 1e9:.4f} GHz")
+        return self._assemble_chain(vecs, omega, field_type, component, label,
+                                    axis=axis, gap=gap, boundary_only=boundary_only,
+                                    caller="reconstruct_chain_eigenmode")
 
     def plot_field_at_frequency(self, freq: float, **kwargs) -> None:
         """
@@ -1826,10 +2317,56 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     # Eigenmode Reconstruction and Visualization
     # =========================================================================
 
+    def reconstruct_section_eigenmode(
+        self,
+        mode_idx: int = 0,
+        section_idx: int = 0
+    ) -> GridFunction:
+        """Eigenmode of the coupled system, drawn on ONE section's own mesh.
+
+        Netlist sections have independent meshes, so there is no single space to
+        draw a chain mode on. The coupled eigenvector still spans every section;
+        this slices out ``section_idx``'s reduced coordinates and lifts them
+        through that section's basis.
+        """
+        from ngsolve import GridFunction
+        if self.A_coupled is None:
+            raise ValueError("System not coupled. Call couple() first.")
+        if not (0 <= section_idx < self.n_structures):
+            raise IndexError(f"section_idx {section_idx} out of range "
+                             f"[0, {self.n_structures - 1}]")
+
+        evals, evecs = np.linalg.eigh(self.A_coupled)
+        keep = evals > 1e-6
+        evals, evecs = evals[keep], evecs[:, keep]
+        order = np.argsort(evals)
+        evals, evecs = evals[order], evecs[:, order]
+        if mode_idx >= len(evals):
+            raise IndexError(
+                f"mode_idx {mode_idx} out of range: only {len(evals)} "
+                f"physical mode(s) above the zero-frequency cutoff.")
+        pr.info(f"\nEigenmode {mode_idx} at f = "
+                f"{np.sqrt(evals[mode_idx]) / (2 * np.pi) / 1e9:.4f} GHz "
+                f"(section {section_idx})")
+
+        x_uncoupled = self.W_coupled @ evecs[:, mode_idx]
+        struct = self.structures[section_idx]
+        start = self._structure_dof_offsets[section_idx]
+        x_full = struct.reconstruct(x_uncoupled[start:start + struct.r])
+
+        mesh, fes = self._section_mesh_fes(section_idx)
+        E_gf = GridFunction(fes)
+        vec = E_gf.vec.FV().NumPy()
+        n = min(len(vec), len(x_full))
+        vec[:] = 0
+        vec[:n] = np.real(x_full[:n]) if not fes.is_complex else x_full[:n]
+        return E_gf
+
     def reconstruct_eigenmode(
         self,
         mode_idx: int = 0,
-        enforce_continuity: bool = True
+        enforce_continuity: bool = True,
+        section_idx: int = 0
     ) -> GridFunction:
         """
         Reconstruct eigenmode field over the entire structure.
@@ -1848,10 +2385,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """
         if self.A_coupled is None:
             raise ValueError("System not coupled. Call couple() first.")
-        
+
         if self.mesh is None:
-            raise ValueError("No mesh available.")
-        
+            # A NETLIST concat has no unified mesh -- its sections live on
+            # independent meshes. Reconstruct on the requested section instead.
+            return self.reconstruct_section_eigenmode(
+                mode_idx, section_idx=section_idx)
+
         self._ensure_unified_fes()
         
         # Compute eigenmodes of coupled system
@@ -2029,6 +2569,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def plot_eigenmode(
         self,
         mode_idx: int = 0,
+        section_idx: int = 0,
         component: Literal['real', 'imag', 'abs'] = 'abs',
         field_type: Literal['E', 'H'] = 'E',
         clipping: Optional[Dict] = None,
@@ -2065,17 +2606,20 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         freq = np.sqrt(eigenvalues[mode_idx]) / (2 * np.pi)
         omega = 2 * np.pi * freq
         
-        pr.info(f"\nEigenmode {mode_idx} at f = {freq / 1e9:.4f} GHz")
+        if self.mesh is not None:   # the per-section path prints its own
+            pr.info(f"\nEigenmode {mode_idx} at f = {freq / 1e9:.4f} GHz")
         
         # Reconstruct field
-        E_gf = self.reconstruct_eigenmode(mode_idx, enforce_continuity=enforce_continuity)
+        E_gf = self.reconstruct_eigenmode(
+            mode_idx, enforce_continuity=enforce_continuity,
+            section_idx=section_idx)
         
         # Select field type
         if field_type == 'E':
             field_cf = E_gf
             field_label = "E"
         elif field_type == 'H':
-            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            field_cf = (1j / (omega * mu0)) * curl(E_gf)
             field_label = "H"
         else:
             raise ValueError(f"Invalid field_type: {field_type}")
@@ -2099,7 +2643,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if euler_angles:
             draw_kwargs['euler_angles'] = euler_angles
         
-        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
+        # A netlist concat has no unified mesh; the field was reconstructed on
+        # ONE section, so draw it on that section's own mesh.
+        draw_mesh = self.mesh
+        if draw_mesh is None:
+            draw_mesh, _ = self._section_mesh_fes(section_idx)
+        Draw(BoundaryFromVolumeCF(cf_plot), draw_mesh, plot_name, **draw_kwargs)
 
     def get_reconstruction_info(self) -> Dict:
         """Get information about field reconstruction capability."""
@@ -2343,6 +2892,8 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         B_reduced: np.ndarray,
         W_reduction: np.ndarray,
         singular_values: np.ndarray,
+        C_reduced: Optional[np.ndarray] = None,
+        D_reduced: Optional[np.ndarray] = None,
     ):
         # Don't call parent __init__, manually copy state
         BaseEMSolver.__init__(self)
@@ -2351,6 +2902,8 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         self.structures = parent.structures
         self.n_structures = parent.n_structures
         self._port_impedance_func = parent._port_impedance_func
+        self._port_wave_impedance_func = getattr(
+            parent, '_port_wave_impedance_func', None)
         self._solver_ref = parent._solver_ref
         self.mesh = parent.mesh
         self.fes = parent.fes
@@ -2383,6 +2936,8 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         # Reduced system matrices
         self.A_coupled = np.asarray(A_reduced).astype(complex, copy=False)
         self.B_coupled = np.asarray(B_reduced).astype(complex, copy=False)
+        self.C_coupled = C_reduced
+        self.D_coupled = D_reduced
 
         # Projection matrices
         # W_reduction: maps from parent coupled coords to this reduced level
@@ -2488,7 +3043,10 @@ def reduce_concatenated_system(
     # Collect snapshots: shape (n_freq, r_coupled, n_ext) -> (r_coupled, n_freq * n_ext)
     W_snap = np.hstack([concat._snapshots[k] for k in range(len(concat._snapshots))])
 
-    # SVD for POD basis
+    # SVD for POD basis.  A REAL basis (from [Re, Im] of the snapshots) keeps
+    # the complex-symmetric structure of a lossy system under projection.
+    if np.iscomplexobj(W_snap):
+        W_snap = np.hstack([W_snap.real, W_snap.imag])
     U, S, _ = np.linalg.svd(W_snap, full_matrices=False)
 
     # Determine truncation rank
@@ -2505,6 +3063,12 @@ def reduce_concatenated_system(
     # Ensure Hermitian
     A_reduced = 0.5 * (A_reduced + A_reduced.T.conj())
 
+    C_reduced = D_reduced = None
+    if getattr(concat, 'C_coupled', None) is not None:
+        C_reduced = W_r.T @ concat.C_coupled @ W_r
+    if getattr(concat, 'D_coupled', None) is not None:
+        D_reduced = W_r.T @ concat.D_coupled @ W_r
+
     print(f"\nReduced unified system: {r_current} -> {r_new} DOFs")
     print(f"  Compression: {100 * (1 - r_new / r_current):.1f}%")
     print(f"  Singular value decay: {S[0]:.2e} -> {S[min(r_new, len(S) - 1)]:.2e}")
@@ -2515,4 +3079,6 @@ def reduce_concatenated_system(
         B_reduced=B_reduced,
         W_reduction=W_r,
         singular_values=S,
+        C_reduced=C_reduced,
+        D_reduced=D_reduced,
     )

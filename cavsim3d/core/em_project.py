@@ -13,8 +13,7 @@ from cavsim3d.geometry.importers import OCCImporter
 import cavsim3d.geometry.primitives as primitives
 from cavsim3d.geometry.base import BaseGeometry
 from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
-from ngsolve import Mesh, BoundaryFromVolumeCF # type: ignore
-from ngsolve.webgui import Draw
+from ngsolve import Mesh  # type: ignore
 
 
 class EMProject:
@@ -27,25 +26,38 @@ class EMProject:
     - Provide a unified entry point for simulation.
     """
     
-    def create_assembly(self, main_axis: str = 'Z') -> 'Assembly':
+    def create_assembly(self, main_axis: str = 'Z', force: bool = False) -> 'Assembly':
         """
         Create a new multi-component assembly for this project.
-        
+
         This sets the project's geometry to an empty Assembly and returns it.
         You can then add components to the assembly using assembly.add().
-        
+
         Parameters
         ----------
         main_axis : str
             Primary axis for concatenation ('X', 'Y', or 'Z')
-            
+        force : bool
+            Replace an existing mesh / results without asking.
+
         Returns
         -------
         Assembly
-            The new assembly instance
+            The new assembly instance (or the current geometry if replacing
+            existing results was declined)
         """
-        self.geometry = Assembly(main_axis=main_axis)
-        self.save()
+        if (self.has_mesh() or self.has_results()) and not force:
+            if not get_user_confirmation(
+                "\nWARNING: A new assembly will invalidate the current mesh and simulation results.\n"
+                "Do you want to continue and delete existing results?"
+            ):
+                pr.info("Keeping the existing geometry and results.")
+                return self.geometry
+            self.invalidate_mesh()
+        elif force and (self.has_mesh() or self.has_results()):
+            self.invalidate_mesh()
+
+        self.geometry = Assembly(main_axis=main_axis)  # the setter saves
         return self.geometry
 
     def __init__(
@@ -53,7 +65,7 @@ class EMProject:
         name: str,
         base_dir: Optional[Union[str, Path]] = None,
         geometry: Optional[BaseGeometry] = None,
-        bc: str = None,
+        bc: Optional[str] = None,
         overwrite: bool = False,
     ):
         self.name = name
@@ -119,21 +131,25 @@ class EMProject:
             from IPython import get_ipython
             if get_ipython() is None:
                 return  # Not in IPython/Jupyter
-            from IPython.display import display, SVG, HTML
+            import base64
+            from IPython.display import display, HTML
+            from cavsim3d import __version__
             logo_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                 "docs", "assets", "cavsim3d_logo_square.svg"
             )
             if os.path.exists(logo_path):
+                with open(logo_path, 'rb') as fh:
+                    logo = base64.b64encode(fh.read()).decode()
                 display(HTML(f"""
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <img src="data:image/svg+xml;base64,{__import__('base64').b64encode(open(logo_path, 'rb').read()).decode()}" style="height: 40px;">
+                    <img src="data:image/svg+xml;base64,{logo}" style="height: 40px;">
                     <span style="font-size: 16px; font-weight: bold; color: #e66433;">CAVSIM-3D</span>
-                    <span style="font-size: 13px; color: #888;">v0.1.0 &mdash; {self.name}</span>
+                    <span style="font-size: 13px; color: #888;">v{__version__} &mdash; {self.name}</span>
                 </div>
                 """))
-        except ImportError:
-            pass  # Not in Jupyter, skip silently
+        except Exception:
+            pass  # The banner is cosmetic; never let it break project creation
 
     def _initial_load(self):
         """Internal helper for automatic loading during instantiation."""
@@ -186,14 +202,12 @@ class EMProject:
 
             if self._fds:
                 self._fds._project_path = self.project_path
-                # Only sync mesh if the FDS doesn't have one already (load_from_path handles it)
+                self._fds._project_name = self.name
+                self._fds._project_ref = self
+                # load_from_path received the mesh; FE spaces are rebuilt on it
+                # (a pickled FES would carry its own, separate mesh copy).
                 if self.mesh and self._fds.mesh is None:
                     self._fds.mesh = self.mesh
-                    # Restore FES
-                    pm = ProjectManager(self.base_dir)
-                    fes = pm.load_ngs_fes(self.fds_path)
-                    if fes:
-                        self._fds._fes_global = fes
 
         self._loading = False  # Re-enable save()
 
@@ -241,8 +255,7 @@ class EMProject:
 
             self.invalidate_mesh()
 
-        self.geometry = self.create_importer(filepath, **kwargs)
-        self.save()  # Auto-save after successful import
+        self.geometry = self.create_importer(filepath, **kwargs)  # the setter saves
         return self.geometry
 
     def create_importer(self, filepath: Union[str, Path], **kwargs) -> 'OCCImporter':
@@ -273,8 +286,7 @@ class EMProject:
         if not cls:
             raise ValueError(f"Unknown primitive type: {primitive_type}")
             
-        self.geometry = cls(**kwargs)
-        self.save()  # Auto-save
+        self.geometry = cls(**kwargs)  # the setter saves
         return self.geometry
 
     def generate_mesh(self, force: bool = False, **kwargs) -> Mesh:
@@ -296,17 +308,12 @@ class EMProject:
 
             self.invalidate_results()
 
-        self.mesh = self.geometry.generate_mesh(**kwargs)
-        self.save()
+        self.mesh = self.geometry.generate_mesh(**kwargs)  # the setter saves
         return self.mesh
     
-    def draw_material_cf(self, which='eps'):
-
-        eps_r_cf, mu_r_cf = self._fds.build_material_cfs()
-        if which == 'eps':
-            Draw(BoundaryFromVolumeCF(eps_r_cf), self.mesh)
-        elif which == 'mu':
-            Draw(BoundaryFromVolumeCF(mu_r_cf), self.mesh)
+    def draw_material_cf(self, which: str = 'eps'):
+        """Draw the relative permittivity ('eps') or permeability ('mu') map."""
+        self.fds.draw_material_cf(which)
 
     def has_mesh(self) -> bool:
         """Check if mesh exists (either in memory or on disk)."""
@@ -374,6 +381,11 @@ class EMProject:
         # Sync solver with new geometry object
         if self._fds:
             self._fds.geometry = value
+
+        # Persist like the mesh setter does (but NOT during _initial_load), so
+        # `proj.geometry = g` survives a restart.
+        if value is not None and not getattr(self, '_loading', False):
+            self.save()
 
     @property
     def mesh(self) -> Optional[Mesh]:

@@ -27,34 +27,22 @@ Multi-solid
 
 from __future__ import annotations
 from typing import Dict, Iterator, List, Optional, Tuple, Union
+import json
+import shutil
 import warnings
-import numpy as np
+from datetime import datetime
 from pathlib import Path
+
+import h5py
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.linalg as sl
+
 from cavsim3d.utils.plot_mixin import PlotMixin
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
-import h5py
-import shutil
-from pathlib import Path
-from datetime import datetime
-import json
 from cavsim3d.rom.reduction import ModelOrderReduction
-import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
-from cavsim3d.rom.reduction import ModelOrderReduction
-import warnings
-import scipy.sparse as sp
 from cavsim3d.rom.structures import ReducedStructure
 from cavsim3d.solvers.concatenation import ConcatenatedSystem
-import scipy.linalg as sl
-import warnings
-import warnings
-import warnings
-from cavsim3d.rom.reduction import ModelOrderReduction
-
-
-
 
 
 def _safe_filename(name: str) -> str:
@@ -104,8 +92,13 @@ class FOMResult(PlotMixin):
         residual_data: Optional[Dict] = None,
         # Back-reference to the FDS
         _solver_ref=None,
+        # (port_number, mode_number), 1-based, for each matrix row/column.
+        # Needed when ports carry different numbers of modes.
+        mode_labels: Optional[List[Tuple[int, int]]] = None,
     ):
         self.domain = domain
+        self.mode_labels = ([tuple(int(v) for v in lab) for lab in mode_labels]
+                            if mode_labels else None)
         self.frequencies = frequencies
         self._Z_matrix = Z_matrix
         self._S_matrix = S_matrix
@@ -139,18 +132,25 @@ class FOMResult(PlotMixin):
     def _rebuild_dict(self, matrix: np.ndarray) -> Dict:
         """Utility to reconstruct port/mode mapping dictionary from a matrix."""
         res_dict = {'frequencies': self.frequencies}
-        n_p = matrix.shape[1]
-        n_modes = self._n_modes_per_port
-        
-        for row in range(n_p):
-            prow = row // n_modes + 1
-            mrow = row % n_modes + 1
-            for col in range(n_p):
-                pcol = col // n_modes + 1
-                mcol = col % n_modes + 1
-                key = f'{pcol}({mcol}){prow}({mrow})'
-                res_dict[key] = matrix[:, row, col]
+        # Key = '<excitation>(mode)<response>(mode)', i.e. column first
+        for row, (prow, mrow) in enumerate(self._labels(matrix.shape[1])):
+            for col, (pcol, mcol) in enumerate(self._labels(matrix.shape[1])):
+                res_dict[f'{pcol}({mcol}){prow}({mrow})'] = matrix[:, row, col]
         return res_dict
+
+    def _labels(self, n_p: int) -> List[Tuple[int, int]]:
+        """(port, mode) label per matrix index; uniform fallback if unknown."""
+        if self.mode_labels and len(self.mode_labels) == n_p:
+            return list(self.mode_labels)
+        n_modes = self._n_modes_per_port or 1
+        return [(i // n_modes + 1, i % n_modes + 1) for i in range(n_p)]
+
+    def _row_first_dict(self, matrix: np.ndarray) -> Dict[str, np.ndarray]:
+        """Matrix -> the solver's internal row-first per-domain dict."""
+        labels = self._labels(matrix.shape[1])
+        return {f'{rp}({rm}){cp}({cm})': matrix[:, r, c]
+                for r, (rp, rm) in enumerate(labels)
+                for c, (cp, cm) in enumerate(labels)}
 
     # ------------------------------------------------------------------
     # Backward-compatible ROM accessor
@@ -240,7 +240,6 @@ class FOMResult(PlotMixin):
             return None
         if self.domain == 'global':
             return getattr(self._solver_ref, 'M_global', None)
-        return getattr(self._solver_ref, 'M_global', None)
         return getattr(self._solver_ref, 'M', {}).get(self.domain)
 
     @property
@@ -319,14 +318,12 @@ class FOMResult(PlotMixin):
 
         Delegates to the underlying FrequencyDomainSolver.
         """
-        if self._solver_ref is not None and hasattr(self._solver_ref, 'get_eigenmodes'):
-            kwargs['return_eigenvalues'] = True
-            kwargs.setdefault('return_eigenvectors', False)
-            domain = self.domain if self.domain != 'global' else None
-            res = self._solver_ref.get_eigenmodes(domain=domain, **kwargs)
+        if self._solver_ref is not None and hasattr(self._solver_ref, 'calculate_resonant_modes'):
+            domain = self.domain if self.domain != 'global' else 'global'
+            res = self._solver_ref.calculate_resonant_modes(domain=domain, **kwargs)
             if isinstance(res, dict):
-                return {k: v[0] if isinstance(v, tuple) else v for k, v in res.items()}
-            return res[0] if isinstance(res, tuple) else res
+                return {k: v[0] for k, v in res.items()}
+            return res[0]
         raise RuntimeError("Eigenvalues not available for this FOMResult.")
 
     def get_resonant_frequencies(self, **kwargs):
@@ -404,10 +401,18 @@ class FOMResult(PlotMixin):
                 K = getattr(self._solver_ref, 'K_global', None)
                 M = getattr(self._solver_ref, 'M_global', None)
                 B = getattr(self._solver_ref, 'B_global', None)
+                C = getattr(self._solver_ref, 'C_global', None)
+                D = getattr(self._solver_ref, 'D_global', None)
             else:
                 K = getattr(self._solver_ref, 'K', {}).get(self.domain)
                 M = getattr(self._solver_ref, 'M', {}).get(self.domain)
                 B = getattr(self._solver_ref, 'B', {}).get(self.domain)
+                C = getattr(self._solver_ref, 'C', {}).get(self.domain)
+                D = getattr(self._solver_ref, 'D', {}).get(self.domain)
+            for name, mat in (("C", C), ("D", D)):   # loss matrices (lossy only)
+                if mat is not None:
+                    with h5py.File(mat_path / f"{name}.h5", "a") as f:
+                        H5Serializer.save_dataset(f, "data", mat)
 
             if K is not None:
                 with h5py.File(mat_path / "K.h5", "a") as f:
@@ -420,17 +425,19 @@ class FOMResult(PlotMixin):
                     H5Serializer.save_dataset(f, "data", B)
 
         # 2. Save S and Z results
+        # Sanitised like load() expects (a domain may contain '/').
+        tag = _safe_filename(self.domain) if self.domain else None
         if self._Z_matrix is not None:
-            z_file = f"z_{self.domain}.h5" if self.domain else "z.h5"
+            z_file = f"z_{tag}.h5" if tag else "z.h5"
             with h5py.File(z_path / z_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._Z_matrix)
         if self._S_matrix is not None:
-            s_file = f"s_{self.domain}.h5" if self.domain else "s.h5"
+            s_file = f"s_{tag}.h5" if tag else "s.h5"
             with h5py.File(s_path / s_file, "a") as f:
                 H5Serializer.save_dataset(f, "data", self._S_matrix)
 
         # 3. Save snapshots and frequencies
-        snap_file = f"snapshots_{self.domain}.h5" if self.domain else "snapshots.h5"
+        snap_file = f"snapshots_{tag}.h5" if tag else "snapshots.h5"
         with h5py.File(snap_path / snap_file, "a") as f:
             if self.frequencies is not None:
                 H5Serializer.save_dataset(f, "frequencies", self.frequencies)
@@ -456,7 +463,8 @@ class FOMResult(PlotMixin):
             "n_ports": self.n_ports,
             "ports": self.ports,
             "n_modes_per_port": self._n_modes_per_port,
-        "timestamp": datetime.now().isoformat()
+            "mode_labels": self.mode_labels,
+            "timestamp": datetime.now().isoformat()
         }
         ProjectManager.save_json(path, metadata)
 
@@ -526,11 +534,11 @@ class FOMResult(PlotMixin):
             domain = metadata["domain"]
             mat_path = path / "matrices"
             if mat_path.exists():
-                for mname in ["K", "M", "B"]:
+                for mname in ["K", "M", "B", "C", "D"]:
                     mfile = mat_path / f"{mname}.h5"
                     if mfile.exists():
                         with h5py.File(mfile, "r") as f:
-                            data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
+                            data = H5Serializer.load_sparse_csr(f["data"]) if mname != "B" else H5Serializer.load_dataset(f["data"])
                             if domain == 'global':
                                 setattr(_solver_ref, f"{mname}_global", data)
                             else:
@@ -560,7 +568,8 @@ class FOMResult(PlotMixin):
             ports=metadata["ports"],
             n_modes_per_port=metadata.get("n_modes_per_port", 1),
             residual_data=residual_data,
-            _solver_ref=_solver_ref
+            _solver_ref=_solver_ref,
+            mode_labels=metadata.get("mode_labels"),
         )
         return res
 
@@ -947,6 +956,15 @@ class FOMCollection(PlotMixin):
             Ard = 0.5 * (Ard + Ard.T)
             Brd = Q_L_inv.T @ B_free
 
+            # Loss operators in the same coordinates (lossy domains only)
+            loss = {}
+            for name in ("C", "D"):
+                X = getattr(fds, name, {}).get(domain)
+                if X is not None:
+                    X_free = X[np.ix_(free_dofs, free_dofs)].toarray()
+                    X_r = Q_L_inv.T @ X_free @ Q_L_inv
+                    loss[name] = 0.5 * (X_r + X_r.T)
+
             n_free = len(lam)
 
             domain_ports = fds.domain_port_map[domain]
@@ -961,20 +979,27 @@ class FOMCollection(PlotMixin):
                 r=n_free,
                 n_full=n_free,
                 is_full_order=True,
+                Crd=loss.get("C"),
+                Drd=loss.get("D"),
             ))
 
         concat = ConcatenatedSystem(
             structures=structures,
             port_impedance_func=fds._get_port_impedance,
+            port_wave_impedance_func=fds._port_wave_impedance,
             solver_ref=fds,
         )
 
-        # Auto-detect sequential connections
+        # Connect the domains at their SHARED interface ports -- the same rule
+        # the ROM path uses (ModelOrderReduction._build_connections), so FOM
+        # and ROM concatenation agree for any topology, not only 2-port chains.
+        domain_index = {d: i for i, d in enumerate(fds.domains)}
         connections = []
-        for i in range(len(fds.domains) - 1):
-            port_a = fds.domain_port_map[fds.domains[i]][-1]    # last port of domain i
-            port_b = fds.domain_port_map[fds.domains[i + 1]][0]  # first port of domain i+1
-            connections.append(((i, port_a), (i + 1, port_b)))
+        for port in fds.internal_ports:
+            doms = [d for d in fds.domains if port in fds.domain_port_map.get(d, [])]
+            for other in doms[1:]:
+                connections.append(((domain_index[doms[0]], port),
+                                    (domain_index[other], port)))
 
         concat.define_connections(connections)
         concat.couple()
@@ -1013,6 +1038,11 @@ class FOMCollection(PlotMixin):
                         H5Serializer.save_dataset(fm, "data", fom._solver_ref.M.get(domain))
                     with h5py.File(mat_path / f"B_{_safe_filename(domain)}.h5", "a") as fb:
                         H5Serializer.save_dataset(fb, "data", fom._solver_ref.B.get(domain))
+                    for name in ("C", "D"):   # loss matrices (lossy domains only)
+                        mat = getattr(fom._solver_ref, name, {}).get(domain)
+                        if mat is not None:
+                            with h5py.File(mat_path / f"{name}_{_safe_filename(domain)}.h5", "a") as fl:
+                                H5Serializer.save_dataset(fl, "data", mat)
 
         # 2. Save S and Z results
         for fom in self._foms:
@@ -1046,7 +1076,8 @@ class FOMCollection(PlotMixin):
                     "domain": f.domain,
                     "n_ports": f.n_ports,
                     "ports": f.ports,
-                    "n_modes_per_port": f._n_modes_per_port
+                    "n_modes_per_port": f._n_modes_per_port,
+                    "mode_labels": f.mode_labels,
                 } for f in self._foms
             ],
             "timestamp": datetime.now().isoformat()
@@ -1077,8 +1108,8 @@ class FOMCollection(PlotMixin):
         frequencies = None
         for d_meta in metadata.get("solids", []):
             d = d_meta["domain"]
-            snap_path = path / "snapshots" / f"snapshots_{d}.h5"
-            if not snap_path.exists(): snap_path = path / f"snapshots_{d}.h5"
+            snap_path = path / "snapshots" / f"snapshots_{_safe_filename(d)}.h5"
+            if not snap_path.exists(): snap_path = path / f"snapshots_{_safe_filename(d)}.h5"
             
             if snap_path.exists():
                 with h5py.File(snap_path, "r") as fs:
@@ -1098,14 +1129,12 @@ class FOMCollection(PlotMixin):
             if mat_path.exists():
                 for d_meta in metadata.get("solids", []):
                     domain = d_meta["domain"]
-                    for mname in ["K", "M", "B"]:
+                    for mname in ["K", "M", "B", "C", "D"]:
                         mfile = mat_path / f"{mname}_{_safe_filename(domain)}.h5"
                         if mfile.exists():
                             with h5py.File(mfile, "r") as f:
-                                data = H5Serializer.load_sparse_csr(f["data"]) if mname in ["K", "M"] else H5Serializer.load_dataset(f["data"])
-                                if mname == "K": _fds_ref.K[domain] = data
-                                elif mname == "M": _fds_ref.M[domain] = data
-                                else: _fds_ref.B[domain] = data
+                                data = H5Serializer.load_sparse_csr(f["data"]) if mname != "B" else H5Serializer.load_dataset(f["data"])
+                                getattr(_fds_ref, mname)[domain] = data
                         else:
                             mfile_leg = mat_path / f"{mname}.h5"
                             if mfile_leg.exists():
@@ -1173,17 +1202,21 @@ class FOMCollection(PlotMixin):
                 ports=solid_meta["ports"],
                 n_modes_per_port=solid_meta.get("n_modes_per_port", 1),
                 residual_data=residual_data,
-                _solver_ref=_fds_ref
+                _solver_ref=_fds_ref,
+                mode_labels=solid_meta.get("mode_labels"),
             )
-            
-            # Update solver state
+
+            # Update solver state.  The solver keeps per-domain results as
+            # row-first '{row}({m}){col}({n})' dicts, not as matrices.
             if _fds_ref is not None:
                 if not hasattr(_fds_ref, '_residuals') or _fds_ref._residuals is None:
                     _fds_ref._residuals = {}
                 if residual_data is not None: _fds_ref._residuals[domain] = residual_data
                 if field_snapshots is not None: _fds_ref.snapshots[domain] = field_snapshots
-                if Z_matrix is not None: _fds_ref._Z_per_domain[domain] = Z_matrix
-                if S_matrix is not None: _fds_ref._S_per_domain[domain] = S_matrix
+                if Z_matrix is not None:
+                    _fds_ref._Z_per_domain[domain] = fom._row_first_dict(Z_matrix)
+                if S_matrix is not None:
+                    _fds_ref._S_per_domain[domain] = fom._row_first_dict(S_matrix)
                 if frequencies is not None: _fds_ref.frequencies = frequencies
 
             fom_list.append(fom)
@@ -1210,10 +1243,9 @@ class FOMCollection(PlotMixin):
         """
         Compute or retrieve eigenvalues for all domains in the collection.
         """
-        if self._fds_ref is not None and hasattr(self._fds_ref, 'get_eigenmodes'):
-            kwargs['return_eigenvalues'] = True
-            kwargs.setdefault('return_eigenvectors', False)
-            return self._fds_ref.get_eigenmodes(domain=None, **kwargs)
+        if self._fds_ref is not None and hasattr(self._fds_ref, 'calculate_resonant_modes'):
+            res = self._fds_ref.calculate_resonant_modes(domain=None, **kwargs)
+            return {k: v[0] for k, v in res.items()}
         raise RuntimeError("Eigenvalues not available for this FOMCollection.")
 
     def _auto_save_eigenmodes(self, eigenmodes, **kwargs):
@@ -1523,41 +1555,20 @@ def build_fom_result(fds, domain: str = 'global') -> FOMResult:
         s_dict = fds.S_dict
         ports = fds.ports
         n_ports = fds.n_ports
+        labels = (fds._matrix_index_labels(Z_mat.shape[1], fds._n_modes_per_port or 1)
+                  if Z_mat is not None else None)
     else:
-        # Per-domain
+        # Per-domain: the solver's own (port, mode) ordering, which allows a
+        # different number of modes per port.  Dicts are rebuilt from the
+        # matrices in the standard excitation-first key convention.
         z_domain = fds._Z_per_domain.get(domain)
         s_domain = fds._S_per_domain.get(domain)
         domain_ports = fds.domain_port_map.get(domain, [])
-        n_modes = fds._n_modes_per_port or 1
-
-        # Build small dense Z/S matrices for this domain
-        n_p = len(domain_ports) * n_modes
-        n_freq = len(fds.frequencies)
-        Z_mat = np.zeros((n_freq, n_p, n_p), dtype=complex) if z_domain else None
-        S_mat = np.zeros((n_freq, n_p, n_p), dtype=complex) if s_domain else None
-
-        z_dict = None
-        s_dict = None
-
-        if z_domain:
-            # Reconstruct matrix from dict keys
-            z_dict = {'frequencies': fds.frequencies}
-            s_dict = {'frequencies': fds.frequencies} if s_domain else None
-            for row in range(n_p):
-                prow = row // n_modes + 1
-                mrow = row % n_modes + 1
-                for col in range(n_p):
-                    pcol = col // n_modes + 1
-                    mcol = col % n_modes + 1
-                    key = f'{pcol}({mcol}){prow}({mrow})'
-                    if key in z_domain:
-                        Z_mat[:, row, col] = z_domain[key]
-                        z_dict[key] = z_domain[key]
-                    if s_domain and key in s_domain:
-                        S_mat[:, row, col] = s_domain[key]
-                        if s_dict is not None:
-                            s_dict[key] = s_domain[key]
-
+        Z_mat = fds._domain_dict_to_matrix(domain, z_domain) if z_domain else None
+        S_mat = fds._domain_dict_to_matrix(domain, s_domain) if s_domain else None
+        z_dict = s_dict = None
+        labels = [(pidx + 1, m + 1)
+                  for (pidx, _p, m) in fds._domain_port_mode_order(domain)]
         ports = domain_ports
         n_ports = len(domain_ports)
 
@@ -1573,6 +1584,7 @@ def build_fom_result(fds, domain: str = 'global') -> FOMResult:
         n_modes_per_port=fds._n_modes_per_port or 1,
         residual_data=getattr(fds, '_residuals', {}).get(domain),
         _solver_ref=fds,
+        mode_labels=labels,
     )
 
 
@@ -1596,6 +1608,92 @@ def build_fom_collection(fds) -> FOMCollection:
 # =============================================================================
 # Assembly-netlist collections (repeat-N sections, imported projects)
 # =============================================================================
+
+class NetlistSection:
+    """One unique section of a netlist assembly.
+
+    ``proj.fds.foms['cavity']`` returns this. A netlist solves each unique
+    section standalone in its own scratch project, so the section owns a whole
+    :class:`EMProject`; the useful thing is usually its FOM, which this
+    forwards to::
+
+        sec = proj.fds.foms['cavity']
+        sec.plot_s(['1(1)1(1)'])     # straight to the section's FOM
+        sec.fom                      # the FOMResult itself
+        sec.project                  # the scratch EMProject, if you need it
+
+    Mapping access (``sec['project']``) still works: the section used to BE the
+    raw record dict, and internal staging code still reads it that way.
+    """
+
+    __slots__ = ('_name', '_rec')
+
+    def __init__(self, name: str, record: Dict):
+        self._name = name
+        self._rec = record
+
+    # -- what the section IS ------------------------------------------------
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def kind(self) -> Optional[str]:
+        """'live' (computed here) or 'imported' (copied from another project)."""
+        return self._rec.get('kind')
+
+    @property
+    def project(self):
+        """The section's own EMProject (``None`` for an imported section)."""
+        return self._rec.get('project')
+
+    @property
+    def fom(self):
+        """The section's full-order result."""
+        proj = self.project
+        if proj is None:
+            raise AttributeError(
+                f"Section {self._name!r} is {self.kind!r}: it has no live "
+                f"project, its artifacts were copied from "
+                f"{self._rec.get('source')!r}.")
+        return proj.fds.fom
+
+    # -- forward the usual result API ---------------------------------------
+    @property
+    def frequencies(self):
+        return self.fom.frequencies
+
+    @property
+    def S_dict(self):
+        return self.fom.S_dict
+
+    @property
+    def Z_dict(self):
+        return self.fom.Z_dict
+
+    @property
+    def ports(self):
+        return self.project.fds.ports
+
+    def plot_s(self, *args, **kwargs):
+        return self.fom.plot_s(*args, **kwargs)
+
+    def plot_z(self, *args, **kwargs):
+        return self.fom.plot_z(*args, **kwargs)
+
+    # -- back-compat: this used to be a plain dict --------------------------
+    def __getitem__(self, key):
+        return self._rec[key]
+
+    def get(self, key, default=None):
+        return self._rec.get(key, default)
+
+    def __contains__(self, key):
+        return key in self._rec
+
+    def __repr__(self) -> str:
+        return f"NetlistSection({self._name!r}, kind={self.kind!r})"
+
 
 class NetlistFOMs:
     """Per-component FOM stage of an assembly NETLIST.
@@ -1627,8 +1725,12 @@ class NetlistFOMs:
     def __len__(self) -> int:
         return len(self._components)
 
-    def __getitem__(self, name: str) -> Dict:
-        return self._components[name]
+    def __getitem__(self, name: str) -> 'NetlistSection':
+        if name not in self._components:
+            raise KeyError(
+                f"No section {name!r} in this netlist. Sections: "
+                f"{list(self._components)}")
+        return NetlistSection(name, self._components[name])
 
     def __repr__(self) -> str:
         parts = ", ".join(f"{b}({r['kind']})" for b, r in self._components.items())

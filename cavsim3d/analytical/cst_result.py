@@ -571,11 +571,33 @@ class CSTResult(PlotMixin):
             new_phase = phase_interp(target_frequencies)
             new_result._S_dict[key] = new_mag * np.exp(1j * new_phase)
 
-        # Recompute Z from interpolated S
-        new_result._Z_dict = None
         new_result._S_matrix = None
         new_result._Z_matrix = None
-        new_result._compute_z_from_s()
+        new_result._Y_matrix = None
+
+        # Interpolate the EXPORTED Z and Y the same way, rather than re-deriving
+        # them from S. CST references its Z to each port's line impedance, so
+        # recomputing here with the default self.z0 would silently re-reference
+        # every Z by a constant factor (95.84/50 on the coax test model).
+        for src, dst in (('_Z_dict', '_Z_dict'), ('_Y_dict', '_Y_dict')):
+            data = getattr(self, src, None)
+            if not data:
+                setattr(new_result, dst, None)
+                continue
+            out = {}
+            for key, arr in data.items():
+                mag = interp1d(self._frequencies, np.abs(arr),
+                               kind='cubic', fill_value='extrapolate')
+                pha = interp1d(self._frequencies, np.unwrap(np.angle(arr)),
+                               kind='cubic', fill_value='extrapolate')
+                out[key] = mag(target_frequencies) * np.exp(
+                    1j * pha(target_frequencies))
+            setattr(new_result, dst, out)
+
+        # Only synthesise Z when CST never exported it.
+        if not new_result._Z_dict:
+            new_result._Z_dict = None
+            new_result._compute_z_from_s()
 
         return new_result
 

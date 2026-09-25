@@ -58,25 +58,35 @@ On load, the project reconstructs:
 
 ## Rerun Control
 
-The key feature: **`rerun=False`** prevents re-computation when results already exist.
+By default (`rerun=None`), `solve()` reuses stored results when the request is the same
+and recomputes when anything that affects them has changed.
 
 ```python
-# This returns instantly — loads cached results from disk
-proj.fds.solve(fmin=1.0, fmax=3.0, nsamples=30, rerun=False)
+# Same request as the stored results: returns instantly, nothing is recomputed
+proj.fds.solve(fmin=1.0, fmax=3.0, nsamples=30)
 ```
 
 ```python
-# This forces a fresh computation (overwrites cached results)
+# Different request (here the band): recomputed automatically
+proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30)
+```
+
+```python
+# Force a fresh computation, or keep whatever is stored regardless
 proj.fds.solve(fmin=1.0, fmax=3.0, nsamples=30, rerun=True)
+proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30, rerun=False)
 ```
 
-!!! warning "Configuration Change Detection"
-    If you change the frequency range or solver parameters, **cavsim3d** will warn you that the loaded results may be invalid:
-    ```
-    WARNING: Simulation configuration has changed since last save/load:
+!!! info "Configuration Change Detection"
+    A change of frequency range, element order, port-mode counts, port settings, materials
+    or geometry counts as a different request. `solve()` prints what changed before
+    recomputing:
+    ```text
+    Simulation configuration has changed since the results were saved:
       - fmin: 1.0 -> 1.5
-    Existing results may be invalid. Use rerun=True to recompute.
+    The request differs from the stored results -> recomputing (pass rerun=False to keep the stored ones).
     ```
+    The same rule applies to `rom.solve()` and `concat.solve()`.
 
 ## Source Link Management
 

@@ -15,6 +15,19 @@ from .base import BaseGeometry
 from .component_registry import ComputeMethod
 
 
+def _replay_after_init(obj: BaseGeometry, history: List[dict]) -> BaseGeometry:
+    """Replay the ops recorded AFTER ``__init__`` onto a freshly built ``obj``.
+
+    ``__init__`` already builds and meshes (and records that ``generate_mesh``
+    BEFORE its own ``__init__`` entry), so only later operations are replayed.
+    """
+    ops = [e.get('op') for e in history]
+    start = ops.index('__init__') + 1 if '__init__' in ops else len(history)
+    for entry in history[start:]:
+        obj._replay_common_op(entry)
+    return obj
+
+
 class RectangularWaveguide(BaseGeometry):
     """
     Rectangular waveguide with optional analytical solution.
@@ -158,17 +171,7 @@ class RectangularWaveguide(BaseGeometry):
         meth = params.get('compute_method', 'numeric')
         
         obj = cls(a=a, L=L, b=b, maxh=maxh, compute_method=meth)
-        
-        # Re-apply other operations sequentially
-        for entry in history:
-            op = entry['op']
-            if op == '__init__':
-                continue
-            elif op == 'generate_mesh':
-                obj.generate_mesh(maxh=entry.get('maxh'), curve_order=entry.get('curve_order', 3))
-            # etc...
-            
-        return obj
+        return _replay_after_init(obj, history)
 
     def save_geometry(self, project_path) -> None:
         """Save primitive geometry as STEP + history."""
@@ -287,7 +290,7 @@ class CircularWaveguide(BaseGeometry):
         meth = params.get('compute_method', 'numeric')
         
         obj = cls(radius=radius, length=length, maxh=maxh, compute_method=meth)
-        return obj
+        return _replay_after_init(obj, history)
 
     def save_geometry(self, project_path) -> None:
         """Save primitive geometry as STEP + history."""
@@ -315,7 +318,22 @@ class CircularWaveguide(BaseGeometry):
 
 
 class Box(BaseGeometry):
-    """Simple box/cavity geometry."""
+    """Simple box/cavity geometry.
+
+    Parameters
+    ----------
+    dimensions : (a, b, L)
+        Extents along x, y, z [m].
+    port_faces : tuple of str
+        The two faces that become ``port1`` / ``port2``, written as
+        ``'Min(X)'`` ... ``'Max(Z)'``; the other four are PEC walls.
+    maxh : float
+        Maximum mesh element size [m].
+    """
+
+    _SIDE_NAMES = {('Min', 'X'): 'left', ('Max', 'X'): 'right',
+                   ('Min', 'Y'): 'bottom', ('Max', 'Y'): 'top',
+                   ('Min', 'Z'): 'front', ('Max', 'Z'): 'back'}
 
     def __init__(
             self,
@@ -335,18 +353,33 @@ class Box(BaseGeometry):
     def build(self) -> None:
         from netgen.occ import Box as OCCBox
 
+        import re as _re
         a, b, L = self.dimensions
         self.geo = OCCBox((0, 0, 0), (a, b, L))
+        axes = {'X': X, 'Y': Y, 'Z': Z}
 
-        self.geo.faces.Min(Z).name = "port1"
-        self.geo.faces.Max(Z).name = "port2"
-        self.geo.faces.Min(Y).name = "bottom"
-        self.geo.faces.Max(Y).name = "top"
-        self.geo.faces.Min(X).name = "left"
-        self.geo.faces.Max(X).name = "right"
+        def _face(spec: str):
+            m = _re.fullmatch(r'\s*(Min|Max)\(\s*([XYZ])\s*\)\s*', str(spec))
+            if not m:
+                raise ValueError(f"Box port face {spec!r} must look like 'Min(Z)' or 'Max(X)'.")
+            return m.group(1), m.group(2)
+
+        port_keys = [_face(f) for f in self.port_faces]
+        if len(port_keys) != 2 or port_keys[0] == port_keys[1]:
+            raise ValueError(f"Box needs two distinct port faces, got {self.port_faces}.")
+
+        walls = []
+        for (side, ax), name in self._SIDE_NAMES.items():
+            faces = getattr(self.geo.faces, side)(axes[ax])
+            if (side, ax) in port_keys:
+                faces.name = f"port{port_keys.index((side, ax)) + 1}"
+                faces.col = (1, 0, 0)
+            else:
+                faces.name = name
+                walls.append(name)
 
         self.geo.mat('vacuum')
-        self.bc = 'left|right|top|bottom'
+        self.bc = '|'.join(walls)
         self._bc_explicitly_set = True
         self.invalidate_tag()
     
@@ -376,7 +409,7 @@ class Box(BaseGeometry):
         maxh = params.get('maxh', 0.05)
         
         obj = cls(dimensions=tuple(dims), port_faces=tuple(port_faces), maxh=maxh)
-        return obj
+        return _replay_after_init(obj, history)
 
     def save_geometry(self, project_path) -> None:
         """Save primitive geometry as STEP + history."""
@@ -452,9 +485,10 @@ class Sphere(BaseGeometry):
             if entry['op'] == '__init__':
                 params = entry
                 break
-        return cls(radius=params.get('radius', 0.1),
-                   maxh=params.get('maxh', 0.05),
-                   material=params.get('material', 'vacuum'))
+        obj = cls(radius=params.get('radius', 0.1),
+                  maxh=params.get('maxh', 0.05),
+                  material=params.get('material', 'vacuum'))
+        return _replay_after_init(obj, history)
 
     def save_geometry(self, project_path) -> None:
         """Save primitive geometry as STEP + history."""

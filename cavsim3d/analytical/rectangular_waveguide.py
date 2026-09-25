@@ -11,6 +11,21 @@ from collections import defaultdict
 
 
 
+def _first_p(mode_type: str, boundary_type: str) -> int:
+    """Lowest longitudinal index p of a TE/TM cavity mode for the end caps.
+
+    PEC caps force E_t = 0 there: TE needs p >= 1, TM allows p = 0.
+    PMC caps (the FEM's natural port boundary) force H_t = 0: TE allows
+    p = 0, TM needs p >= 1.
+    """
+    bt = str(boundary_type).upper()
+    if bt not in ('PEC', 'PMC'):
+        raise ValueError(f"boundary_type must be 'PEC' or 'PMC', got {boundary_type!r}")
+    if mode_type.upper() == 'TE':
+        return 1 if bt == 'PEC' else 0
+    return 0 if bt == 'PEC' else 1
+
+
 class RWGAnalytical(PlotMixin):
     """
     Analytical Z and S parameters for rectangular waveguide.
@@ -240,7 +255,8 @@ class RWGAnalytical(PlotMixin):
     # Resonant / cutoff quantities
     # =========================================================================
 
-    def resonant_frequencies(self, n_modes: int = 10) -> np.ndarray:
+    def resonant_frequencies(self, n_modes: int = 10,
+                             boundary_type: str = 'PMC') -> np.ndarray:
         """
         Compute resonant frequencies of the waveguide cavity (TE10p modes only).
 
@@ -250,14 +266,21 @@ class RWGAnalytical(PlotMixin):
         ----------
         n_modes : int
             Number of modes to compute
+        boundary_type : {'PMC', 'PEC'}
+            End caps at z = 0 and z = L (the side walls are always PEC).
+            'PMC' (default) matches the FEM model, whose port faces carry the
+            natural (magnetic-wall) boundary: TE_mnp with p >= 0 and TM_mnp
+            with p >= 1.  'PEC' is the fully closed cavity: TE_mnp with
+            p >= 1 and TM_mnp with p >= 0.
 
         Returns
         -------
         freqs : ndarray
             Resonant frequencies [GHz]
         """
+        p0 = _first_p('TE', boundary_type)
         freqs = []
-        for p in range(1, n_modes + 1):
+        for p in range(p0, p0 + n_modes):
             kz = p * np.pi / self.L
             k = np.sqrt(self.kc**2 + kz**2)
             freqs.append(c0 * k / (2 * np.pi) / 1e9)  # Convert to GHz
@@ -473,7 +496,8 @@ class RWGAnalytical(PlotMixin):
     def eigenfrequencies(
         self,
         n_modes: int = 10,
-        mode_types: List[str] = None
+        mode_types: List[str] = None,
+        boundary_type: str = 'PMC',
     ) -> Dict[str, float]:
         """
         Compute eigenfrequencies for specific mode families.
@@ -485,6 +509,12 @@ class RWGAnalytical(PlotMixin):
         mode_types : list of str, optional
             Mode types to compute. Default: ['TE10p']
             Options: 'TE10p', 'TE01p', 'TE11p', 'TM11p', 'TE20p', 'TE02p'
+        boundary_type : {'PMC', 'PEC'}
+            End caps at z = 0 and z = L (the side walls are always PEC).
+            'PMC' (default) matches the FEM model, whose port faces carry the
+            natural (magnetic-wall) boundary: TE_mnp with p >= 0 and TM_mnp
+            with p >= 1.  'PEC' is the fully closed cavity: TE_mnp with
+            p >= 1 and TM_mnp with p >= 0.
 
         Returns
         -------
@@ -495,19 +525,21 @@ class RWGAnalytical(PlotMixin):
             mode_types = ['TE10p']
 
         results = {}
+        # (kc, label prefix); the first p follows from TE/TM and the end caps
         _families = {
-            'TE10p': (self.kc,                                             'TE10', 1),
-            'TE01p': (np.pi / self.b,                                      'TE01', 1),
-            'TE11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TE11', 0),
-            'TM11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TM11', 1),
-            'TE20p': (2 * np.pi / self.a,                                  'TE20', 0),
-            'TE02p': (2 * np.pi / self.b,                                  'TE02', 0),
+            'TE10p': (self.kc,                                             'TE10'),
+            'TE01p': (np.pi / self.b,                                      'TE01'),
+            'TE11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TE11'),
+            'TM11p': (np.sqrt((np.pi/self.a)**2 + (np.pi/self.b)**2),     'TM11'),
+            'TE20p': (2 * np.pi / self.a,                                  'TE20'),
+            'TE02p': (2 * np.pi / self.b,                                  'TE02'),
         }
 
         for mode_type in mode_types:
             if mode_type not in _families:
                 continue
-            kc_fam, prefix, p_start = _families[mode_type]
+            kc_fam, prefix = _families[mode_type]
+            p_start = _first_p(prefix[:2], boundary_type)
             for p in range(p_start, p_start + n_modes):
                 kz = p * np.pi / self.L
                 k = np.sqrt(kc_fam**2 + kz**2)
@@ -520,7 +552,7 @@ class RWGAnalytical(PlotMixin):
         n_modes: int = 20,
         max_index: int = 10,
         return_format: str = 'dict',
-        boundary_type: str = 'PEC'
+        boundary_type: str = 'PMC'
     ) -> Union[Dict[str, float], List[Tuple], np.ndarray]:
         """
         Compute all physical eigenfrequencies of the rectangular cavity.
@@ -533,8 +565,12 @@ class RWGAnalytical(PlotMixin):
             Maximum index to search (for m, n, p)
         return_format : str
             'dict', 'list', or 'array'
-        boundary_type : str
-            'PEC' (standard) or 'PMC'
+        boundary_type : {'PMC', 'PEC'}
+            End caps at z = 0 and z = L (the side walls are always PEC).
+            'PMC' (default) matches the FEM model, whose port faces carry the
+            natural (magnetic-wall) boundary: TE_mnp with p >= 0 and TM_mnp
+            with p >= 1.  'PEC' is the fully closed cavity: TE_mnp with
+            p >= 1 and TM_mnp with p >= 0.
 
         Returns
         -------
@@ -558,17 +594,12 @@ class RWGAnalytical(PlotMixin):
                 continue
 
             mode_types = []
-
-            if boundary_type.upper() == 'PMC':
-                if m > 0 or n > 0:
-                    mode_types.append('TE')
-                if m >= 1 and n >= 1 and p >= 1:
-                    mode_types.append('TM')
-            else:  # PEC
-                if (m > 0 or n > 0) and p >= 0:
-                    mode_types.append('TE')
-                if m >= 1 and n >= 1 and p >= 1:
-                    mode_types.append('TM')
+            # TE_mnp needs (m, n) != (0, 0); TM_mnp needs m, n >= 1.  The end
+            # caps decide which of the two may have p = 0 (see _first_p).
+            if (m > 0 or n > 0) and p >= _first_p('TE', boundary_type):
+                mode_types.append('TE')
+            if m >= 1 and n >= 1 and p >= _first_p('TM', boundary_type):
+                mode_types.append('TM')
 
             if not mode_types:
                 continue
@@ -738,13 +769,6 @@ class RWGAnalytical(PlotMixin):
         if self._frequencies is None:
             raise AttributeError("Call compute() or a plot method first.")
         return self._frequencies  # Returns Hz, PlotMixin will convert to GHz for display
-
-    @property
-    def frequencies(self) -> np.ndarray:
-        """Frequency grid [GHz] set by compute(). Required by PlotMixin."""
-        if self._frequencies is None:
-            raise AttributeError("Call compute() or a plot method first.")
-        return self._frequencies
 
     @property
     def S_dict(self) -> Dict[str, np.ndarray]:

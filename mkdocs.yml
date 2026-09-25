@@ -90,6 +90,11 @@ nav:
           - "Pathway 2: Global Assembly": tutorials/pathway2_global_assembly.ipynb
           - "Pathway 3: FOM Concatenation": tutorials/pathway3_fom_concatenation.ipynb
           - "Pathway 4: ROM Concatenation": tutorials/pathway4_rom_concatenation.ipynb
+      - Applications:
+          - "TESLA 9-Cell Cavity Chain": tutorials/tesla_cavity_chain.ipynb
+          - "Coaxial Line with a Dielectric Window": tutorials/tem_transmission_line.ipynb
+      - Benchmarks:
+          - "C3794 Two-Cavity Module vs CST": tutorials/benchmarks/c3794_cavity_module.ipynb
       - Model Preparation:
           - Importing CAD Files: tutorials/importing_cad.ipynb
           - Creating Models from Primitives: tutorials/creating_primitives.ipynb

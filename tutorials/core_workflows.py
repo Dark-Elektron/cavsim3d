@@ -7,10 +7,14 @@ THIS FILE IS THE ALWAYS-CURRENT REFERENCE FOR HOW THE CORE PIECES CONNECT.
 It MUST be updated whenever core functionality changes or a new core feature
 is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
-Last updated: 2026-07-09 (canonical folder layout: fom(s)/rom(s)/concat hold
+Last updated: 2026-09-24 (lossy materials via geo.set_materials, numeric port
+modes — section 1c; solve(rerun=None) recomputes
+automatically when the request changed; FOM eigenfrequencies — section 1;
+port modes identical on both faces of a join; multi-solid projects refused as
+a single imported section — section 5).  Earlier: canonical folder layout: fom(s)/rom(s)/concat hold
 ONLY matrices/eigenmodes/s/z/snapshots + nested stage folders; ONE mesh/ and
 geometry/ per project; imported sections copied + renamed, indistinguishable
-from computed ones; quasi-TEM/microstrip inhomogeneous ports — section 4b).
+from computed ones; quasi-TEM/microstrip inhomogeneous ports — section 4b.
 =============================================================================
 
 Operation philosophy
@@ -89,6 +93,69 @@ rom = fom.reduce(tol=1e-9)                  # STAGE 2: reduced-order model
 res = rom.solve(fmin=1.8, fmax=2.4, nsamples=200)    # cheap fine sweep
 print(f"   ROM sweep: {res['Z'].shape[0]} frequency points, "
       f"reduced size {rom.reduced_dimensions}")
+# Every stage reuses stored results for the SAME request and recomputes when
+# the request changed (sweep, order, nportmodes, port settings, materials,
+# geometry) -- solve(rerun=None), the default.  rerun=True forces a
+# recompute; rerun=False keeps whatever is stored.
+
+# Resonances of the FOM operator (K, M).  The port faces are natural
+# (magnetic-wall) boundaries, so a guide of length L resonates at
+# f = c/2 * sqrt((m/a)^2 + (n/b)^2 + (p/L)^2) with TE p >= 0 -- compare with
+# RWGAnalytical(...).all_eigenfrequencies() (boundary_type='PMC', the default).
+f_res = proj.fds.fom.get_resonant_frequencies(n_modes=3)
+print(f"   FOM resonances [GHz]: {np.round(f_res / 1e9, 4)}")
+
+
+# --------------------------------------------------------------------------- #
+# 1b. PER-PORT MODE COUNTS:  port_map() then nportmodes as int | list | dict   #
+# --------------------------------------------------------------------------- #
+banner("1b. Per-port mode counts:  fds.port_map() -> nportmodes=[...]")
+
+# port_map() needs only the mesh -- no solve -- so the port order and each
+# port's geometry are known BEFORE choosing how many modes each one carries.
+proj.fds.print_port_map()
+
+# A TEM (coaxial) port usually needs one mode while a TE/TM waveguide port may
+# need several. All three spellings are accepted:
+#     nportmodes=1                     same count everywhere
+#     nportmodes=[2, 1]                positional, in port_map() order
+#     nportmodes={'port1': 2, 'default': 1}
+# A list whose length does not match the port count, or a dict naming a port
+# that does not exist, raises immediately rather than silently solving the
+# wrong problem.
+_names = [r["port"] for r in proj.fds.port_map()]
+_spec = [2] + [1] * (len(_names) - 1)       # 2 modes on the first port only
+
+proj_pm = EMProject(name="per_port_modes", base_dir=str(WORK), overwrite=True)
+proj_pm.geometry = RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH)
+proj_pm.fds.solve(config=dict(FOM_CFG, nportmodes=_spec))
+_counts = {p: len(m) for p, m in proj_pm.fds.port_solver.port_modes.items()}
+print(f"   modes per port: {_counts}")
+print(f"   Z is square in the TOTAL port-modes: "
+      f"{proj_pm.fds.fom._Z_matrix.shape[-1]} = {sum(_spec)}")
+
+
+# --------------------------------------------------------------------------- #
+# 1c. MATERIALS AND LOSSES:  geo.set_materials({...}) -> same pipeline         #
+# --------------------------------------------------------------------------- #
+banner("1c. Lossy filling:  geo.set_materials({'*': {eps_r, tan_delta, sigma}})")
+
+# Any geometry takes material properties per mesh material ('*' = all).  The
+# solver uses  eps = eps0*eps_r*(1 - j tan_delta) - j sigma/omega, i.e.
+#     A(w) = K + j w C - w^2 (M - j D),   C = int sigma,  D = int eps0 eps_r tan_delta
+# so a lossy model is complex; FOM, ROM and concatenation all carry C and D.
+# (Port modes can be computed numerically for arbitrary cross-sections with
+# solve(mode_source='numeric').)
+proj_l = EMProject(name="lossy_rwg", base_dir=str(WORK), overwrite=True)
+geo_l = RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH)
+geo_l.set_materials({'*': {'eps_r': 1.5, 'tan_delta': 0.01}})
+proj_l.geometry = geo_l
+proj_l.fds.solve(config=dict(FOM_CFG, fmin=1.4, fmax=1.8))
+rom_l = proj_l.fds.fom.reduce(tol=1e-9)
+res_l = rom_l.solve(fmin=1.4, fmax=1.8, nsamples=50)
+_S = res_l['S']
+print(f"   |S21| ~ {abs(_S[25, 1, 0]):.3f}, power |S11|^2+|S21|^2 = "
+      f"{abs(_S[25, 0, 0])**2 + abs(_S[25, 1, 0])**2:.3f} (< 1: the filling absorbs)")
 
 
 # =========================================================================== #
@@ -148,6 +215,25 @@ print(f"   |S21| at mid-band ~ {abs(res3['S'][100, 1, 0]):.3f} (matched guide ->
 
 rom_of_concat = concat3.reduce(tol=1e-10)   # STAGE 4 (optional): concat.rom
 print(f"   further-reduced coupled system: {type(rom_of_concat).__name__}")
+
+# --------------------------------------------------------------------------- #
+# Chain eigenmodes, and why identical cells need a balanced basis              #
+# --------------------------------------------------------------------------- #
+# chain_eigenfrequencies() returns (indices, GHz); the indices are exactly the
+# mode_idx that reconstruct_chain_eigenmode() takes, so a mode found here can
+# be drawn directly on a compound mesh of the replicated section.
+idx3, f3 = concat3.chain_eigenfrequencies(fmin_ghz=1.8, fmax_ghz=2.4)
+print(f"   {len(f3)} chain modes in band; first at {f3[0]:.4f} GHz")
+
+# N identical cells put each mode into a near-exact degenerate group of N. Any
+# orthonormal basis of that group is a valid set of eigenvectors, and eigh
+# returns an arbitrary one -- typically localised on a single cell, so the
+# exported field shows one cell lit and the rest dark. reconstruct_chain_
+# eigenmode() therefore rotates inside the group to the most evenly spread
+# combination. Pass balance_degenerate=False for the raw eigh basis.
+cf3, cmesh3, label3 = concat3.reconstruct_chain_eigenmode(int(idx3[0]),
+                                                          component="abs")
+print(f"   reconstructed '{label3}' on {cmesh3.ne} elements")
 
 
 # =========================================================================== #
@@ -230,6 +316,11 @@ print("""
      cannot be coupled (ValueError).  Narrow overlap or sweeping outside the
      shared band -> UserWarning (extrapolation beyond snapshot coverage:
      results may be inaccurate or wrong).
+   * Importing a MULTI-SOLID project as one netlist section -> ValueError
+     (a section is one domain; add its solids individually instead).
+   * Port modes are built in a frame that does not depend on which way a
+     port face points, so odd modes (TE01, TE20, ...) have the SAME sign on
+     both faces of a join and couple correctly mode-by-mode.
 """)
 
 print(f"All tutorial artifacts under: {WORK}")

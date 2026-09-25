@@ -18,6 +18,7 @@ import scipy.sparse as sp
 from scipy.special import jv, yv, jvp, yvp, jn_zeros, jnp_zeros
 import numpy.polynomial.chebyshev as cheb
 
+from pyngcore import BitArray
 from ngsolve import (
     HCurl, BilinearForm, GridFunction, BND, Cross, Integrate, InnerProduct,
     TaskManager, Preconditioner, solvers, IdentityMatrix, curl, ds,
@@ -42,6 +43,11 @@ _DIRECT_SOLVER = "sparsecholesky" if platform.system() == "Darwin" else "pardiso
 # the shifted matrix has to be genuinely non-singular (see the shift below).
 _GENERAL_SOLVER = "umfpack" if platform.system() == "Darwin" else "pardiso"
 
+# Shift-invert offset for the quasi-TEM eigenproblem. The physical modes lie in
+# beta^2 <= k0^2*eps_max; the shift is placed just above that so it cannot
+# coincide with an eigenvalue (which would make (a - shift*m) singular).
+SHIFT_OFFSET = 1.15
+
 # NumPy 2.0 removed np.trapz in favour of np.trapezoid (identical signature).
 # Bind once so this module works on both NumPy 1.x and 2.x.
 _trapezoid = getattr(np, "trapezoid", None)
@@ -49,10 +55,31 @@ if _trapezoid is None:  # NumPy < 2.0
     _trapezoid = np.trapz
 
 
+def modal_wave_impedance(mode_type: str, kc: float, freq: float,
+                         eps_r: float = 1.0, mu_r: float = 1.0) -> complex:
+    """Wave impedance of a TE/TM/TEM mode in a homogeneous port medium.
+
+    ``kc`` is the geometric cutoff wavenumber of the cross-section; the medium
+    enters through both eta = eta0*sqrt(mu_r/eps_r) and the cutoff angular
+    frequency wc = kc*c0/sqrt(eps_r*mu_r).  With s = j*omega (e^{+j omega t})
+    this gives Z_TE = j*omega*mu/gamma and Z_TM = gamma/(j*omega*eps), where
+    gamma = sqrt(kc^2 - eps_r*mu_r*k0^2) -- real (reactive Z) below cutoff.
+    """
+    eta = Z0 * np.sqrt(mu_r / eps_r)
+    if mode_type in ('TEM', 'qTEM'):
+        return complex(eta)
+    wc = kc * c0 / np.sqrt(eps_r * mu_r)
+    s = 1j * 2 * np.pi * freq
+    sqrt_term = np.sqrt(s ** 2 + wc ** 2)
+    if mode_type == 'TE':
+        return complex(s * eta / sqrt_term)
+    return complex(eta * sqrt_term / s)
+
+
 def make_analytic_port_impedance(params: dict):
     """Rebuild a standalone port wave-impedance function from persisted params.
 
-    Mirrors :meth:`PortEigenmodeSolver.get_port_wave_impedance` exactly, so a
+    Mirrors :meth:`PortEigenmodeSolver.get_port_reference_impedance`, so a
     reloaded reduced model (imported from disk, with no live solver) produces
     identical Z->S.  ``params`` = {'cutoff': {port:{mode:kc}}, 'mtype':
     {port:{mode:'TE'|'TM'|'TEM'}}, 'eps': {port:eps_r}}.
@@ -62,27 +89,97 @@ def make_analytic_port_impedance(params: dict):
     mtype = {p: {int(m): t for m, t in d.items()}
              for p, d in params.get('mtype', {}).items()}
     eps = dict(params.get('eps', {}))
+    mu = dict(params.get('mu', {}))
     zpv = {p: {int(m): complex(v) for m, v in d.items()}
            for p, d in params.get('zpv', {}).items()}
 
     def impedance(port: str, mode: int, freq: float) -> complex:
         kc = cutoff[port][int(mode)]
         mt = mtype[port][int(mode)]
-        eta = Z0 / np.sqrt(eps.get(port, 1.0))
-        # Quasi-TEM ports renormalise to their stored power-voltage line impedance.
-        if mt == 'qTEM':
+        eps_r = eps.get(port, 1.0)
+        # TEM and quasi-TEM ports renormalise to their stored line impedance --
+        # the same convention the live solver uses (and CST's). Returning eta
+        # here left a reloaded TEM port referenced to the wave impedance, e.g.
+        # 376.73 instead of 74.99 ohm on the c3794 FPC coax (+14.0 dB in Z).
+        if mt in ('qTEM', 'TEM'):
             zli = zpv.get(port, {}).get(int(mode))
-            return complex(zli) if zli is not None and np.isfinite(zli) else complex(eta)
-        if mt == 'TEM':
-            return complex(eta)
-        wc = kc * c0
-        s = 1j * 2 * np.pi * freq
-        sqrt_term = np.sqrt(s ** 2 + wc ** 2)
-        if mt == 'TE':
-            return complex(s * eta / sqrt_term)
-        return complex(eta * sqrt_term / s)
+            if zli is not None and np.isfinite(zli):
+                return complex(zli)
+        return modal_wave_impedance(mt, kc, freq, eps_r, mu.get(port, 1.0))
 
     return impedance
+
+def make_analytic_port_wave_impedance(params: dict):
+    """Wave impedance only -- never the line impedance.
+
+    :func:`make_analytic_port_impedance` returns the REPORTED reference (the
+    line impedance for TEM/qTEM). The rescale in ``_compute_s_from_z`` needs the
+    normalisation the port modes actually carry, which is always the wave
+    impedance, so it is rebuilt separately here.
+    """
+    cutoff = {p: {int(m): v for m, v in d.items()}
+              for p, d in params.get('cutoff', {}).items()}
+    mtype = {p: {int(m): t for m, t in d.items()}
+             for p, d in params.get('mtype', {}).items()}
+    eps = dict(params.get('eps', {}))
+    mu = dict(params.get('mu', {}))
+
+    def wave(port: str, mode: int, freq: float) -> complex:
+        kc = cutoff[port][int(mode)]
+        mt = mtype[port][int(mode)]
+        return modal_wave_impedance(mt, kc, freq, eps.get(port, 1.0), mu.get(port, 1.0))
+
+    return wave
+
+
+def resolve_port_mode_counts(spec, ports) -> Dict[str, int]:
+    """Normalise a ``nportmodes`` specification to ``{port: count}``.
+
+    Parameters
+    ----------
+    spec : int | list | tuple | dict | None
+        ``int``    -- the same count on every port.
+        ``list``   -- positional, following ``ports`` order; its length MUST
+                      equal the number of ports.
+        ``dict``   -- ``{port: count}``; ports left out fall back to a
+                      ``'default'`` key, else 1. Unknown port names raise.
+        ``None``   -- one mode per port.
+    ports : sequence of str
+        Port names in detection order (see ``fds.port_map()``).
+
+    Raises
+    ------
+    ValueError
+        On a length mismatch, an unknown port name, or a count < 1.
+    """
+    ports = list(ports)
+    if spec is None:
+        return {p: 1 for p in ports}
+
+    if isinstance(spec, dict):
+        unknown = [k for k in spec if k != 'default' and k not in ports]
+        if unknown:
+            raise ValueError(
+                f"nportmodes refers to unknown port(s) {unknown}. "
+                f"Valid ports are {ports} (use fds.port_map() to list them, "
+                f"or the key 'default' for the rest).")
+        dflt = int(spec.get('default', 1))
+        out = {p: int(spec.get(p, dflt)) for p in ports}
+    elif isinstance(spec, (list, tuple)):
+        if len(spec) != len(ports):
+            raise ValueError(
+                f"nportmodes has {len(spec)} entries but the model has "
+                f"{len(ports)} port(s): {ports}. Give one entry per port (in "
+                f"that order), a dict keyed by port name, or a single int.")
+        out = {p: int(n) for p, n in zip(ports, spec)}
+    else:
+        out = {p: int(spec) for p in ports}
+
+    bad = {p: n for p, n in out.items() if n < 1}
+    if bad:
+        raise ValueError(f"nportmodes must be >= 1 for every port; got {bad}.")
+    return out
+
 
 def logical_port_name(face_name: str) -> str:
     """Logical port a boundary face belongs to (``port1_substrate`` -> ``port1``).
@@ -161,6 +258,10 @@ class PortEigenmodeSolver:
     Port eigenmode solver with analytic or numeric computation.
     """
 
+    #: Reference impedance for TEM ports: "line" (CST default) or "wave".
+    impedance_reference = "line"
+
+
     def __init__(
         self,
         mesh,
@@ -208,6 +309,8 @@ class PortEigenmodeSolver:
         # material adjacent to each port face; used to scale the medium wave
         # impedance eta = eta0 / sqrt(eps_r).
         self.port_media_eps: Dict[str, float] = {}
+        # Relative permeability of the same medium (keyed like port_media_eps).
+        self.port_media_mu: Dict[str, float] = {}
 
         # Phase and polarization tracking
         self.port_phase_signs: Dict[str, Dict[int, float]] = {}
@@ -254,7 +357,21 @@ class PortEigenmodeSolver:
             raise ValueError(f"Could not determine normal for port {port}")
         return normal / norm
 
+    @staticmethod
+    def _canonical_normal(n: np.ndarray) -> np.ndarray:
+        """``n`` or ``-n``, whichever has a positive dominant component.
+
+        The two faces of a join have opposite outward normals.  Building the
+        tangent frame from the raw normal made ``t2 = n x t1`` flip between
+        them, so odd-parity modes (TE01, TE20, ...) came out with opposite
+        signs on either side and a mode-by-mode coupling joined them with the
+        wrong sign.  A sign-independent frame gives both faces the same modes.
+        """
+        k = int(np.argmax(np.abs(n) - 1e-9 * np.arange(len(n))))
+        return n if n[k] > 0 else -n
+
     def _compute_tangent_frame(self, n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        n = self._canonical_normal(n)
         g = self.global_up.copy()
         t1 = g - np.dot(g, n) * n
         if np.linalg.norm(t1) < 1e-12:
@@ -1019,7 +1136,7 @@ class PortEigenmodeSolver:
     # Main Solve Method – with safe precomputation
     # =========================================================================
 
-    def solve(self, nmodes: Union[int, Dict[str, int]] = 1,
+    def solve(self, nmodes: Union[int, List[int], Dict[str, int]] = 1,
               internal_ports: Optional[List[str]] = None,
               qtem_ports: Optional[List[str]] = None,
               port_eps_bnd: Optional[Dict[str, 'CoefficientFunction']] = None,
@@ -1051,10 +1168,10 @@ class PortEigenmodeSolver:
 
         # Resolve modes-per-port: an int applies to every port; a dict maps
         # port name -> count (ports not listed default to 1).
+        _mode_counts = resolve_port_mode_counts(nmodes, ports)
+
         def _nmodes_for(port: str) -> int:
-            if isinstance(nmodes, dict):
-                return int(nmodes.get(port, nmodes.get('default', 1)))
-            return int(nmodes)
+            return _mode_counts[port]
 
         fes_full = HCurl(self.mesh, order=self.order, dirichlet=self.bc)
 
@@ -1209,7 +1326,7 @@ class PortEigenmodeSolver:
 
             self.port_modes[port][mode_idx] = mode_gf
             self.port_cutoff_kc[port][mode_idx] = amode.kc
-            self.port_cutoff_frequencies[port][mode_idx] = c0 * amode.kc / (2 * np.pi)
+            self.port_cutoff_frequencies[port][mode_idx] = self._cutoff_hz(port, amode.kc)
             self.port_basis[port][mode_idx] = basis
             self.port_mode_types[port][mode_idx] = amode.type
             self.port_mode_indices[port][mode_idx] = amode.indices
@@ -1277,7 +1394,7 @@ class PortEigenmodeSolver:
 
                 self.port_modes[port][mode_idx] = aligned_mode
                 self.port_cutoff_kc[port][mode_idx] = kc
-                self.port_cutoff_frequencies[port][mode_idx] = c0 * kc / (2 * np.pi)
+                self.port_cutoff_frequencies[port][mode_idx] = self._cutoff_hz(port, kc)
                 self.port_basis[port][mode_idx] = basis
                 self.port_mode_types[port][mode_idx] = group_type
                 self.port_phase_signs[port][mode_idx] = phase_sign
@@ -1289,7 +1406,7 @@ class PortEigenmodeSolver:
                 pol_str = f", pol={pol_deg:.0f}°" if degeneracy > 1 else ""
                 
                 print(f"\t  {port} mode {mode_idx}: kc={kc:.4f}, "
-                    f"type={group_type}, fc={c0 * kc / (2 * np.pi) / 1e9:.4f} GHz, "
+                    f"type={group_type}, fc={self._cutoff_hz(port, kc) / 1e9:.4f} GHz, "
                     f"sigma={sigma:+.0f}, phase={'+' if phase_sign > 0 else '-'}"
                     f"{pol_str}{degen_str}")
 
@@ -1353,13 +1470,25 @@ class PortEigenmodeSolver:
             eps_max = self._eps_bnd_max(eps_r_bnd)
 
         # Shift-invert target. The eigenvalues are lam = beta^2, which lie in
-        # [k0^2, k0^2*eps_max] -- order 1e4 here. The old shift of 1.0 was
-        # ~4 orders of magnitude away, leaving (a - shift*m) ~= a: the
-        # indefinite curl-curl operator, which is essentially singular.
-        # PARDISO hid that by perturbing tiny pivots; UMFPACK (macOS) just
-        # failed to factor it. Targeting the substrate mode makes the shifted
-        # matrix non-singular and converges on the qTEM mode directly.
-        shift = k0 ** 2 * eps_max
+        # [k0^2, k0^2*eps_max]. The shift must sit ABOVE that range and must
+        # not coincide with an eigenvalue: for a homogeneous cross-section the
+        # mode sits exactly at beta^2 = k0^2*eps_r, so shift = k0^2*eps_max
+        # lands ON it and (a - shift*m) is singular by construction. Measured
+        # on an air-filled coax (exact answer eps_eff = 1): a coincident shift
+        # returned three spurious modes at eps_eff = 1.05..1.14 (5-14% error),
+        # while this offset returns exactly one mode at eps_eff = 1.000000.
+        # The spurious cluster is also what made the mode ORDER unstable --
+        # the descending-beta sort below was ranking numerical artefacts.
+        shift = k0 ** 2 * eps_max * SHIFT_OFFSET
+
+        # fesEt is built with definedon=port_region, so it carries DOFs over
+        # the whole 3-D mesh while only the port face is ever assembled. Those
+        # off-face DOFs are identically zero rows in BOTH a and m, and
+        # FreeDofs() removes only Dirichlet DOFs -- so the solver was handed a
+        # structurally singular block (measured: 8082 empty rows out of 9028
+        # "free" DOFs on a coax port). Restrict to DOFs on the port region.
+        freedofs = BitArray(fes.FreeDofs())
+        freedofs &= fes.GetDofs(port_region)
 
         n_eig = max(30, nmodes * 8)
         with TaskManager():
@@ -1369,7 +1498,7 @@ class PortEigenmodeSolver:
             # inverse= must be explicit: ArnoldiSolver factorises
             # (a - shift*m) internally and otherwise picks NGSolve's default,
             # which is UMFPACK on macOS and PARDISO elsewhere.
-            lam = ArnoldiSolver(a.mat, m.mat, fes.FreeDofs(),
+            lam = ArnoldiSolver(a.mat, m.mat, freedofs,
                                 list(evecs.vecs), shift=shift,
                                 inverse=_GENERAL_SOLVER)
 
@@ -1571,6 +1700,13 @@ class PortEigenmodeSolver:
             'port_mode_degeneracies': {p: dict(m) for p, m in self.port_mode_degeneracies.items()},
             'port_mode_indices': {p: dict(m) for p, m in self.port_mode_indices.items()},
 
+            # Medium filling each port (keyed by face); without it a reloaded
+            # dielectric-filled port would fall back to vacuum impedance.
+            'port_media_eps': {str(k): float(v)
+                               for k, v in (self.port_media_eps or {}).items()},
+            'port_media_mu': {str(k): float(v)
+                              for k, v in (self.port_media_mu or {}).items()},
+
             # Composite / quasi-TEM port data
             'port_face_region': dict(self.port_face_region),
             'port_beta': {p: {m: complex(v) for m, v in d.items()}
@@ -1600,6 +1736,10 @@ class PortEigenmodeSolver:
                     'a': g.a,
                     'b': g.b,
                     'radius': g.radius,
+                    # required to recover the coaxial LINE impedance after a
+                    # reload; without it get_port_line_impedance() returns None
+                    # and the reference silently falls back to the wave impedance
+                    'inner_radius': g.inner_radius,
                     'fit_error': g.fit_error,
                 }
                 for p, g in self.port_geometries.items()
@@ -1678,6 +1818,9 @@ class PortEigenmodeSolver:
             for p, modes in data['port_mode_indices'].items()
         }
 
+        solver.port_media_eps = dict(data.get('port_media_eps', {}))
+        solver.port_media_mu = dict(data.get('port_media_mu', {}))
+
         # Restore composite / quasi-TEM port data
         solver.port_face_region = dict(data.get('port_face_region', {}))
         solver.port_beta = {p: {int(m): complex(v) for m, v in d.items()}
@@ -1707,6 +1850,7 @@ class PortEigenmodeSolver:
                 a=gdata['a'],
                 b=gdata['b'],
                 radius=gdata['radius'],
+                inner_radius=gdata.get('inner_radius'),   # absent in older files
                 fit_error=gdata['fit_error'],
             )
 
@@ -1803,20 +1947,15 @@ class PortEigenmodeSolver:
 
         Returns modes sorted by increasing cutoff frequency.
         """
-        port_region = self.mesh.Boundaries(port)
-
-        # ========== TEM Mode ==========
-        tem_mode = self._solve_tem_mode(port)
-
-        # ========== TE Modes ==========
-        te_modes, te_cutoffs = self._solve_te_modes(port, nmodes + 5)
+        # ========== TE Modes (+ TEM: the zero-kc harmonic fields) ==========
+        te_modes, te_cutoffs, tem_modes = self._solve_te_modes(port, nmodes + 5)
 
         # ========== TM Modes ==========
         tm_modes, tm_cutoffs = self._solve_tm_modes(port, nmodes + 5)
 
         # Combine all modes
         all_modes = []
-        if tem_mode is not None:
+        for tem_mode in tem_modes:
             all_modes.append((0.0, tem_mode, 'TEM'))
         for mode, kc in zip(te_modes, te_cutoffs):
             all_modes.append((kc, mode, 'TE'))
@@ -1844,12 +1983,21 @@ class PortEigenmodeSolver:
 
         Requires gradient projection to remove curl-free null space.
 
+        The projection removes gradients of functions that VANISH on the port
+        outline.  On a multi-conductor cross-section (coax) the TEM field is
+        the gradient of a potential that is constant but DIFFERENT on each
+        conductor, so it is not removed: it survives as an eigenpair with
+        kc = 0 (a discrete harmonic field).  Those are returned as TEM modes;
+        a single-conductor guide has none.
+
         Returns
         -------
         modes : List[GridFunction]
             TE mode E-field patterns (HCurl GridFunctions), sorted by kc
         cutoffs : List[float]
             Cutoff wavenumbers kc, sorted ascending
+        tem_modes : List[GridFunction]
+            Normalised TEM fields (one per extra conductor)
         """
 
         port_region = self.mesh.Boundaries(port)
@@ -1890,24 +2038,29 @@ class PortEigenmodeSolver:
                 num=nmodes, maxit=50, printrates=False
             )
 
+        # kc^2 of any TE mode is of order (pi/L)^2 for a cross-section of size
+        # L ~ sqrt(area); a harmonic (TEM) field sits at round-off above zero.
+        area = float(Integrate(CoefficientFunction(1.0), self.mesh, BND,
+                               definedon=port_region))
+        tem_tol = 1e-6 / max(area, 1e-30)
+
         # Collect valid modes with their cutoffs
         mode_data = []  # List of (kc, GridFunction)
+        tem_modes = []
 
         for i, ev in enumerate(evals):
-            if ev > 1e-6:  # Skip null-space modes
-                kc = np.sqrt(ev)
-
-                mode = GridFunction(fes_te)
-                mode.vec.data = evecs[i]
-
-                # Normalize
-                norm_sq = float(np.real(Integrate(
-                    InnerProduct(mode, mode), self.mesh, BND, definedon=port_region
-                )))
-
-                if norm_sq > 1e-15:
-                    mode.vec.data /= np.sqrt(norm_sq)
-                    mode_data.append((kc, mode))
+            mode = GridFunction(fes_te)
+            mode.vec.data = evecs[i]
+            norm_sq = float(np.real(Integrate(
+                InnerProduct(mode, mode), self.mesh, BND, definedon=port_region
+            )))
+            if norm_sq <= 1e-15:
+                continue
+            mode.vec.data /= np.sqrt(norm_sq)
+            if abs(ev) <= tem_tol:
+                tem_modes.append(mode)        # harmonic field -> TEM
+            elif ev > 0:
+                mode_data.append((np.sqrt(ev), mode))
 
         # Sort by cutoff frequency (ascending)
         mode_data.sort(key=lambda x: x[0])
@@ -1916,7 +2069,7 @@ class PortEigenmodeSolver:
         modes = [m for _, m in mode_data]
         cutoffs = [k for k, _ in mode_data]
 
-        return modes, cutoffs
+        return modes, cutoffs, tem_modes
 
     def _solve_tm_modes(self, port: str, nmodes: int):
         """
@@ -1938,7 +2091,6 @@ class PortEigenmodeSolver:
         cutoffs : List[float]
             Cutoff wavenumbers kc, sorted ascending
         """
-        from ngsolve import H1, grad
 
         port_region = self.mesh.Boundaries(port)
         geometry = self.port_geometries[port]
@@ -2022,100 +2174,15 @@ class PortEigenmodeSolver:
         return modes, cutoffs
 
     def _solve_tem_mode(self, port: str):
+        """First TEM mode of a port cross-section, or ``None``.
+
+        TEM fields are the kc = 0 eigenpairs of the gradient-projected TE
+        problem (see :meth:`_solve_te_modes`).  A Dirichlet Laplace problem
+        cannot find them: with the potential pinned to zero on every conductor
+        it has no zero eigenvalue.
         """
-        Solve for TEM mode on a port cross-section.
-
-        TEM modes exist only on multi-conductor ports (e.g. coaxial).
-        The transverse E field is Et = -∇φ where φ satisfies Laplace's
-        equation with distinct potentials on inner and outer conductors.
-
-        We detect a TEM mode by solving the Laplace eigenvalue problem
-        (same as TM but looking for a near-zero eigenvalue that is NOT
-        the trivial constant mode removed by Dirichlet BC).  If the port
-        has only a single conductor boundary the Dirichlet BC removes all
-        constant modes and no TEM mode exists.
-
-        For a coaxial port the inner conductor has Dirichlet BC (φ=0)
-        while the outer conductor also has Dirichlet BC.  The TEM potential
-        is the harmonic function that is 1 on the inner conductor and 0 on
-        the outer (or vice-versa).  We approximate this by solving the
-        Laplace problem with an inhomogeneous Dirichlet lift.
-
-        Returns
-        -------
-        mode : GridFunction or None
-            TEM mode E-field pattern (HCurl), or None if no TEM mode exists.
-        """
-
-        port_region = self.mesh.Boundaries(port)
-
-        # H1 space on port surface with Dirichlet BC on waveguide walls
-        fes_h1 = H1(
-            self.mesh, order=self.order + 1,
-            dirichlet=self.bc,
-            definedon=self.mesh.Boundaries(port)
-        )
-
-        n_free = sum(1 for i in range(fes_h1.ndof) if fes_h1.FreeDofs()[i])
-        if n_free < 2:
-            return None
-
-        u_h1, v_h1 = fes_h1.TnT()
-
-        # Solve the same Laplace eigenvalue problem as TM modes
-        # but look for eigenvalues very close to zero.
-        # A near-zero eigenvalue (but non-trivial) indicates a TEM mode.
-        a = BilinearForm(InnerProduct(grad(u_h1).Trace(), grad(v_h1).Trace()) * ds(port))
-        m = BilinearForm(u_h1.Trace() * v_h1.Trace() * ds(port))
-        apre = BilinearForm(
-            (InnerProduct(grad(u_h1).Trace(), grad(v_h1).Trace()) + u_h1.Trace() * v_h1.Trace()) * ds(port)
-        )
-        pre = Preconditioner(apre, type="direct", inverse=_DIRECT_SOLVER)
-
-        with TaskManager():
-            a.Assemble()
-            m.Assemble()
-            apre.Assemble()
-
-            evals, evecs = solvers.PINVIT(
-                a.mat, m.mat, pre=pre.mat,
-                num=min(3, n_free - 1),
-                maxit=50, printrates=False
-            )
-
-        # Look for a near-zero eigenvalue — this is the TEM mode.
-        # The Dirichlet BC removes the trivial constant, so a near-zero
-        # eigenvalue means a harmonic function with non-trivial gradient
-        # exists (multi-conductor topology).
-        tem_threshold = 1e-4  # eigenvalue threshold for "near zero"
-
-        for i, ev in enumerate(evals):
-            if ev < tem_threshold and ev >= 0:
-                # Found a TEM candidate — compute Et = -∇φ
-                phi = GridFunction(fes_h1)
-                phi.vec.data = evecs[i]
-
-                Et_cf = -grad(phi)
-
-                # Project to HCurl space
-                fes_hcurl = HCurl(
-                    self.mesh, order=self.order,
-                    dirichlet=self.bc,
-                    definedon=self.mesh.Boundaries(port)
-                )
-                Et = GridFunction(fes_hcurl)
-                Et.Set(Et_cf, definedon=port_region)
-
-                # Normalize
-                norm_sq = float(np.real(Integrate(
-                    InnerProduct(Et, Et), self.mesh, BND, definedon=port_region
-                )))
-
-                if norm_sq > 1e-15:
-                    Et.vec.data /= np.sqrt(norm_sq)
-                    return Et
-
-        return None
+        _modes, _cutoffs, tem = self._solve_te_modes(port, 4)
+        return tem[0] if tem else None
 
     def _classify_mode_type(self, mode, port, normal):
         port_region = self.mesh.Boundaries(port)
@@ -2181,6 +2248,23 @@ class PortEigenmodeSolver:
     # Wave Impedance & Utility Methods
     # ────────────────────────────────────────────────────────────────────────
 
+    def _port_media_mu_for(self, port) -> float:
+        """Relative permeability of the medium filling a port (default 1.0)."""
+        mu_map = getattr(self, 'port_media_mu', {}) or {}
+        if not mu_map:
+            return 1.0
+        key = str(port)
+        if key in mu_map:
+            return float(mu_map[key])
+        faces = self.port_face_region.get(key, key).split('|')
+        vals = [float(mu_map[f]) for f in faces if f in mu_map]
+        return max(vals) if vals else 1.0
+
+    def _port_eta(self, port) -> float:
+        """Wave impedance eta0*sqrt(mu_r/eps_r) of the medium filling a port."""
+        return float(Z0 * np.sqrt(self._port_media_mu_for(port)
+                                  / self._port_media_eps_for(port)))
+
     def _port_media_eps_for(self, port) -> float:
         """Relative permittivity of the medium filling a (possibly composite) port.
 
@@ -2198,6 +2282,56 @@ class PortEigenmodeSolver:
         faces = region.split('|')
         vals = [float(eps_map[f]) for f in faces if f in eps_map]
         return max(vals) if vals else 1.0
+
+    def get_port_reference_impedance(self, port: str, mode: int,
+                                     freq: float) -> complex:
+        """Reference impedance for S/Z normalisation (NOT the wave impedance).
+
+        This is a convention, not a physical property, and the default follows
+        CST (verified against its exports on the coax test model to 0.000%):
+
+        * TEM and quasi-TEM -> the LINE impedance, because a unique voltage and
+          current exist. CST exports a "Line Impedance" for these ports.
+        * TE / TM -> the wave impedance. No unique V/I exists, and CST exports
+          only a "Wave Impedance" for such ports.
+
+        Set ``impedance_reference = 'wave'`` to reference everything to the
+        wave impedance (the behaviour before this was aligned with CST).
+        """
+        if getattr(self, 'impedance_reference', 'line') == 'line':
+            zl = self.get_port_line_impedance(port, mode)
+            if zl is not None and zl.real > 1e-9:
+                return zl
+        return self.get_port_wave_impedance(port, mode, freq)
+
+    def get_port_line_impedance(self, port: str, mode: int = 0):
+        """Coaxial TEM line impedance Z0 = (eta/2pi) ln(b/a), or None.
+
+        This is the reference CST uses for TEM ports (verified against its
+        exports to 0.000%). TE/TM modes have no unique voltage/current, so no
+        line impedance exists and CST reports only a wave impedance -- this
+        returns None for them.
+        """
+        p_key = port
+        if p_key not in self.port_geometries and isinstance(port, str):
+            if port.isdigit():
+                p_key = int(port)
+            elif port.lower().startswith('port'):
+                try:
+                    p_key = int(port[4:])
+                except ValueError:
+                    pass
+        geom = self.port_geometries.get(p_key)
+        if geom is None:
+            return None
+        a = getattr(geom, 'inner_radius', None)
+        b = getattr(geom, 'radius', None)
+        if not a or not b or b <= a:
+            return None
+        # port_media_eps is keyed by mesh FACE name, so resolve through the
+        # helper rather than indexing it with the port name directly -- a
+        # dielectric-filled coax would otherwise silently be treated as air.
+        return complex(self._port_eta(p_key) / (2 * np.pi) * np.log(b / a))
 
     def get_port_wave_impedance(self, port: str, mode: int, freq: float) -> complex:
         # Robust lookup: handle cases where port keys might be ints or strings
@@ -2230,25 +2364,15 @@ class PortEigenmodeSolver:
             # Fallback: medium wave impedance eta = eta0 / sqrt(eps_r).  Resolve
             # eps from the port's member faces (port_media_eps is keyed by FACE
             # name, e.g. 'port1_substrate', not the logical port 'port1').
-            return complex(Z0 / np.sqrt(self._port_media_eps_for(p_key)))
+            return complex(self._port_eta(p_key))
 
-        wc = kc * c0
-        s = 1j * 2 * np.pi * freq
-        # Medium wave impedance eta = eta0 / sqrt(eps_r).  The FOM normalises
-        # its port modes to the wave impedance, so the Z->S reference must be
-        # the medium wave impedance (eta), NOT the coaxial line impedance --
-        # the latter is inconsistent with the FOM's Z normalisation.  eps_r of
-        # the medium filling the port is looked up per port (default vacuum),
-        # so dielectric-filled couplers are handled correctly.
-        eps_r = (getattr(self, 'port_media_eps', {}) or {}).get(port, 1.0)
-        eta = Z0 / np.sqrt(eps_r)
-        if mode_type == 'TEM':
-            return complex(eta)
-        sqrt_term = np.sqrt(s**2 + wc**2)
-        if mode_type == 'TE':
-            return complex(s * eta / sqrt_term)
-        else:
-            return complex(eta * sqrt_term / s)
+        # The FOM normalises its port modes to the wave impedance of the medium
+        # filling the port, so that is the Z->S reference here.  A dielectric
+        # changes both eta and the cutoff (wc = kc*c0/sqrt(eps_r)); using the
+        # vacuum cutoff mismatches a dielectric-filled guide against itself.
+        return modal_wave_impedance(mode_type, kc, freq,
+                                    self._port_media_eps_for(p_key),
+                                    self._port_media_mu_for(p_key))
 
     def get_port_wave_impedance_matrix(self, freq: float) -> np.ndarray:
         impedances = []
@@ -2273,20 +2397,26 @@ class PortEigenmodeSolver:
         except KeyError:
             raise KeyError(f"Port '{port}' not found in solver data. Available: {list(self.port_cutoff_kc.keys())}")
 
-        wc = kc * c0
-        s = 1j * 2 * np.pi * freq
-        return complex(np.sqrt(s**2 + wc**2) / c0)
+        # gamma = sqrt(kc^2 - eps_r*k0^2): j*beta above cutoff, alpha below.
+        k0 = 2 * np.pi * freq / c0
+        n2 = self._port_media_eps_for(p_key) * self._port_media_mu_for(p_key)
+        return complex(np.sqrt(complex(kc ** 2 - n2 * k0 ** 2)))
+
+    def _cutoff_hz(self, port, kc: float) -> float:
+        """Cutoff frequency of a mode in the medium filling ``port``."""
+        n2 = self._port_media_eps_for(port) * self._port_media_mu_for(port)
+        return c0 * kc / (2 * np.pi * np.sqrt(n2))
 
     def get_cutoff_frequency(self, port: str, mode: int = 0) -> float:
         if port not in self.port_cutoff_kc:
             raise KeyError(f"Port {port} not found")
         if mode not in self.port_cutoff_kc[port]:
             raise KeyError(f"Mode {mode} not found for port {port}")
-        return c0 * self.port_cutoff_kc[port][mode] / (2 * np.pi)
+        return self._cutoff_hz(port, self.port_cutoff_kc[port][mode])
 
     def get_cutoff_frequencies_dict(self) -> Dict[str, Dict[int, float]]:
         return {
-            port: {mode: c0 * kc / (2 * np.pi) for mode, kc in modes.items()}
+            port: {mode: self._cutoff_hz(port, kc) for mode, kc in modes.items()}
             for port, modes in self.port_cutoff_kc.items()
         }
 
@@ -2312,7 +2442,7 @@ class PortEigenmodeSolver:
             info[port] = {}
             for mode in self.port_modes[port]:
                 kc = self.port_cutoff_kc[port][mode]
-                fc = c0 * kc / (2 * np.pi)
+                fc = self._cutoff_hz(port, kc)
                 info[port][mode] = {
                     'type': self.port_mode_types[port][mode],
                     'kc': kc,
@@ -2399,7 +2529,7 @@ class PortEigenmodeSolver:
             print(f"  {'-' * 44}")
             for mode in sorted(self.port_modes[port].keys()):
                 kc = self.port_cutoff_kc[port][mode]
-                fc = c0 * kc / (2 * np.pi) / 1e9
+                fc = self._cutoff_hz(port, kc) / 1e9
                 mtype = self.port_mode_types[port][mode]
                 idx = self.port_mode_indices.get(port, {}).get(mode)
                 idx_str = f"({idx[0]},{idx[1]})" if idx else "-"
@@ -2468,7 +2598,7 @@ class PortEigenmodeSolver:
                     name = self.get_mode_name(port, m)
                     typ = self.port_mode_types[port].get(m, "?")
                     kc = self.port_cutoff_kc[port].get(m, np.nan)
-                    fc = c0 * kc / (2 * np.pi) / 1e9 if not np.isnan(kc) else np.nan
+                    fc = self._cutoff_hz(port, kc) / 1e9 if not np.isnan(kc) else np.nan
                     degen = self.port_mode_degeneracies[port].get(m, 1)
                     pol = self.port_mode_polarizations[port].get(m, None)
                     pol_str = f" pol={np.degrees(pol):.0f}°" if pol is not None else ""

@@ -25,8 +25,8 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-FOM_MATS = ("K", "M", "B")
-ROM_MATS = ("A_r", "B_r", "W", "Q_L_inv")
+FOM_MATS = ("K", "M", "B", "C", "D")   # C, D only exist for lossy sections
+ROM_MATS = ("A_r", "B_r", "W", "Q_L_inv", "C_r", "D_r")
 RESULT_DIRS = ("s", "z", "eigenmodes", "snapshots")
 
 
@@ -132,6 +132,7 @@ def stage_fom(source_project: Path, domain: str, project_root: Path) -> None:
     project_root = Path(project_root)
     foms_dir = project_root / "fds" / "foms"
     fom = find_fom_dir(source_project)
+    _require_single_section(fom / "metadata.json", "solids", source_project)
     src_domain = _source_domain(fom)
 
     (foms_dir / "matrices").mkdir(parents=True, exist_ok=True)
@@ -157,6 +158,7 @@ def stage_rom(source_project: Path, domain: str, project_root: Path) -> dict:
         meta = json.load(fh)
     if not meta.get("structures"):
         raise ValueError(f"Empty structures.json in {rom}")
+    _require_single_section(rom / "structures.json", "structures", source_project)
     sm = dict(meta["structures"][0])          # single-section
     src_domain = sm["domain"]
 
@@ -185,6 +187,26 @@ def write_flat_structures(project_root: Path, entries: list) -> None:
     roms_dir.mkdir(parents=True, exist_ok=True)
     with open(roms_dir / "structures.json", "w") as fh:
         json.dump({"structures": entries}, fh, indent=2)
+
+
+def _require_single_section(meta_file: Path, key: str, source_project: Path) -> None:
+    """Refuse to stage a multi-solid project as ONE netlist section.
+
+    A netlist slot holds a single domain; staging only the first of several
+    solids would silently drop the rest of the imported model.
+    """
+    try:
+        with open(meta_file) as fh:
+            entries = json.load(fh).get(key) or []
+    except (OSError, ValueError):
+        return
+    if len(entries) > 1:
+        names = [e.get("domain") for e in entries]
+        raise ValueError(
+            f"Cannot import '{source_project}' as one netlist section: it is a "
+            f"multi-solid project with {len(entries)} domains {names}. Add its "
+            f"solids to the assembly individually, or import single-solid "
+            f"projects.")
 
 
 def _source_domain(fom_dir: Path) -> str:

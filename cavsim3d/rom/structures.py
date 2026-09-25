@@ -37,6 +37,10 @@ class ReducedStructure:
         Finite element space reference for field reconstruction
     mesh : Mesh, optional
         Mesh reference
+    Crd, Drd : ndarray, optional
+        Loss operators in the same mass-normalised coordinates (lossy
+        structures only): the reduced system is
+        (Ard + j w Crd - w^2 (I - j Drd)) x = w Brd u.
     """
     Ard: np.ndarray
     Brd: np.ndarray
@@ -54,6 +58,10 @@ class ReducedStructure:
     # FEM references
     fes: Optional[Any] = None
     mesh: Optional[Any] = None
+
+    # Loss operators (None for a lossless structure)
+    Crd: Optional[np.ndarray] = None
+    Drd: Optional[np.ndarray] = None
 
     def __post_init__(self):
         if self.r is None:
@@ -80,6 +88,11 @@ class ReducedStructure:
                 f"Brd columns ({self.Brd.shape[1]}) must match the total number "
                 f"of port-modes ({expected_cols}) for ports={self.ports}"
             )
+
+    @property
+    def is_lossy(self) -> bool:
+        """True if the structure carries loss operators."""
+        return self.Crd is not None or self.Drd is not None
 
     @property
     def n_ports(self) -> int:
@@ -154,9 +167,13 @@ class ReducedStructure:
             # Uniform fallback.
             return self.get_port_index(port_name) * self._n_port_modes + mode
 
+    # Attributes attached after construction (by the ROM / import loaders).
+    _EXTRA_ATTRS = ("port_fingerprints", "training_band", "impedance_func",
+                    "wave_impedance_func", "base_domain")
+
     def copy(self) -> 'ReducedStructure':
-        """Create a deep copy."""
-        return ReducedStructure(
+        """Create a deep copy (including impedance functions and fit-check data)."""
+        new = ReducedStructure(
             Ard=self.Ard.copy(),
             Brd=self.Brd.copy(),
             ports=self.ports.copy(),
@@ -169,7 +186,13 @@ class ReducedStructure:
             Q_L_inv=self.Q_L_inv.copy() if self.Q_L_inv is not None else None,
             fes=self.fes,
             mesh=self.mesh,
+            Crd=None if self.Crd is None else self.Crd.copy(),
+            Drd=None if self.Drd is None else self.Drd.copy(),
         )
+        for attr in self._EXTRA_ATTRS:
+            if hasattr(self, attr):
+                setattr(new, attr, getattr(self, attr))
+        return new
 
     def __repr__(self) -> str:
         recon_str = ", can_reconstruct=True" if self.can_reconstruct() else ""

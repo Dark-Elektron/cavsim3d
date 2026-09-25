@@ -14,6 +14,8 @@ import scipy.sparse as sp
 import scipy.linalg as sl
 from scipy.sparse.linalg import eigsh
 from cavsim3d.core.persistence import H5Serializer
+from cavsim3d.core.constants import MIN_EIGENVALUE
+import cavsim3d.utils.printing as pr
 from pathlib import Path
 
 
@@ -30,7 +32,7 @@ class EigenMixinBase:
     """
 
     # Default threshold for filtering static modes
-    DEFAULT_MIN_EIGENVALUE = 1.0  # ω² > 1 means ω > 1 rad/s
+    DEFAULT_MIN_EIGENVALUE = MIN_EIGENVALUE  # omega^2 of 1 MHz: below is static
 
     # Cache storage (initialized by subclasses or on first use)
     _eigenvalues_cache: Dict[str, np.ndarray] = None
@@ -275,12 +277,35 @@ class EigenMixinBase:
             M_reg = M + eps * np.eye(M.shape[0])
             eigenvalues, eigenvectors = sl.eigh(K, M_reg)
 
-        # Limit to n_modes if requested
-        if n_modes is not None and len(eigenvalues) > n_modes:
-            eigenvalues = eigenvalues[:n_modes]
-            eigenvectors = eigenvectors[:, :n_modes]
-
+        # No truncation here: the ascending spectrum starts with the static
+        # (near-zero) modes, so cutting to n_modes BEFORE the static filter
+        # would return fewer physical modes than asked.  _filter_eigenpairs
+        # applies n_modes after filtering.
         return eigenvalues, eigenvectors
+
+    def _default_eigen_shift(self) -> float:
+        """Shift-invert target omega^2 when the caller gives none.
+
+        The centre (in omega^2) of the solved band: every in-band mode then
+        lies closer to it than the static null space does.  Before any solve,
+        aim at f ~ c0/L for the model's largest extent L -- the lowest few
+        modes of a closed structure of that size.
+        """
+        from cavsim3d.core.constants import c0
+        f = getattr(self, 'frequencies', None)
+        if f is not None and len(f):
+            w = 2 * np.pi * np.asarray(f, dtype=float)
+            return float(0.5 * (w.min() ** 2 + w.max() ** 2))
+        mesh = getattr(self, 'mesh', None)
+        if mesh is not None:
+            try:
+                pts = np.array([v.point for v in mesh.vertices])
+                L = float(np.max(pts.max(axis=0) - pts.min(axis=0)))
+                if L > 0:
+                    return float((2 * np.pi * c0 / L) ** 2)
+            except Exception:
+                pass
+        return float((2 * np.pi * 1e9) ** 2)  # 1 GHz
 
     def _compute_eigenpairs_sparse(
             self,
@@ -311,9 +336,13 @@ class EigenMixinBase:
         k = min(n_modes, n_free - 2)
         k = max(k, 1)
 
-        # Default shift for shift-invert
+        # Shift-invert returns the modes NEAREST sigma.  The curl-curl operator
+        # has a huge static (gradient) null space at omega^2 = 0, which is at
+        # distance sigma -- so a physical mode is only found if it lies below
+        # 2*sigma.  A fixed shift (the old 1e18 ~ 159 MHz) therefore returned
+        # nothing but static modes for GHz structures.
         if sigma is None:
-            sigma = 1e18  # Target around 1 GHz
+            sigma = self._default_eigen_shift()
 
         eigenvalues = None
         eigenvectors_free = None
@@ -339,9 +368,10 @@ class EigenMixinBase:
 
                 eigenvalues, eigenvectors_free = sl.eigh(K_dense, M_dense)
 
-                if n_modes and len(eigenvalues) > n_modes:
-                    eigenvalues = eigenvalues[:n_modes]
-                    eigenvectors_free = eigenvectors_free[:, :n_modes]
+                # Same selection as shift-invert: the k modes nearest sigma
+                keep = np.sort(np.argsort(np.abs(eigenvalues - sigma))[:k])
+                eigenvalues = eigenvalues[keep]
+                eigenvectors_free = eigenvectors_free[:, keep]
 
             except Exception as e2:
                 print(f"Error: Dense solver also failed: {e2}")
@@ -373,7 +403,7 @@ class EigenMixinBase:
         filter_static : bool
             If True (default), remove static modes
         min_eigenvalue : float, optional
-            Threshold for static mode filtering. Default: 1.0
+            Threshold (omega^2) for static mode filtering. Default: omega^2 of 1 MHz
         n_modes : int, optional
             Number of eigenmodes to compute/return
         sigma : float, optional
@@ -841,8 +871,8 @@ class EigenMixinBase:
         Returns eigenvalues for specified domain or dict of all available domains.
         """
         kwargs['return_eigenvalues'] = True
-        kwargs['return_eigenvectors'] = False
-        return self.get_eigenvectors(**kwargs)
+        eigs, _vecs = self.get_eigenvectors(**kwargs)
+        return eigs
 
     def save_eigenmodes(self, path: Union[str, Path, None] = None, domain: str = None, auto_compute: bool = False, **kwargs):
         """

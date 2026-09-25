@@ -35,11 +35,13 @@ def get_user_confirmation(message: str, default: bool = True) -> bool:
         pass
 
     if not is_interactive:
-        # Non-interactive environment - return True with a warning
+        # Nobody can answer: never take a destructive action on a default.
+        # Callers expose force=True for scripts that really mean it.
         print(f"\n[WARNING] Non-interactive environment detected.")
         print(f"[PROMPT] {message}")
-        print(f"[ACTION] Proceeding automatically (default={default}).")
-        return default
+        print("[ACTION] Not confirmed -- nothing was changed. "
+              "Pass force=True to proceed without a prompt.")
+        return False
 
     suffix = " [Y/n]" if default else " [y/N]"
     while True:

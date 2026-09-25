@@ -195,6 +195,105 @@ class TestTEMImpedance:
             )
 
 
+class TestLineImpedance:
+    """The LINE impedance is what TEM ports are referenced to (CST's convention)."""
+
+    @staticmethod
+    def _solver(inner=0.020756, outer=0.072501, eps_map=None):
+        s = object.__new__(PortEigenmodeSolver)
+        s.port_cutoff_kc = {'port1': {0: 0.0}}
+        s.port_mode_types = {'port1': {0: 'TEM'}}
+        s.port_media_eps = eps_map if eps_map is not None else {}
+        s.port_face_region = {}
+        s.port_geometries = {
+            'port1': PortGeometry(
+                type=PortGeometryType.COAXIAL,
+                center=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
+                t1=np.array([1.0, 0.0, 0.0]), t2=np.array([0.0, 1.0, 0.0]),
+                area=np.pi * (outer ** 2 - inner ** 2),
+                radius=outer, inner_radius=inner,
+            )
+        }
+        return s
+
+    def test_line_impedance_matches_closed_form(self):
+        a, b = 0.020756, 0.072501
+        s = self._solver(a, b)
+        expected = Z0 / (2 * np.pi) * np.log(b / a)
+        z = s.get_port_line_impedance('port1', 0)
+        assert z is not None
+        assert abs(z.real - expected) < 1e-9
+
+    def test_line_impedance_is_not_the_wave_impedance(self):
+        """They differ by ln(b/a)/2pi; conflating them scaled Z by ~3.9."""
+        s = self._solver()
+        zl = s.get_port_line_impedance('port1', 0)
+        zw = s.get_port_wave_impedance('port1', 0, 1e9)
+        assert abs(zw) / abs(zl) > 3.0
+
+    def test_line_impedance_honours_port_medium(self):
+        """port_media_eps is keyed by FACE name and must resolve through the
+        helper -- indexing it with the port name treated a filled coax as air."""
+        a, b = 0.001, 0.0023
+        vac = self._solver(a, b)
+        filled = self._solver(a, b, eps_map={'port1': 4.0})
+        assert abs(vac.get_port_line_impedance('port1', 0)
+                   / filled.get_port_line_impedance('port1', 0) - 2.0) < 1e-9
+
+    def test_reference_impedance_selects_line_for_tem(self):
+        s = self._solver()
+        s.impedance_reference = 'line'
+        assert abs(s.get_port_reference_impedance('port1', 0, 1e9)
+                   - s.get_port_line_impedance('port1', 0)) < 1e-9
+        s.impedance_reference = 'wave'
+        assert abs(s.get_port_reference_impedance('port1', 0, 1e9) - Z0) < 1e-9
+
+
+class TestPortGeometryRoundTrip:
+    """inner_radius must survive save/load.
+
+    It was omitted from the serialised dict, so a reloaded project returned
+    None for the line impedance and silently fell back to the wave impedance,
+    putting every reported Z out by the ratio between them.
+    """
+
+    def test_inner_radius_is_serialised(self):
+        import inspect
+        src = inspect.getsource(PortEigenmodeSolver.to_save_dict)
+        assert "'inner_radius'" in src, (
+            "inner_radius missing from the saved port geometry"
+        )
+        src = inspect.getsource(PortEigenmodeSolver.from_save_dict)
+        assert "inner_radius" in src, (
+            "inner_radius not restored from the saved port geometry"
+        )
+
+    def test_inner_radius_restored(self):
+        geom = PortGeometry(
+            type=PortGeometryType.COAXIAL,
+            center=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
+            t1=np.array([1.0, 0.0, 0.0]), t2=np.array([0.0, 1.0, 0.0]),
+            area=1.0, radius=0.05, inner_radius=0.01,
+        )
+        gdata = {
+            'type': geom.type.value,
+            'center': geom.center.tolist(), 'normal': geom.normal.tolist(),
+            't1': geom.t1.tolist(), 't2': geom.t2.tolist(),
+            'area': geom.area, 'a': geom.a, 'b': geom.b,
+            'radius': geom.radius, 'inner_radius': geom.inner_radius,
+            'fit_error': geom.fit_error,
+        }
+        restored = PortGeometry(
+            type=PortGeometryType(gdata['type']),
+            center=np.array(gdata['center']), normal=np.array(gdata['normal']),
+            t1=np.array(gdata['t1']), t2=np.array(gdata['t2']),
+            area=gdata['area'], a=gdata['a'], b=gdata['b'],
+            radius=gdata['radius'], inner_radius=gdata.get('inner_radius'),
+            fit_error=gdata['fit_error'],
+        )
+        assert restored.inner_radius == geom.inner_radius
+
+
 # ============================================================
 # Unit tests: coaxial mode CF creation
 # ============================================================

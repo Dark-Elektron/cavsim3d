@@ -271,7 +271,6 @@ class BaseEMSolver(ABC):
             raise ValueError("No Z-matrix available. Call solve() first.")
 
         n_total = self._Z_matrix.shape[1]
-        from cavsim3d.core.constants import Z0
 
         # Preferred: explicit per-port-mode ordering (correct for non-uniform
         # modes per port).
@@ -352,6 +351,57 @@ class BaseEMSolver(ABC):
             return [(pnum[p], m + 1) for (p, m) in order]
         return [(i // n_modes + 1, i % n_modes + 1) for i in range(n_total)]
 
+    def _port_wave_impedance(self, port, mode: int, freq: float):
+        """Wave impedance the FOM normalised its port modes to, or None.
+
+        Subclasses override this. It is only used to rescale Z when the
+        REPORTED reference differs (TEM ports report the line impedance to
+        match CST, while the modes are normalised to the wave impedance).
+        """
+        return None
+
+    def _reference_rescale_factors(self):
+        """Per-index ratio (reported reference)/(wave impedance), or None.
+
+        Resolves port/mode exactly the way :meth:`_get_impedance_matrix` does,
+        including its uniform-modes fallback -- the ROM has no
+        ``_port_mode_order``, and an earlier version that required one silently
+        skipped the rescale, leaving the reduced Z a factor 3.93 above CST.
+        """
+        if getattr(self, '_Z_matrix', None) is None:
+            return None
+        freqs = getattr(self, 'frequencies', None)
+        if freqs is None or len(freqs) == 0:
+            return None
+        f0 = freqs[0]
+        n_total = self._Z_matrix.shape[1]
+
+        order = getattr(self, '_port_mode_order', None)
+        if order and len(order) == n_total:
+            pairs = list(order)
+        else:
+            n_modes = getattr(self, '_n_modes_per_port', None) or 1
+            ports = list(self.ports) if getattr(self, 'ports', None) else []
+            pairs = []
+            for idx in range(n_total):
+                pi, mi = idx // n_modes, idx % n_modes
+                pairs.append((ports[pi], mi) if pi < len(ports) else (None, mi))
+
+        out = []
+        for (pn, m) in pairs:
+            if pn is None:
+                out.append(1.0)
+                continue
+            try:
+                zw = self._port_wave_impedance(pn, m, f0)
+                zt = self._get_port_impedance(pn, m, f0)
+                out.append(abs(zt) / abs(zw)
+                           if zw is not None and abs(zw) > 1e-12 else 1.0)
+            except Exception:
+                out.append(1.0)
+        arr = np.asarray(out, dtype=float)
+        return None if np.allclose(arr, 1.0) else arr
+
     def _compute_s_from_z(self) -> None:
         """Compute S-parameters from Z-parameters using port impedances."""
         if self._Z_matrix is None:
@@ -360,6 +410,16 @@ class BaseEMSolver(ABC):
         n_freq = len(self.frequencies)
         n_ports = self._Z_matrix.shape[1]
         self._S_matrix = np.zeros((n_freq, n_ports, n_ports), dtype=complex)
+
+        # The FOM normalises its port modes to the WAVE impedance, so the raw Z
+        # is in that normalisation. TEM ports REPORT the line impedance (CST's
+        # convention), so Z must be rescaled with the reference:
+        # z_to_s(a*Z, a*Z0) == z_to_s(Z, Z0) -- scaling both by the same
+        # per-port factor leaves S untouched and makes Z physical ohms.
+        scale = self._reference_rescale_factors()
+        if scale is not None:
+            self._Z_matrix = self._Z_matrix * np.sqrt(
+                np.outer(scale, scale))[None, :, :]
 
         for k, freq in enumerate(self.frequencies):
             Z0_mat = self._get_impedance_matrix(freq)
@@ -858,10 +918,14 @@ class BaseEMSolver(ABC):
 
         errors = {}
         n_ports = min(self_data.shape[1], ref_data.shape[1])
+        n_modes = self._n_modes_per_port if self._n_modes_per_port is not None else 1
+        labels = self._matrix_index_labels(self_data.shape[1], n_modes)
 
         for i in range(n_ports):
             for j in range(n_ports):
-                key = f'{i + 1}(1){j + 1}(1)'
+                # Same key convention as S_dict: '<excitation j><response i>'
+                (pi, mi), (pj, mj) = labels[i], labels[j]
+                key = f'{pj}({mj}){pi}({mi})'
 
                 self_param = self_data[:, i, j]
                 ref_param = ref_data[:, i, j]
@@ -881,7 +945,7 @@ class BaseEMSolver(ABC):
 
                 errors[key] = error
 
-            return errors
+        return errors
 
     def print_info(self) -> None:
         """Print solver information."""

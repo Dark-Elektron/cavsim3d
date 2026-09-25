@@ -534,7 +534,8 @@ class CWGAnalytical(PlotMixin):
     # Eigenfrequencies
     # =========================================================================
 
-    def resonant_frequencies(self, n_modes: int = 10) -> np.ndarray:
+    def resonant_frequencies(self, n_modes: int = 10,
+                             boundary_type: str = 'PMC') -> np.ndarray:
         """
         Compute resonant frequencies of the waveguide cavity (TE11p modes only).
 
@@ -551,7 +552,10 @@ class CWGAnalytical(PlotMixin):
             Resonant frequencies [GHz]
         """
         freqs = []
-        for p in range(1, n_modes + 1):
+        # PMC end caps (the FEM's natural port boundary) admit the TE p = 0
+        # cutoff resonance; PEC caps start at p = 1.
+        p0 = 0 if str(boundary_type).upper() == 'PMC' else 1
+        for p in range(p0, p0 + n_modes):
             kz = p * np.pi / self.length
             k = np.sqrt(self.kc**2 + kz**2)
             f = c0 * k / (2 * np.pi) / 1e9  # Convert to GHz

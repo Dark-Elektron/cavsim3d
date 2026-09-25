@@ -3147,12 +3147,15 @@ class OCCImporter(BaseGeometry):
             op = entry['op']
 
             if op in ('import_occ', 'import_step'):
-                # Resolve filepath: use project-local copy first, then history path
-                filepath = str(source_file) if source_file else entry['filepath']
-                # If filepath is project-relative, resolve it
-                fp = _Path(filepath)
-                if not fp.is_absolute():
-                    fp = project_path / fp
+                # Use the project-local copy first; it already includes the
+                # project folder. Only the history path is project-relative
+                # (joining the local copy again broke relative base_dirs).
+                if source_file:
+                    fp = _Path(source_file)
+                else:
+                    fp = _Path(entry['filepath'])
+                    if not fp.is_absolute():
+                        fp = project_path / fp
                 geo = cls(
                     filepath=str(fp),
                     unit=entry.get('unit', 'mm'),
@@ -3194,6 +3197,23 @@ class OCCImporter(BaseGeometry):
                     maxh=entry.get('maxh'),
                     curve_order=entry.get('curve_order', 3),
                 )
+
+            # Operations that change the physics/topology.  Without replaying
+            # them a reloaded project lost its dielectrics (eps_r -> 1), its
+            # PEC subtractions and any manually assigned ports.
+            elif op == 'set_materials' and geo is not None:
+                geo.set_materials(entry.get('material_config') or {})
+
+            elif op == 'assign_ports' and geo is not None:
+                if geo.geo is None:
+                    geo.build()
+                    built = True
+                geo.assign_ports({str(k): int(v) for k, v in
+                                  (entry.get('port_face_map') or {}).items()})
+
+            elif op == 'set_local_mesh_refinement' and geo is not None:
+                geo._replay_common_op(entry)
+                built = built or geo.geo is not None
 
         if geo is None:
             raise ValueError("History does not contain an 'import_occ' or 'import_step' operation.")

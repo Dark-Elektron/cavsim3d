@@ -192,17 +192,111 @@ class BaseGeometry(ABC, TaggableMixin):
         """Generate mesh from cavsim3d.geometry. Automatically calls build() if needed."""
         if self.geo is None:
             self.build()
-        
+
         if maxh:
+            self._warn_if_maxh_non_binding(maxh)
             self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(maxh=maxh, curvaturesafety=curvaturesafety))
         else:
             self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(curvaturesafety=curvaturesafety))
-        
+
         self.mesh.Curve(curve_order)
+        # Port/boundary lists are cached from the mesh; a new mesh invalidates them.
+        self._ports = None
+        self._boundaries = None
         self.invalidate_tag()  # Mesh changed
 
         self._record('generate_mesh', maxh=maxh, curve_order=curve_order)
         return self.mesh
+
+    def _warn_if_maxh_non_binding(self, maxh: float) -> None:
+        """Warn when ``maxh`` (metres) exceeds the geometry itself.
+
+        NGSolve works in metres, so a value meant as millimetres (``maxh=5``)
+        is silently ignored and the mesh comes from the curvature settings
+        alone -- a refinement study then changes nothing.
+        """
+        try:
+            bb = self.geo.bounding_box
+            extent = max(float(bb[1][i] - bb[0][i]) for i in range(3))
+        except Exception:
+            return
+        if extent > 0 and maxh > 2 * extent:
+            warnings.warn(
+                f"maxh={maxh:g} m is larger than the geometry (largest extent "
+                f"{extent:.4g} m) and will not constrain the mesh. maxh is in "
+                f"metres -- did you mean {maxh * 1e-3:g} (i.e. {maxh:g} mm)?",
+                UserWarning, stacklevel=3)
+
+    # === Materials ===
+
+    MATERIAL_DEFAULTS = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+
+    def set_materials(self, material_config: Dict[str, dict]) -> 'BaseGeometry':
+        """Assign material properties to mesh materials (``'*'`` wildcards allowed).
+
+        Each value is a dict with any of ``eps_r``, ``mu_r``, ``sigma`` [S/m]
+        and ``tan_delta``; missing keys default to vacuum / lossless.  The
+        solver uses eps = eps0*eps_r*(1 - j tan_delta) - j sigma/omega.
+
+        >>> geo.set_materials({'vacuum': {'eps_r': 2.2, 'tan_delta': 2e-3}})
+        >>> geo.set_materials({'*': {'sigma': 0.1}})       # every material
+        """
+        cfg = {}
+        for key, val in dict(material_config).items():
+            if not isinstance(val, dict):
+                raise ValueError(
+                    f"Material {key!r}: expected a dict of properties, got {val!r}. "
+                    f"(PEC regions are only supported for imported CAD geometry.)")
+            d = dict(val)
+            if 'epsilon_r' in d and 'eps_r' not in d:
+                d['eps_r'] = d.pop('epsilon_r')
+            unknown = set(d) - set(self.MATERIAL_DEFAULTS)
+            if unknown:
+                raise ValueError(f"Material {key!r}: unknown properties {sorted(unknown)}; "
+                                 f"use {sorted(self.MATERIAL_DEFAULTS)}.")
+            cfg[key] = d
+        self._materials = cfg
+        self._record('set_materials', material_config=material_config)
+        self.invalidate_tag()
+        return self
+
+    def get_material(self, domain_name: str) -> dict:
+        """Material properties of one mesh material (vacuum if unassigned)."""
+        return self._lookup_material(domain_name) or dict(self.MATERIAL_DEFAULTS)
+
+    def _lookup_material(self, domain_name: str) -> Optional[dict]:
+        """Properties assigned via :meth:`set_materials`, or None if unassigned."""
+        import fnmatch
+        mats = getattr(self, '_materials', None) or {}
+        if not mats:
+            return None
+        names = [domain_name]
+        if '/' in domain_name:                 # assembly / split-domain prefix
+            names.append(domain_name.split('/', 1)[1])
+        hit = next((v for k, v in mats.items() if '*' not in k and k in names), None)
+        if hit is None:                        # exact names win over wildcards
+            hit = next((v for k, v in mats.items() if '*' in k
+                        and any(fnmatch.fnmatchcase(n, k) for n in names)), None)
+        if hit is None:
+            return None
+        props = dict(self.MATERIAL_DEFAULTS)
+        props.update(hit)
+        return props
+
+    def _replay_common_op(self, entry: dict) -> bool:
+        """Replay a history op defined on BaseGeometry; False if not one."""
+        op = entry.get('op')
+        if op == 'set_materials':
+            self.set_materials(entry.get('material_config') or {})
+            return True
+        if op == 'generate_mesh':
+            self.generate_mesh(maxh=entry.get('maxh'),
+                               curve_order=entry.get('curve_order', 3))
+            return True
+        if op == 'set_local_mesh_refinement':
+            self.set_local_mesh_refinement(entry['pattern'], entry['maxh'])
+            return True
+        return False
 
     def set_local_mesh_refinement(self, pattern: str, maxh: float) -> 'BaseGeometry':
         """Set a local maximum mesh size on faces/solids matching a name pattern.
@@ -351,7 +445,7 @@ class BaseGeometry(ABC, TaggableMixin):
 
     def get_boundary_normal(self, boundary_label: str) -> Optional[np.ndarray]:
         """Calculate outward normal vector for a planar boundary face."""
-        nhat = specialcf.normal(3)
+        nhat = specialcf.normal(3)   # outward on the domain boundary
         integral_n = Integrate(
             nhat, self.mesh, BND,
             definedon=self.mesh.Boundaries(boundary_label)
@@ -362,7 +456,7 @@ class BaseGeometry(ABC, TaggableMixin):
         )
         if abs(face_area) < 1e-12:
             return None
-        normal = -np.array(integral_n) / face_area
+        normal = np.array(integral_n) / face_area
         return np.round(normal, decimals=6)
 
     def get_point_on_boundary(self, boundary_label: str) -> Optional[Tuple[float, ...]]:

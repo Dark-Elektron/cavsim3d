@@ -13,6 +13,8 @@ __pycache__/
 *.h5
 *.pkl
 *.npz
+# benchmark results shipped with the docs
+!docs/example_models/c3794/*.npz
 *.egg-info/
 *.resolved
 architecture_analysis.md
@@ -32,3 +34,10 @@ testbench_runs/
 # Python build artifacts
 build/
 dist/
+
+# Generated output (rebuilt by `mkdocs build` / CI) and local run folders
+site/
+my_first_sim/
+
+# Notebook backups
+*.ipynb.bak

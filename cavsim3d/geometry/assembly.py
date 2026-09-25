@@ -27,6 +27,33 @@ from .component_registry import (
 )
 
 
+def _is_netlist_ref(geometry) -> bool:
+    """True for a component that references an already-run project."""
+    return isinstance(geometry, (str, Path)) or hasattr(geometry, 'project_path')
+
+
+def _netlist_reference(geometry_type: str, geometry_history):
+    """Rebuild a netlist reference recorded by :meth:`Assembly.add`, or None.
+
+    Imported models are restored as :class:`ImportedModel` when their project
+    still exists; otherwise the bare path is kept so the netlist still loads and
+    the solve reports the missing project clearly.
+    """
+    if geometry_type == 'ImportedModel':
+        path = next((h.get('project_path') for h in (geometry_history or [])
+                     if isinstance(h, dict) and h.get('op') == 'import_model'), None)
+        if path is None:
+            return None
+        from cavsim3d.core.reuse import ImportedModel
+        try:
+            return ImportedModel(path)
+        except FileNotFoundError:
+            return str(path)
+    if geometry_type in ('str', 'PosixPath', 'WindowsPath', 'Path'):
+        return str(geometry_history)
+    return None
+
+
 @dataclass
 class Transform3D:
     """3D transformation specification."""
@@ -59,7 +86,8 @@ class ComponentEntry:
     original_bounds: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
     aligned_port: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+    explicit_position: bool = False   # add(position=...) given -> layout anchor
+
     def __post_init__(self):
         if self.original_bounds is None:
             self.original_bounds = self._compute_bounds()
@@ -275,7 +303,7 @@ class Assembly(BaseGeometry):
         
         # Handle sub-assemblies / netlist references (project path or an
         # ImportedModel handle from fds.import_model()).
-        if isinstance(geometry, (str, Path)) or hasattr(geometry, 'project_path'):
+        if _is_netlist_ref(geometry):
             pass  # existing-project reference; resolved at concatenation time
         elif isinstance(geometry, Assembly):
             if not geometry._is_built:
@@ -298,7 +326,8 @@ class Assembly(BaseGeometry):
             base_name=base_name,
             transform=transform,
             aligned_port=align_port,
-            metadata=metadata
+            metadata=metadata,
+            explicit_position=position is not None,
         )
         
         self._components[key] = entry
@@ -339,7 +368,7 @@ class Assembly(BaseGeometry):
                 to_key=resolved_before,
                 from_port=align_port or 'port2',
                 to_port='port1',
-                gap=-gap  # Before means moving current component backwards relative to target
+                gap=gap  # distance from.port2 -> to.port1, as for 'after'
             ))
         else:
             self._component_order.append(key)
@@ -598,26 +627,37 @@ class Assembly(BaseGeometry):
             self._layout_computed = True
             return self
         
-        positioned = set()
-        first_key = self._component_order[0]
-        positioned.add(first_key)
-        
-        for conn in self._connections:
-            if conn.to_key in positioned and conn.from_key in positioned:
-                continue
-            if conn.from_key in positioned:
-                self._position_connected(conn)
-                positioned.add(conn.to_key)
-            elif conn.to_key in positioned:
-                # Reverse connection positioning not yet implemented for all cases
-                pass
-        
-        # Safety for unpositioned components
-        for key in self._component_order:
+        # The first component and any explicitly positioned one are anchors.
+        positioned = {self._component_order[0]} | {
+            k for k, e in self._components.items() if e.explicit_position}
+
+        # Propagate positions through the connections until nothing changes,
+        # in either direction ('after' positions to_key from from_key,
+        # 'before' positions from_key from to_key).
+        pending = list(self._connections)
+        progress = True
+        while pending and progress:
+            progress = False
+            for conn in list(pending):
+                if conn.from_key in positioned and conn.to_key in positioned:
+                    pending.remove(conn)
+                elif conn.from_key in positioned:
+                    self._position_connected(conn)
+                    positioned.add(conn.to_key)
+                    pending.remove(conn)
+                    progress = True
+                elif conn.to_key in positioned:
+                    self._position_connected_reverse(conn)
+                    positioned.add(conn.from_key)
+                    pending.remove(conn)
+                    progress = True
+
+        # Components without a connection follow their predecessor in the
+        # component order (deterministic -- not an arbitrary set element).
+        for i, key in enumerate(self._component_order):
             if key not in positioned:
-                if positioned:
-                    last = list(positioned)[-1]
-                    self._position_after(key, last)
+                if i > 0:
+                    self._position_after(key, self._component_order[i - 1])
                 positioned.add(key)
         
         self._layout_computed = True
@@ -630,7 +670,8 @@ class Assembly(BaseGeometry):
     ) -> Optional[Tuple[float, float, float]]:
         """Get port position in local coordinates using physical bounds."""
         # Refresh physical bounds for better precision if possible
-        if not isinstance(entry.geometry, Assembly) and entry.geometry.geo is not None:
+        if (not isinstance(entry.geometry, Assembly)
+                and getattr(entry.geometry, 'geo', None) is not None):
             axis = self.main_axis
             z_min, z_max = entry.geometry.get_physical_bounds('Z')
             x_min, x_max = entry.geometry.get_physical_bounds('X')
@@ -690,6 +731,37 @@ class Assembly(BaseGeometry):
             rotation_center=to_entry.transform.rotation_center
         )
     
+    def _position_connected_reverse(self, conn: Connection) -> None:
+        """Position ``conn.from_key`` so its port meets the placed ``conn.to_key``."""
+        from_entry = self._components[conn.from_key]
+        to_entry = self._components[conn.to_key]
+
+        from_port_pos = self._get_port_position(from_entry, conn.from_port)
+        to_port_pos = self._get_port_position(to_entry, conn.to_port)
+        if from_port_pos is None or to_port_pos is None:
+            self._position_before(conn.from_key, conn.to_key, conn.gap)
+            return
+
+        axis_idx = self._AXIS_IDX[self.main_axis]
+        translation = [0.0, 0.0, 0.0]
+        for i in range(3):
+            if i == axis_idx:
+                to_world = to_port_pos[i] + to_entry.transform.translation[i]
+                translation[i] = to_world - from_port_pos[i] - conn.gap
+            else:
+                to_center = (to_entry.original_bounds[0][i]
+                             + to_entry.original_bounds[1][i]) / 2
+                from_center = (from_entry.original_bounds[0][i]
+                               + from_entry.original_bounds[1][i]) / 2
+                translation[i] = (to_center + to_entry.transform.translation[i]
+                                  - from_center)
+
+        from_entry.transform = Transform3D(
+            translation=tuple(translation),
+            rotation=from_entry.transform.rotation,
+            rotation_center=from_entry.transform.rotation_center
+        )
+
     def _position_after(self, key: str, after_key: str, gap: float = 0.0) -> None:
         """Position component after another along main axis using bounding boxes."""
         entry = self._components[key]
@@ -987,7 +1059,8 @@ class Assembly(BaseGeometry):
             from_entry = self._components[from_key]
             to_entry = self._components[to_key]
             
-            if from_entry.geometry.geo is None or to_entry.geometry.geo is None:
+            if (getattr(from_entry.geometry, 'geo', None) is None
+                    or getattr(to_entry.geometry, 'geo', None) is None):
                 continue
                 
             # Get BIT-PRECISE physical extremes from extreme faces
@@ -1005,7 +1078,11 @@ class Assembly(BaseGeometry):
             world_max_from = pmax_from + from_entry.transform.translation[axis_idx]
             world_min_to = pmin_to + to_entry.transform.translation[axis_idx]
             
-            gap = world_min_to - world_max_from
+            # Snap to the gap the user asked for (0 unless add(after=(ref, gap))),
+            # so only CAD inaccuracies are removed, not intended spacing.
+            intended = next((c.gap for c in self._connections
+                             if {c.from_key, c.to_key} == {from_key, to_key}), 0.0)
+            gap = world_min_to - world_max_from - intended
             
             # SNAP SAFETY: If the gap is massive, something is wrong with face detection
             # We don't want to fly components across the world.
@@ -1208,6 +1285,11 @@ class Assembly(BaseGeometry):
         the owning component's geometry for the material properties.
         """
         defaults = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+
+        # Materials set on the assembly itself take precedence
+        own = self._lookup_material(domain_name)
+        if own is not None:
+            return own
 
         # Try to find the owning component via the domain_materials mapping
         dm = getattr(self, '_domain_materials', {})
@@ -1453,6 +1535,61 @@ class Assembly(BaseGeometry):
             for base_name, keys in identical.items():
                 print(f"  {base_name}: {len(keys)} instances -> compute once")
 
+    def build_chain_geometry(self):
+        """Geometry of the full chain, repeats expanded -- for INSPECTION.
+
+        ``add(name, comp, n=N)`` records one component with a repeat count; the
+        glued :meth:`build` places that component once. This places all ``N``
+        instances along the main axis so the assembly can be drawn and its port
+        labels and materials checked.
+
+        Deliberately geometry only: a netlist assembly has no mesh of its own,
+        because every section is meshed and solved independently.
+
+        Returns
+        -------
+        OCC shape
+            Also cached on ``self.geo`` when nothing has been built yet, so
+            ``asm.geo`` and ``asm.show()`` work on a netlist.
+        """
+        from netgen.occ import Glue
+        if not self._components:
+            raise ValueError("No components in assembly")
+        self.compute_layout()
+
+        axis = {'X': 0, 'Y': 1, 'Z': 2}[self.main_axis.upper()]
+        shapes = []
+        for key in self._component_order:
+            entry = self._components[key]
+            comp = entry.geometry
+            base_geo = getattr(comp, 'geo', None)
+            if base_geo is None and hasattr(comp, 'build'):
+                comp.build()
+                base_geo = getattr(comp, 'geo', None)
+            if base_geo is None:
+                continue                      # imported section: nothing to draw
+            n = int(entry.metadata.get('n', 1))
+            try:
+                extent = entry.size[axis]
+            except Exception:
+                extent = 0.0
+            for i in range(n):
+                tf = entry.transform
+                if i:
+                    step = [0.0, 0.0, 0.0]
+                    step[axis] = i * extent
+                    tf = tf.compose(Transform3D(translation=tuple(step)))
+                shapes.append(self._apply_transform(base_geo, tf))
+
+        if not shapes:
+            raise ValueError(
+                "Nothing to draw: no component in this assembly has geometry "
+                "(an imported section carries results, not a shape).")
+        chain = shapes[0] if len(shapes) == 1 else Glue(shapes)
+        if self.geo is None:
+            self.geo = chain
+        return chain
+
     def show(
         self,
         what: Literal["geometry", "mesh", "geo", "inspect"] = "geometry",
@@ -1466,7 +1603,9 @@ class Assembly(BaseGeometry):
             return
         elif what in ("geometry", "geo"):
             if self.geo is None:
-                raise ValueError("Assembly not built. Call build() first.")
+                # A netlist assembly is never build()-ed -- it has no mesh of
+                # its own -- but the chain still has a geometry worth seeing.
+                self.build_chain_geometry()
             scene = Draw(self.geo, **kwargs)
         elif what == "mesh":
             if self.mesh is None:
@@ -1749,7 +1888,7 @@ class Assembly(BaseGeometry):
                                 rewritten_sub.append(sh_copy)
                             e['geometry_history'] = rewritten_sub
 
-                    elif not isinstance(geo_obj, Assembly):
+                    elif not isinstance(geo_obj, Assembly) and not _is_netlist_ref(geo_obj):
                         # Primitive — export as STEP
                         if geo_obj.geo is not None:
                             try:
@@ -1797,10 +1936,17 @@ class Assembly(BaseGeometry):
                 obj = cls(main_axis=params.get('main_axis', 'Z'))
             
             elif op == 'add':
-                # Reconstruct sub-geometry
-                sub_history = list(params.pop('geometry_history'))
                 sub_type = params.pop('geometry_type')
-                
+                sub_history = params.pop('geometry_history')
+
+                # Netlist references: an imported model or a bare project path.
+                ref = _netlist_reference(sub_type, sub_history)
+                if ref is not None:
+                    name = params.pop('name')
+                    obj.add(name, ref, **params)
+                    continue
+
+                sub_history = list(sub_history)
                 sub_cls = BaseGeometry._get_subclass(sub_type)
                 if sub_cls is None:
                     raise ValueError(f"Unknown geometry type '{sub_type}'")
@@ -1855,6 +2001,9 @@ class Assembly(BaseGeometry):
             elif op == 'translate':
                 obj.translate(**params)
             
+            elif op == 'set_materials':
+                obj.set_materials(params.get('material_config') or {})
+
             elif op == 'build':
                 obj.build()
             

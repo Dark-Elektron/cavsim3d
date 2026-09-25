@@ -144,7 +144,9 @@ class ImportedModel:
         self.training_band = meta.get("band")
 
     def get_history(self):
-        return []
+        # Recorded so an assembly that references this model can be rebuilt
+        # when its project is reopened.
+        return [{'op': 'import_model', 'project_path': str(self.project_path)}]
 
     def __repr__(self):
         band = (f", band=[{self.training_band['fmin_GHz']:.3g}, "

@@ -13,7 +13,7 @@ from cavsim3d.utils.plot_mixin import PlotMixin
 from cavsim3d.rom.structures import ReducedStructure
 from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
 from ngsolve.webgui import Draw
-from cavsim3d.core.constants import mu0
+from cavsim3d.core.constants import mu0, MIN_EIGENVALUE
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
 import h5py
 import json
@@ -26,6 +26,47 @@ import time
 import matplotlib.pyplot as plt
 
 
+
+
+def _lossy_reduced_solve(A, C, D, B, omegas):
+    """Solve (A + jwC - w^2 (I - jD)) X = w B at every w; returns (Z, X list).
+
+    A, C, D are the mass-normalised reduced operators (C, D may be None).
+    Losses break the single eigendecomposition used for the lossless case,
+    so each frequency is a small dense solve.  Z = j B^T X (bilinear: the
+    lossy system is complex SYMMETRIC, not Hermitian).
+    """
+    r = A.shape[0]
+    I = np.eye(r)
+    Cm = np.zeros((r, r)) if C is None else C
+    Dm = np.zeros((r, r)) if D is None else D
+    Z, X_all = [], []
+    for w in omegas:
+        lhs = A + 1j * w * Cm - w ** 2 * (I - 1j * Dm)
+        X = np.linalg.solve(lhs, w * B)
+        X_all.append(X)
+        Z.append(1j * (B.T @ X))
+    return np.array(Z), X_all
+
+
+def _real_pod_basis(snapshots: np.ndarray):
+    """(U, S) of the SVD used for the POD basis -- always a REAL basis.
+
+    Complex (lossy) snapshots are split into [Re X, Im X]: a real basis keeps
+    the projected operators real and the reduced system complex-symmetric,
+    exactly like the full-order one.
+    """
+    X = snapshots
+    if np.iscomplexobj(X):
+        X = np.hstack([X.real, X.imag])
+    U, S, _ = np.linalg.svd(X, full_matrices=False)
+    return U, S
+
+
+def _same_grid(stored, requested) -> bool:
+    """True if a stored frequency grid [Hz] equals the requested one."""
+    return (stored is not None and len(stored) == len(requested)
+            and np.allclose(stored, requested, rtol=1e-9, atol=0.0))
 
 
 class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
@@ -69,7 +110,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     """
 
     # Default threshold for filtering static modes (eigenvalues below this are removed)
-    DEFAULT_MIN_EIGENVALUE = 1.0  # ω² > 1 means ω > 1 rad/s
+    DEFAULT_MIN_EIGENVALUE = MIN_EIGENVALUE  # omega^2 of 1 MHz: below is static
 
     # Threshold: below this matrix dimension, use direct solve (LU is fast);
     # above, use iterative (GMRES handles large/sparse systems better).
@@ -131,12 +172,21 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             self._n_modes_per_port = solver._n_modes_per_port or 1
 
         # Port impedance function from solver
-        self._port_impedance_func = solver.port_solver.get_port_wave_impedance
+        # Reference impedance for S/Z normalisation -- TEM/qTEM ports use the
+        # line impedance (CST's convention), TE/TM the wave impedance.
+        ps = solver.port_solver
+        self._port_impedance_func = getattr(
+            ps, 'get_port_reference_impedance', ps.get_port_wave_impedance)
+        self._port_wave_impedance_func = ps.get_port_wave_impedance
 
         # Per-domain storage
         self._M: Dict[str, sp.csr_matrix] = {}
         self._K: Dict[str, sp.csr_matrix] = {}
         self._B: Dict[str, np.ndarray] = {}
+        self._C: Dict[str, sp.csr_matrix] = {}      # loss (jw) matrices, if lossy
+        self._D: Dict[str, sp.csr_matrix] = {}      # loss (jw^2) matrices, if lossy
+        self._C_r: Dict[str, np.ndarray] = {}       # mass-normalised reduced C
+        self._D_r: Dict[str, np.ndarray] = {}       # mass-normalised reduced D
         self._snapshots: Dict[str, np.ndarray] = {}
         self._W: Dict[str, np.ndarray] = {}
         self._A_r: Dict[str, np.ndarray] = {}
@@ -178,6 +228,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 self._M[domain] = rom_data['M']
                 self._K[domain] = rom_data['K']
                 self._B[domain] = rom_data['B']
+                if rom_data.get('C') is not None:
+                    self._C[domain] = rom_data['C']
+                if rom_data.get('D') is not None:
+                    self._D[domain] = rom_data['D']
                 has_matrices = True
 
             if rom_data['W'] is not None:
@@ -253,6 +307,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     def all_ports(self) -> List[str]:
         """All port names including internal."""
         return self._all_ports.copy()
+
+    def _port_wave_impedance(self, port, mode: int, freq: float):
+        """Wave impedance the reduced port basis inherited from the FOM."""
+        wf = getattr(self, '_port_wave_impedance_func', None)
+        return None if wf is None else wf(port, mode, freq)
 
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
         """Get port impedance from underlying solver."""
@@ -465,7 +524,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             - 'all': Returns dict with both global and per-domain
         fmin : float, optional
             Minimum frequency in GHz. Modes below this are filtered out.
-            Default: ~0.16 MHz (corresponds to min_eigenvalue=1.0)
+            Default: 1 MHz (see core.constants.STATIC_MODE_CUTOFF_HZ)
         filter_static : bool
             If True (default), remove static modes (f ≈ 0).
             When fmin is specified, this is automatically True.
@@ -510,6 +569,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         """
         Compute or retrieve eigenmodes for the reduced structure(s).
         """
+        # accept (and ignore) options that only apply to the sparse FOM solve
+        for k in ("return_eigenvalues", "sigma"):
+            kwargs.pop(k, None)
         res = self.calculate_resonant_modes(**kwargs)
         
         # Hierarchical save
@@ -608,8 +670,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 if ranks is not None and domain in ranks:
                     domain_max_rank = ranks[domain]
 
-                # SVD for POD basis
-                U, S, Vt = np.linalg.svd(snapshots, full_matrices=False)
+                # SVD for POD basis (real, also for complex lossy snapshots)
+                U, S = _real_pod_basis(snapshots)
                 self._singular_values[domain] = S
 
                 # Determine truncation rank
@@ -660,6 +722,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
                 # Transformed port basis
                 self._B_r[domain] = Q_L_inv.T @ W.T @ B
+
+                # Loss operators, in the same mass-normalised coordinates
+                self._C_r.pop(domain, None)
+                self._D_r.pop(domain, None)
+                for src, dst in ((self._C, self._C_r), (self._D, self._D_r)):
+                    if domain in src and src[domain] is not None:
+                        X_r = Q_L_inv.T @ (W.T @ (src[domain] @ W)) @ Q_L_inv
+                        dst[domain] = (X_r + X_r.T) / 2
 
                 total_full += n
                 total_reduced += r
@@ -738,7 +808,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         # 3. Extract other options from merged cfg
         solver_type = cfg.get('solver_type', 'auto')
-        rerun = cfg.get('rerun', False)
+        rerun = cfg.get('rerun', None)   # None: auto, True: force, False: keep stored
         verbose = cfg.get('verbose', False)
 
         # Set verbosity level
@@ -819,21 +889,22 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     except Exception as e:
                         pr.warning(f"  Could not load existing ROM results: {e}")
 
+            new_freqs = np.linspace(fmin, fmax, nsamples) * 1e9
             if has_results and not rerun:
-                warnings.warn(
-                    "Results already exist for this ROM solver. "
-                    "To overwrite, call solve(..., rerun=True).",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                return self._build_results_dict()
+                if rerun is False or _same_grid(self.frequencies, new_freqs):
+                    pr.milestone("  Returning existing ROM results for this sweep. "
+                                 "(Use rerun=True to force a re-solve)")
+                    return self._build_results_dict()
+                # A reduced solve costs milliseconds: re-solve rather than hand
+                # back results for a different band.
+                pr.info("  Requested sweep differs from the stored ROM results; re-solving.")
 
             if not self._is_reduced:
                 raise ValueError("Must call reduce() first")
 
             pr.running(f"\nROM Solve: {fmin} - {fmax} GHz, {nsamples} samples")
 
-            self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
+            self.frequencies = new_freqs
 
             _t_rom_solve = time.time()
             if self.n_domains == 1:
@@ -919,9 +990,13 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
                     
                     # Also save individual files for user-friendly access
-                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W), ("Q_L_inv", self._Q_L_inv)]:
-                         with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
-                             H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
+                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W),
+                                         ("Q_L_inv", self._Q_L_inv), ("C_r", self._C_r),
+                                         ("D_r", self._D_r)]:
+                        if mdict.get(domain) is None:
+                            continue
+                        with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
+                            H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
         # 2. Save S and Z results
         if self.n_domains == 1:
@@ -981,7 +1056,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             if solver is not None and self._is_reduced:
                 ps = getattr(solver, 'port_solver', None)
                 struct_meta = {"structures": []}
-                imp = {"cutoff": {}, "mtype": {}, "eps": {}, "zpv": {}}
+                imp = {"cutoff": {}, "mtype": {}, "eps": {}, "mu": {}, "zpv": {}}
                 # Per (port, mode) fingerprint for the interface fit-check.
                 fingerprints = {}
                 for domain in self.domains:
@@ -1012,11 +1087,33 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                                         "indices": list(mi.get(p, {}).get(m, ())),
                                         "pol": float(mp.get(p, {}).get(m, 0.0)),
                                     } for m in ck[p]}
-                            imp["eps"][p] = float(
-                                (getattr(ps, 'port_media_eps', {}) or {}).get(p, 1.0))
+                            imp["eps"][p] = float(ps._port_media_eps_for(p)
+                                                  if hasattr(ps, '_port_media_eps_for')
+                                                  else 1.0)
+                            imp["mu"][p] = float(ps._port_media_mu_for(p)
+                                                 if hasattr(ps, '_port_media_mu_for')
+                                                 else 1.0)
                             zli = (getattr(ps, 'port_line_impedance', {}) or {}).get(p)
                             if zli:
                                 imp["zpv"][p] = {int(m): complex(zli[m]) for m in zli}
+                            else:
+                                # Analytic TEM (coax) ports have no entry in
+                                # port_line_impedance; compute and store it so a
+                                # RELOADED model keeps the line reference.
+                                try:
+                                    zl = ps.get_port_line_impedance(p, 0)
+                                except Exception:
+                                    zl = None
+                                if zl is not None and abs(zl) > 1e-9:
+                                    modes = imp["mtype"].get(p, {})
+                                    # store a plain float: json cannot encode
+                                    # complex, and a TEM line impedance is real
+                                    imp["zpv"][p] = {
+                                        int(m): float(np.real(zl))
+                                        for m, mt_ in modes.items()
+                                        if str(mt_) == 'TEM'}
+                                    if not imp["zpv"][p]:
+                                        imp["zpv"].pop(p, None)
                 struct_meta["impedance"] = imp
                 struct_meta["fingerprints"] = fingerprints
                 # Training frequency band (validity window of the ROM).
@@ -1029,8 +1126,15 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                         "fmax_GHz": float(np.max(fr)) / 1e9,
                         "n_snapshots": int(len(fr)),
                     }
+                # Serialise BEFORE opening the file. json.dump() streams, so a
+                # non-encodable value (e.g. a complex impedance) raises partway
+                # through and leaves a truncated file that later fails to load.
+                _payload = json.dumps(
+                    struct_meta, indent=2,
+                    default=lambda o: float(np.real(o))
+                    if isinstance(o, complex) else str(o))
                 with open(path / "structures.json", "w") as fh:
-                    json.dump(struct_meta, fh, indent=2)
+                    fh.write(_payload)
         except Exception as e:
             warnings.warn(f"Could not save ROM structure metadata: {e}")
 
@@ -1080,6 +1184,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             rom._external_ports = solver.external_ports
             rom.domain_port_map = solver.domain_port_map
             rom._port_impedance_func = solver._get_port_impedance
+            ps = getattr(solver, 'port_solver', None)
+            if ps is not None:
+                rom._port_wave_impedance_func = ps.get_port_wave_impedance
             rom.port_modes = solver.port_modes
         else:
             rom.mesh = None
@@ -1096,12 +1203,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         rom._A_r = {}
         rom._B_r = {}
         rom._Q_L_inv = {}
+        rom._C, rom._D = {}, {}
+        rom._C_r, rom._D_r = {}, {}
         rom._singular_values = {}
 
         # 1. Load matrices from modular files or legacy matrices.h5
         mat_path = path / "matrices"
         if mat_path.exists():
-             for mname in ["A_r", "B_r", "W", "Q_L_inv"]:
+             for mname in ["A_r", "B_r", "W", "Q_L_inv", "C_r", "D_r"]:
                  target_dict = getattr(rom, f"_{mname}")
                  mfile_agg = mat_path / f"{mname}.h5"
                  
@@ -1225,7 +1334,13 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         omegas = 2 * np.pi * self.frequencies  # (n_freq,)
 
-        if solver_type in ('auto', 'direct'):
+        C_r = self._C_r.get(domain)
+        D_r = self._D_r.get(domain)
+        if C_r is not None or D_r is not None:
+            # Lossy: no common eigenbasis -> one small dense solve per frequency
+            self._Z_matrix, x_r_all = _lossy_reduced_solve(
+                A_r, C_r, D_r, B_r, omegas)
+        elif solver_type in ('auto', 'direct'):
             # ============================================================
             # Eigendecomposition approach (fast for reduced systems)
             # A = V Λ V^{-1}  →  (A - ω²I)^{-1} = V diag(1/(λ-ω²)) V^{-1}
@@ -1249,10 +1364,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             for k in range(n_freq):
                 self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ Vinv_B
 
-            # Snapshots: x_r[k] = ω V diag(d[k]) V^{-1} B
-            x_r_all = []
-            for k in range(n_freq):
-                x_r_all.append(omegas[k] * V @ (d[k, :, None] * Vinv_B))
+            # Snapshots: x_r[k] = w V diag(d[k]) V^{-1} B
+            x_r_all = [omegas[k] * V @ (d[k, :, None] * Vinv_B)
+                       for k in range(n_freq)]
 
         else:
             # ============================================================
@@ -1358,6 +1472,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             Q_L_inv=self._Q_L_inv[domain],
             fes=fes,
             mesh=mesh,
+            Crd=self._C_r.get(domain),
+            Drd=self._D_r.get(domain),
         )
         # Attach interface fit-check metadata (per-mode fingerprint + training
         # band) so both live and imported structures validate the same way.
@@ -1429,6 +1545,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             structures=structures,
             mesh=self.mesh,
             port_impedance_func=self._port_impedance_func,
+            port_wave_impedance_func=getattr(
+                self, '_port_wave_impedance_func', None),
             solver_ref=self,
         )
         concat.define_connections(connections)
@@ -1509,6 +1627,32 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         n_modes = self._n_modes_per_port or 1
         results = {}
 
+        # The reduced matrices are tiny; MKL's multithreaded LAPACK is roughly
+        # 900x SLOWER than single-threaded at this size (thread setup dominates).
+        try:
+            from threadpoolctl import threadpool_limits
+            _blas_limit = threadpool_limits(limits=1, user_api='blas')
+        except Exception:
+            _blas_limit = None
+
+        try:
+            results = self._solve_per_domain_inner(
+                frequencies, n_modes, results)
+        finally:
+            if _blas_limit is not None:
+                _blas_limit.unregister()
+        return results
+
+    def _domain_port_mode_pairs(self, domain: str, n_modes: int):
+        """Ordered ``(local_port_idx, port, mode)`` matching B_r's columns."""
+        pairs = []
+        for pidx, p in enumerate(self.domain_port_map[domain]):
+            modes = (sorted(self.port_modes[p]) if self.port_modes and p in self.port_modes
+                     else range(n_modes))
+            pairs.extend((pidx, p, m) for m in modes)
+        return pairs
+
+    def _solve_per_domain_inner(self, frequencies, n_modes, results):
         for domain in self.domains:
             A_r = self._A_r[domain]
             B_r = self._B_r[domain]
@@ -1524,37 +1668,75 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             S_d = np.zeros((n_freq, n_pm, n_pm), dtype=complex)
 
             I_exc = np.eye(n_pm)
+            # (port, mode) of each B_r column: ports in order, each with its
+            # own sorted modes (ports may carry different mode counts).
+            pm_order = self._domain_port_mode_pairs(domain, n_modes)
+            if len(pm_order) != n_pm:
+                raise ValueError(
+                    f"Domain '{domain}': B_r has {n_pm} columns but its ports "
+                    f"carry {len(pm_order)} modes {pm_order}.")
+
+            # A_r is small (r ~ 100), so diagonalise ONCE and evaluate every
+            # frequency with a diagonal solve:
+            #     (A - w^2 I)^-1 = V diag(1/(lam - w^2)) V^-1
+            # Re-factorising per frequency cost 1500 x r^3 and, because MKL's
+            # threaded path is ~900x slower than single-threaded at this size,
+            # turned a sub-second sweep into ~7 minutes.
+            C_r = self._C_r.get(domain)
+            D_r = self._D_r.get(domain)
+            lossy = C_r is not None or D_r is not None
+            if lossy:
+                Z_lossy, _ = _lossy_reduced_solve(
+                    A_r, C_r, D_r, B_r, 2 * np.pi * np.asarray(frequencies))
+            elif np.allclose(A_r, A_r.T.conj(), atol=1e-10):
+                lam, V = np.linalg.eigh(A_r)
+                Vinv_B = V.T.conj() @ (B_r @ I_exc)
+            else:
+                lam, V = np.linalg.eig(A_r)
+                Vinv_B = np.linalg.solve(V, B_r @ I_exc)
 
             for k, freq in enumerate(frequencies):
                 omega = 2 * np.pi * freq
 
-                lhs = A_r - omega ** 2 * np.eye(r)
-                rhs = omega * B_r @ I_exc
+                if lossy:
+                    Z_d[k] = Z_lossy[k]
+                else:
+                    # x_r = w V diag(1/(lam - w^2)) V^-1 B
+                    x_r = omega * (V @ (Vinv_B / (lam - omega ** 2)[:, None]))
+                    Z_d[k] = 1j * B_r.T @ x_r
 
-                x_r = np.linalg.solve(lhs, rhs)
-
-                Z_d[k] = 1j * B_r.T @ x_r
-
-                # Build impedance matrix for all port-mode combinations
-                Z0_diag = []
-                for p_idx, p in enumerate(domain_ports):
-                    for m in range(n_modes):
-                        Z0_diag.append(
-                            np.real(self._get_port_impedance(p, m, freq))
-                        )
-                Z0_mat = np.diag(Z0_diag)
+                # Reference impedances -- complex, exactly as the FOM path uses
+                # them.  Taking the real part zeroed the (purely reactive)
+                # reference of every evanescent TE/TM mode.
+                Z0_mat = np.diag([self._get_port_impedance(p, m, freq)
+                                  for (_pi, p, m) in pm_order])
+                # The reduced Z inherits the FOM's WAVE-impedance
+                # normalisation. Where the reported reference differs (TEM
+                # ports report the line impedance), rescale Z with it:
+                # z_to_s(a*Z, a*Z0) == z_to_s(Z, Z0), so S is unchanged while
+                # Z becomes physical ohms -- matching the FOM path.
+                wf = getattr(self, '_port_wave_impedance_func', None)
+                if wf is not None:
+                    sc = []
+                    for (_pi, p, m) in pm_order:
+                        try:
+                            zw = abs(wf(p, m, freq))
+                            zt = abs(self._get_port_impedance(p, m, freq))
+                            sc.append(zt / zw if zw > 1e-12 else 1.0)
+                        except Exception:
+                            sc.append(1.0)
+                    sc = np.asarray(sc, dtype=float)
+                    if not np.allclose(sc, 1.0):
+                        Z_d[k] = Z_d[k] * np.sqrt(np.outer(sc, sc))
                 S_d[k] = ParameterConverter.z_to_s(Z_d[k], Z0_mat)
 
-            # Build dicts with proper port(mode) keys
+            # Dicts keyed '<excitation>(mode)<response>(mode)' (column first),
+            # the convention of every other result object.
             Z_dict = {}
             S_dict = {}
-            for i in range(n_pm):
-                pi = i // n_modes + 1
-                mi = i % n_modes + 1
-                for j in range(n_pm):
-                    pj = j // n_modes + 1
-                    mj = j % n_modes + 1
-                    key = f'{pi}({mi}){pj}({mj})'
+            for i, (pi, _p, mi) in enumerate(pm_order):
+                for j, (pj, _q, mj) in enumerate(pm_order):
+                    key = f'{pj + 1}({mj + 1}){pi + 1}({mi + 1})'
                     Z_dict[key] = Z_d[:, i, j]
                     S_dict[key] = S_d[:, i, j]
 
@@ -1905,7 +2087,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             field_cf = E_gf
             field_label = "E"
         elif field_type == 'H':
-            field_cf = (1 / (1j * omega * mu0)) * curl(E_gf)
+            # Faraday, e^{+jwt}: curl E = -j w mu0 H  =>  H = j curl(E) / (w mu0)
+            field_cf = (1j / (omega * mu0)) * curl(E_gf)
             field_label = "H"
         else:
             raise ValueError(f"Invalid field_type: {field_type}. Use 'E' or 'H'.")
@@ -2219,7 +2402,8 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
         The reduced structures and a standalone port wave-impedance function
         rebuilt from the persisted analytic parameters (``None`` if absent).
     """
-    from cavsim3d.solvers.ports import make_analytic_port_impedance
+    from cavsim3d.solvers.ports import (make_analytic_port_impedance,
+                                        make_analytic_port_wave_impedance)
 
     rom_dir = Path(rom_dir)
     meta_file = rom_dir / "structures.json"
@@ -2241,6 +2425,8 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
     top_imp = meta.get("impedance")
     structures = []
     impedance_func = make_analytic_port_impedance(top_imp) if top_imp else None
+    wave_func = (make_analytic_port_wave_impedance(top_imp)
+                 if top_imp else None)
     for sm in meta["structures"]:
         d = sm["domain"]
         W = None
@@ -2251,6 +2437,9 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
             W = _load_matrix(wf)
         if qf.exists():
             Q = _load_matrix(qf)
+        cf_, df_ = mat / f"C_r_{d}.h5", mat / f"D_r_{d}.h5"
+        C_r = _load_matrix(cf_) if cf_.exists() else None
+        D_r = _load_matrix(df_) if df_.exists() else None
         port_modes = {p: {int(m): None for m in sm["port_modes"][p]}
                       for p in sm["port_modes"]}
         struct = ReducedStructure(
@@ -2259,7 +2448,7 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
             ports=list(sm["ports"]), port_modes=port_modes, domain=d,
             r=sm["r"], n_full=sm["n_full"],
             is_full_order=sm.get("is_full_order", False),
-            W=W, Q_L_inv=Q, fes=fes, mesh=mesh,
+            W=W, Q_L_inv=Q, fes=fes, mesh=mesh, Crd=C_r, Drd=D_r,
         )
         # Interface fit-check metadata: per (port, mode) fingerprint {kc,type,
         # indices,pol} keyed by int mode, and the ROM training band.
@@ -2272,6 +2461,8 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
         sm_imp = sm.get("impedance")
         struct.impedance_func = (make_analytic_port_impedance(sm_imp)
                                  if sm_imp else impedance_func)
+        struct.wave_impedance_func = (make_analytic_port_wave_impedance(sm_imp)
+                                      if sm_imp else wave_func)
         structures.append(struct)
 
     return structures, impedance_func

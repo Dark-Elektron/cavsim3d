@@ -77,7 +77,23 @@ class MicrostripLine(BaseGeometry):
         self.build()
         self.generate_mesh(maxh=maxh)
         self._record('__init__', L=L, W=W, w=w, h=h, t=t,
-                     air_height=air_height, eps_r=eps_r, maxh=maxh)
+                     air_height=air_height, eps_r=eps_r,
+                     substrate_name=substrate_name, maxh=maxh)
+
+    @classmethod
+    def _rebuild_from_history(cls, history: List[dict], project_path: Path,
+                              source_file=None) -> 'MicrostripLine':
+        """Reconstruct from the recorded constructor arguments (+ later ops)."""
+        ops = [e.get('op') for e in history]
+        if '__init__' not in ops:
+            raise ValueError("MicrostripLine history has no '__init__' entry.")
+        i0 = ops.index('__init__')
+        params = {k: v for k, v in history[i0].items()
+                  if k not in ('op', 'timestamp')}
+        obj = cls(**params)
+        for entry in history[i0 + 1:]:
+            obj._replay_common_op(entry)
+        return obj
 
     # ------------------------------------------------------------------
     def build(self) -> None:

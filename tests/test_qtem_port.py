@@ -10,15 +10,11 @@ from cavsim3d.solvers.ports import (
     group_port_faces, sorted_logical_ports, logical_port_name,
 )
 
-# EXCLUDED FROM CI (-m "not qtem"). The microstrip qTEM port solve fails on
-# macOS: ArnoldiSolver factorises (a - shift*m), and that matrix is singular
-# ("UMFPACK V5.7.4: WARNING: matrix is singular"). PARDISO, used on Linux and
-# Windows, hides this by perturbing tiny pivots; macOS has only UMFPACK, which
-# reports it honestly. Retargeting the shift to k0^2*eps_max did NOT help, so
-# the singularity is structural in the mixed HCurl x H1 formulation rather
-# than a conditioning problem. Needs a real fix (constrain the null space);
-# until then these run locally but are deselected in CI.
-pytestmark = pytest.mark.qtem
+# The qTEM eigenproblem used to be singular: fesEt is built with
+# definedon=port_region, so FreeDofs() handed ArnoldiSolver thousands of
+# identically-zero rows, and the shift sat exactly on the eigenvalue for a
+# homogeneous cross-section. Both are fixed in _solve_port_qtem; an
+# air-filled coax now returns eps_eff = 1.000000 (0.000% error).
 
 
 def test_logical_port_name():

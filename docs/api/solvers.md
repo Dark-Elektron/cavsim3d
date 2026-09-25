@@ -2,7 +2,7 @@
 
 ## Frequency Domain Solver
 
-`FrequencyDomainSolver` is the main solver class. It assembles the FEM system matrices, solves the frequency-domain Maxwell equations, and extracts S/Z-parameters. For multi-domain (compound) structures it supports both per-domain and globally-coupled solve strategies.
+`FrequencyDomainSolver` is the main solver class. It assembles the FEM system matrices, solves the frequency-domain Maxwell equations, and extracts S/Z-parameters. For multi-domain (compound) structures it solves either each domain on its own (`per_domain=True`, the input to the ROM stage) or the whole mesh as one coupled system.
 
 ::: cavsim3d.solvers.frequency_domain.FrequencyDomainSolver
     options:
@@ -10,7 +10,6 @@
         - __init__
         - assemble_matrices
         - solve
-        - compare_methods
         - reset
         - full_reset
         - save
@@ -26,7 +25,6 @@
         - foms
         - get_domain_results
         - get_all_domain_results
-        - get_cascaded_results
         - get_coupled_results
         - get_s_at_frequency
         - get_z_at_frequency
@@ -58,7 +56,6 @@
         - plot_z_parameters
         - plot_domain_s_parameters
         - plot_s_parameters_comparison
-        - plot_method_comparison
         - plot_port_mode
         - plot_field
       show_root_heading: false
