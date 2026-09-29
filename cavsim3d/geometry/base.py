@@ -18,13 +18,20 @@ from .component_registry import (
 )
 
 
+#: Largest standalone scene (bytes) embedded as a static fallback; a larger one
+#: (fields on meshes of ~50k elements and up) would bloat the notebook by tens
+#: of megabytes, so a short note is embedded instead.
+WEBGUI_FALLBACK_MAX_BYTES = 8_000_000
+
+
 def _display_webgui_fallback(scene):
     """Add a hidden HTML fallback for static documentation rendering.
 
     Generates a standalone WebGUI HTML viewer and attaches it as a hidden
     cell output.  In live Jupyter the widget renders normally; in MkDocs
     the CSS rule ``.webgui-fallback { display: block !important }`` reveals
-    the fallback while the plain-text widget repr is hidden.
+    the fallback while the plain-text widget repr is hidden.  Scenes larger
+    than :data:`WEBGUI_FALLBACK_MAX_BYTES` get a note instead of a copy.
     """
     if scene is None:
         return
@@ -32,6 +39,13 @@ def _display_webgui_fallback(scene):
         import html as _html_mod
         from IPython.display import display, HTML
         html_content = scene.GenerateHTML()
+        if len(html_content) > WEBGUI_FALLBACK_MAX_BYTES:
+            display(HTML(
+                '<div class="webgui-fallback" style="display:none"><p><em>'
+                f'This 3D view ({len(html_content) / 1e6:.0f} MB) is too large to '
+                'embed in a static page. Run the notebook to see it.</em></p></div>'
+            ))
+            return
         escaped = _html_mod.escape(html_content)
         display(HTML(
             f'<div class="webgui-fallback" style="display:none">'
@@ -41,6 +55,31 @@ def _display_webgui_fallback(scene):
         ))
     except Exception:
         pass
+
+
+def _curve_with_fallback(mesh, order: int) -> int:
+    """Curve *mesh* to *order*, else to the highest lower order that works.
+
+    OCC's point projection can fail on imported CAD edges at order 3
+    (``GeomAPI_ProjectPointOnCurve::NearestPoint``) where order 2 works.
+    Returns the order used and warns when it is lower than asked.
+    """
+    try:
+        mesh.Curve(order)
+        return order
+    except Exception as exc:
+        error = exc
+    for k in range(int(order) - 1, 0, -1):
+        try:
+            mesh.Curve(k)
+        except Exception:
+            continue
+        warnings.warn(
+            f"Curving the mesh to order {order} failed ({error}); it is curved to "
+            f"order {k} instead. Pass curve_order={k} to generate_mesh() to ask "
+            f"for that directly.", UserWarning, stacklevel=3)
+        return k
+    raise error
 
 
 class BaseGeometry(ABC, TaggableMixin):
@@ -199,13 +238,14 @@ class BaseGeometry(ABC, TaggableMixin):
         else:
             self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(curvaturesafety=curvaturesafety))
 
-        self.mesh.Curve(curve_order)
+        self.curve_order = _curve_with_fallback(self.mesh, curve_order)
         # Port/boundary lists are cached from the mesh; a new mesh invalidates them.
         self._ports = None
         self._boundaries = None
         self.invalidate_tag()  # Mesh changed
 
-        self._record('generate_mesh', maxh=maxh, curve_order=curve_order)
+        self._record('generate_mesh', maxh=maxh, curve_order=curve_order,
+                     curvaturesafety=curvaturesafety)
         return self.mesh
 
     def _warn_if_maxh_non_binding(self, maxh: float) -> None:
@@ -291,7 +331,8 @@ class BaseGeometry(ABC, TaggableMixin):
             return True
         if op == 'generate_mesh':
             self.generate_mesh(maxh=entry.get('maxh'),
-                               curve_order=entry.get('curve_order', 3))
+                               curve_order=entry.get('curve_order', 3),
+                               curvaturesafety=entry.get('curvaturesafety', 2))
             return True
         if op == 'set_local_mesh_refinement':
             self.set_local_mesh_refinement(entry['pattern'], entry['maxh'])
@@ -655,6 +696,7 @@ class BaseGeometry(ABC, TaggableMixin):
         # Lazy import to ensure all standard subclasses are registered if not already
         try:
             from . import primitives
+            from . import axisymmetric
             from . import importers
             from . import assembly
         except (ImportError, ValueError):

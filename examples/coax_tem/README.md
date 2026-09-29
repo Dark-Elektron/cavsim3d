@@ -18,7 +18,7 @@ need no STEP file and no external reference data.
 | file | what it checks | result |
 |---|---|---|
 | `coax_tem_analytic.py` | analytic TEM port path: S-parameters vs closed form | **passes** — see below |
-| `coax_z_reference.py` | which reference impedance Z is expressed in | explains the CST Z offset |
+| `coax_z_reference.py` | which reference impedance Z is expressed in | Z matches the exact line Z (CST's reference) |
 | `coax_qtem_singularity.py` | the qTEM eigenproblem on a homogeneous cross-section | diagnoses + fixes the singularity |
 
 ## 1. The TEM port path is correct
@@ -36,37 +36,27 @@ Detection, the analytic TEM mode, the port basis and the Z->S conversion are all
 sound. A homogeneous coax never touches the Arnoldi solver — it uses the
 closed-form modes from `_generate_coaxial_modes`.
 
-## 2. Z is referenced to the WAVE impedance, not the line impedance
+## 2. Z is referenced to the LINE impedance of the TEM mode, as in CST
 
-This is the reason cavsim3d S-parameters can agree with CST while the
-Z-parameters sit at a constant offset. `coax_z_reference.py` measures it:
+The port modes are normalised to their wave impedance, and Z is then rescaled to
+the reference CST reports: the **line impedance for a TEM mode** (and the
+power-voltage line impedance `Z_PV` for a quasi-TEM one), the **wave impedance
+for every TE/TM mode**, the TE11 modes of a coaxial port included. Rescaling Z
+and the reference together leaves S unchanged, so S does not depend on the
+choice; Z does. `coax_z_reference.py`:
 
 ```
-reference used for S  = 376.730 ohm      (modal wave impedance)
-Z0 analytic (line)    =  49.940 ohm
-|Z21|cav / |Z21|exact = 7.49 .. 7.57     (constant across frequency)
-376.730 / 49.940      = 7.543
+Z0 analytic (line)    = 49.940 ohm
+reference used for S  = 49.937 ohm       (line impedance, radii fitted from the mesh)
+|Z21|cav / |Z21|exact = 0.995 .. 1.003
 ```
 
-For a **uniform** through-line there is no impedance step, so S is essentially a
-pure phase whichever common reference is used — S is insensitive to the choice.
-Z scales linearly with it, so it is not.
+Near beta*L = n*pi/2 (1.5, 3.0, 4.5 GHz here) the analytic cot / 1/sin are
+singular, so relative errors there are the formula blowing up, not solver error.
 
-To compare Z against a tool that references the line impedance (CST does),
-renormalise through S:
-
-```python
-from cavsim3d.solvers.base import ParameterConverter
-Z_cmp = ParameterConverter.s_to_z(S_cavsim3d, Z0_line)
-```
-
-which reproduces the exact line Z to **0.45-0.9%**. (Near beta*L = n*pi/2 the
-analytic cot / 1/sin are singular, so relative errors there are the formula
-blowing up, not solver error.)
-
-Note `get_port_wave_impedance` already returns the power-voltage line impedance
-`Z_PV` for **quasi-TEM** ports, specifically to match CST. TE/TM/TEM ports fall
-through to the wave impedance.
+`impedance_reference="wave"` in the solve config refers TEM modes to the wave
+impedance instead (376.730 ohm in air); Z then comes out 376.730 / 49.940 = 7.54
+times larger.
 
 ## 3. The qTEM eigenproblem: singularity, cause and fix
 

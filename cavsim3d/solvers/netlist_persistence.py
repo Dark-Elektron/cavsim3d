@@ -178,7 +178,174 @@ def stage_rom(source_project: Path, domain: str, project_root: Path) -> dict:
         sm["band"] = meta.get("band")
     if "impedance" not in sm:
         sm["impedance"] = meta.get("impedance")
+    if not sm.get("port_geometry"):
+        pg = port_geometry_from_project(source_project, sm.get("ports", []))
+        if pg:
+            sm["port_geometry"] = pg
     return sm
+
+
+def port_geometry_from_project(project: Path, ports) -> dict:
+    """Port centres/normals from a project's saved port modes, or ``{}``.
+
+    Reduced models saved before port positions were recorded still have them
+    in ``fds/port_modes/port_modes.pkl`` (plain lists, no mesh needed).
+    """
+    import pickle
+    f = Path(project) / "fds" / "port_modes" / "port_modes.pkl"
+    if not f.exists():
+        return {}
+    try:
+        with open(f, "rb") as fh:
+            data = pickle.load(fh)
+    except Exception:
+        return {}
+    out = {}
+    for p in ports:
+        g = (data.get("port_geometries") or {}).get(p)
+        if not g:
+            continue
+        out[p] = {k: g.get(k) for k in ("center", "normal", "type", "radius",
+                                        "inner_radius", "a", "b")}
+    return out
+
+
+def _relpath(target: Path, start: Path) -> str:
+    """``target`` relative to ``start`` when possible (else absolute)."""
+    import os
+    try:
+        return os.path.relpath(Path(target).resolve(), Path(start).resolve())
+    except ValueError:                       # different drives on Windows
+        return str(Path(target).resolve())
+
+
+def reference_rom(source_project: Path, domain: str, project_root: Path) -> dict:
+    """Structure entry that READS a section's ROM from its source project.
+
+    Nothing is copied: the entry records where the source's reduced matrices
+    and mesh live (relative to this project's ``fds/foms/roms`` when possible)
+    and the source's own domain name, and carries the same fingerprints/band/
+    impedance metadata as a copied entry.
+    """
+    source_project = Path(source_project)
+    if not source_project.exists():
+        raise FileNotFoundError(
+            f"Referenced project not found: {source_project}. Restore it, point the "
+            "part at its new location (proj.import_project(new_path, name=...) "
+            "replaces the part), or keep a copy with proj.localize() while the "
+            "source is still available.")
+    roms_dir = Path(project_root) / "fds" / "foms" / "roms"
+    rom = find_rom_dir(source_project)
+    with open(rom / "structures.json") as fh:
+        meta = json.load(fh)
+    if not meta.get("structures"):
+        raise ValueError(f"Empty structures.json in {rom}")
+    _require_single_section(rom / "structures.json", "structures", source_project)
+    sm = dict(meta["structures"][0])
+    sm["source_domain"] = sm["domain"]
+    sm["domain"] = domain
+    sm["source_rom_dir"] = _relpath(rom, roms_dir)
+    if (source_project / "mesh").exists():
+        sm["source_mesh_dir"] = _relpath(source_project / "mesh", roms_dir)
+    if "fingerprints" not in sm:
+        sm["fingerprints"] = meta.get("fingerprints", {})
+    if "band" not in sm:
+        sm["band"] = meta.get("band")
+    if "impedance" not in sm:
+        sm["impedance"] = meta.get("impedance")
+    if not sm.get("port_geometry"):
+        pg = port_geometry_from_project(source_project, sm.get("ports", []))
+        if pg:
+            sm["port_geometry"] = pg
+    return sm
+
+
+def reduce_source_into(source_project: Path, work: Path, tol: float,
+                       max_rank=None) -> Path:
+    """Reduce a source project's full-order results into ``work``.
+
+    The source is loaded read-only: every write (log, ROM files) is pointed at
+    ``work``, which afterwards looks like a project holding the ROM
+    (``work/fds/fom/rom``), ready for :func:`stage_rom`.
+    """
+    from cavsim3d.core.em_project import EMProject
+    source_project = Path(source_project)
+    proj = EMProject(name=source_project.name, base_dir=str(source_project.parent))
+    fds = proj.fds
+    if getattr(fds, "is_compound", False):
+        raise ValueError(f"Cannot reduce '{source_project}' as one part: it is a "
+                         "multi-solid project. Import its solids individually.")
+    fds._project_path = str(work)          # all writes go to the scratch folder
+    fds._project_ref = None
+    (Path(work) / "fds" / "fom").mkdir(parents=True, exist_ok=True)
+    fds.fom.reduce(tol=tol, max_rank=max_rank)
+    pm = Path(source_project) / "fds" / "port_modes"
+    if pm.exists():                          # port positions for the joins
+        shutil.copytree(pm, Path(work) / "fds" / "port_modes", dirs_exist_ok=True)
+    return Path(work)
+
+
+def write_imports(project_root: Path, imports: dict) -> None:
+    """Record the imported sections in ``fds/imports.json``.
+
+    ``{section: {"source": <path>, "mode": "reference"|"copy",
+    "fingerprint": <hash>}}``.  Read back to reuse a copied section's local
+    files, and on load to report a referenced source that moved or changed.
+    """
+    fds_dir = Path(project_root) / "fds"
+    fds_dir.mkdir(parents=True, exist_ok=True)
+    f = fds_dir / "imports.json"
+    if not imports:
+        if f.exists():
+            f.unlink()
+        return
+    stored = {name: {"source": _relpath(r["source"], project_root),
+                     "mode": r.get("mode", "copy"),
+                     "fingerprint": r.get("fingerprint")}
+              for name, r in imports.items()}
+    with open(f, "w") as fh:
+        json.dump(stored, fh, indent=2)
+
+
+def read_imports(project_root: Path) -> dict:
+    """``fds/imports.json`` with each source resolved to an absolute path."""
+    f = Path(project_root) / "fds" / "imports.json"
+    if not f.exists():
+        return {}
+    with open(f) as fh:
+        stored = json.load(fh)
+    for r in stored.values():
+        src = Path(r["source"])
+        r["source"] = str(src if src.is_absolute()
+                          else (Path(project_root) / src).resolve())
+    return stored
+
+
+def has_local_copy(project_root: Path, domain: str) -> bool:
+    """True if a section's full-order files were copied into this project."""
+    return (Path(project_root) / "fds" / "foms" / "matrices" / f"K_{domain}.h5").exists()
+
+
+def check_references(project_root: Path) -> list:
+    """Messages for referenced sections whose source is missing or changed."""
+    from cavsim3d.core.reuse import ImportedModel
+    problems = []
+    for name, r in read_imports(project_root).items():
+        if r.get("mode") != "reference":
+            continue                      # copies stand on their own
+        src = Path(r["source"])
+        if not src.exists():
+            problems.append(f"part '{name}': referenced project missing ({src})")
+            continue
+        try:
+            fp = ImportedModel(src, mode="reference").fingerprint()
+        except FileNotFoundError:
+            problems.append(f"part '{name}': nothing left to import in {src}")
+            continue
+        if r.get("fingerprint") and fp != r["fingerprint"]:
+            problems.append(f"part '{name}': {src.name} changed since this project "
+                            "was solved")
+    return problems
 
 
 def write_flat_structures(project_root: Path, entries: list) -> None:

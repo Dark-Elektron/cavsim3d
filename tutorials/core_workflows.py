@@ -7,7 +7,25 @@ THIS FILE IS THE ALWAYS-CURRENT REFERENCE FOR HOW THE CORE PIECES CONNECT.
 It MUST be updated whenever core functionality changes or a new core feature
 is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
-Last updated: 2026-09-24 (lossy materials via geo.set_materials, numeric port
+Last updated: 2026-09-28 (R/Q of eigenmodes -- end of section 1d; loaded and
+external Q of resonances -- section 1e; a coaxial port's TE/TM modes are referred to
+their own wave impedance, the TEM mode to the line impedance; a single-part
+ROM resolves ports with different mode counts.  Before that: bodies of
+revolution: the cavsim2d models --
+EllipticalCavity, RFGun, Pillbox, ... -- as primitives, revolved about Z --
+section 1d.  Before that: port modes with equal cutoffs, e.g. TE20/TE01 when
+a = 2b, are numbered alike on every port -- section 5; a reopened project's
+solve() returns its stored S and Z.  Before that (2026-09-26): solve setting
+nedelec='first' for first-kind
+Nedelec elements -- next to FOM_CFG.  Before that: an interrupted solve() resumes from the samples
+already written to fds/checkpoint/ -- section 1.  Before that: a project
+holds a LIST OF PARTS -- import_geometry /
+create_primitive / import_project / add, same name replaces, n= repeats, chained
+along proj.main_axis (Z unless set, printed at meshing); mesh strategy glued vs
+coupled; joins use the ports that face each other; import_project(mode=
+'reference' | 'copy') + localize(); solve() prints a plan and computes what an
+imported part lacks INTO THIS project -- sections 2-4a, 5).  Before that
+(2026-09-24): lossy materials via geo.set_materials, numeric port
 modes — section 1c; solve(rerun=None) recomputes
 automatically when the request changed; FOM eigenfrequencies — section 1;
 port modes identical on both faces of a join; multi-solid projects refused as
@@ -34,18 +52,33 @@ inspectable, persisted object:
     proj.fds.foms.roms.concat.rom         # further reduction of the coupled system
     proj.fds.foms.concatenate()           # FOM-level concat: allowed, but WARNS
 
-The :class:`Assembly` is a PASSIVE NETLIST — it never computes.  It holds the
-components, how they connect, and repeat counts (``asm.add(name, comp, n=8)``,
-default n=1).  Components may be geometry objects, sub-assemblies, or models
-IMPORTED from already-run projects:
+A project holds a LIST OF PARTS, added one by one:
 
-    imported = proj.fds.import_model("path/to/earlier_project")
-    asm.add("hom", imported, after="cavity")
+    proj.import_geometry("cell.step", name="cell", unit="mm")   # CAD file
+    proj.create_primitive("rwg", name="taper", a=..., L=...)     # primitive
+    proj.create_primitive("elliptical_cavity", name="cav", ...)  # cavsim2d model
+    proj.import_project("path/to/earlier_project", name="hom")   # solved project
+    proj.add("module", some_assembly)                            # anything else
 
-(the method is ``import_model`` because ``import`` is a reserved Python
-keyword).  Saved FOM/ROM/concat artifacts are PORTABLE ("IKEA screws"): each
-lives in its project folder and is loaded — never recomputed — wherever it is
-referenced.  Compatibility at a joint is a CHECKED CONDITION, not ownership:
+The same name REPLACES a part (re-running a cell does not double the model);
+``n=8`` repeats a part.  With one part, the project's geometry is that part;
+with more, the parts are chained in list order along ``proj.main_axis`` (Z
+unless set -- meshing prints the chain) by an :class:`Assembly`, which stays a
+PASSIVE NETLIST: it never computes.  (The method is ``import_project``, not
+``import``: that is a reserved Python keyword.)
+
+Parts are either GLUED into one conformal mesh (plain geometry, each once) or
+COUPLED through their port modes (a part is imported or repeated) -- the mesh
+summary says which; ``asm.set_mesh_strategy('glued'|'coupled')`` overrides.
+Coupled parts join through the ports that FACE each other along the axis.
+
+An imported project is REFERENCED by default (its saved results are read where
+they are) or COPIED (``mode='copy'``, the project then stands alone;
+``proj.localize()`` converts references later).  The source is NEVER written:
+``solve()`` prints a plan -- reuse / reduce / recompute -- and anything an
+imported part lacks (a reduced model, a wider band, more port modes) is
+computed INTO THIS project.  Compatibility at a joint is a CHECKED CONDITION,
+not ownership:
   * port-mode COUNTS must match at connected interfaces (error),
   * per-mode FINGERPRINTS must correspond — type, modal indices, cutoff kc
     (i.e. cross-section dimensions), polarization (error; polarization matters
@@ -69,6 +102,12 @@ from cavsim3d.geometry.primitives import RectangularWaveguide
 WORK = Path(tempfile.mkdtemp(prefix="cavsim3d_tutorial_"))
 A, B_, L, MAXH = 0.1, 0.05, 0.06667, 0.06
 FOM_CFG = dict(fmin=1.8, fmax=2.4, nsamples=4, nportmodes=1, order=2)
+#   nedelec='first' (the default solve setting) builds every H(curl) space from
+#   first-kind Nedelec elements: the same curls as 'second' with ~1/3 fewer
+#   unknowns at order 2 (the count CST uses); saved with the project, a change
+#   recomputes.  With 'second' the direct solver stores and factorises the
+#   symmetric system matrix as symmetric (same speed, half the memory); with
+#   'first' the full matrix factorises faster.
 
 
 def banner(msg):
@@ -81,7 +120,8 @@ def banner(msg):
 banner("1. Single solid:  fds.solve() -> fds.fom.reduce() -> rom.solve()")
 
 proj = EMProject(name="single_rwg", base_dir=str(WORK), overwrite=True)
-proj.geometry = RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH)
+proj.create_primitive("rwg", name="guide", a=A, L=L, b=B_, maxh=MAXH)
+#   one part: the project's geometry IS that part (proj.parts -> {'guide': ...})
 
 proj.fds.solve(config=FOM_CFG)              # STAGE 1: full-order model
 fom = proj.fds.fom                          # the FOM artifact (persisted)
@@ -97,6 +137,10 @@ print(f"   ROM sweep: {res['Z'].shape[0]} frequency points, "
 # the request changed (sweep, order, nportmodes, port settings, materials,
 # geometry) -- solve(rerun=None), the default.  rerun=True forces a
 # recompute; rerun=False keeps whatever is stored.
+# An INTERRUPTED full-order sweep resumes: every finished sample is written to
+# fds/checkpoint/ as it completes, and calling solve() again with the same
+# request computes only the missing samples (also after reopening the project,
+# and for every part of a netlist -- see section 3).
 
 # Resonances of the FOM operator (K, M).  The port faces are natural
 # (magnetic-wall) boundaries, so a guide of length L resonates at
@@ -158,16 +202,119 @@ print(f"   |S21| ~ {abs(_S[25, 1, 0]):.3f}, power |S11|^2+|S21|^2 = "
       f"{abs(_S[25, 0, 0])**2 + abs(_S[25, 1, 0])**2:.3f} (< 1: the filling absorbs)")
 
 
+# --------------------------------------------------------------------------- #
+# 1d. BODIES OF REVOLUTION:  the cavsim2d models, revolved about Z             #
+# --------------------------------------------------------------------------- #
+banner("1d. Bodies of revolution:  create_primitive('elliptical_cavity', ...)")
+
+# The cavsim2d models keep their names AND constructor arguments (dimensions in
+# mm by default, as in cavsim2d -- unit='m' etc. to change it; maxh in metres):
+# EllipticalCavity, EllipticalCavityFlatTop, RFGun, Pillbox, SplineCavity,
+# Beampipe, BLA, Bellows, Taper (cavsim3d.geometry.axisymmetric).  Each builds
+# its meridian as a Profile and revolves it about Z: every beam aperture is a
+# port (port1 at low z), the rest is the PEC wall 'default' -- so the part
+# enters the SAME pipeline as any other.  Arguments may come as one dict,
+# config={...}.  The part is built WITHOUT a mesh: generate_mesh() makes it
+# (else the first solve, with the part's own maxh).  kind = class name or
+# snake case; a new shape needs only a profile() method.
+TESLA = [42, 42, 12, 19, 35, 57.7, 103.353]          # A, B, a, b, Ri, L, Req [mm]
+proj_ax = EMProject(name="tesla_cell", base_dir=str(WORK), overwrite=True)
+cell = proj_ax.create_primitive("elliptical_cavity", name="cell",
+                                config=dict(n_cells=1, mid_cell=TESLA, beampipe="both"))
+proj_ax.generate_mesh(maxh=0.04)
+print(f"   {type(cell).__name__}: ports {sorted(cell.ports)}, {cell.mesh.ne} elements")
+res_ax = proj_ax.fds.solve(config=dict(fmin=1.2, fmax=1.4, nsamples=3, nportmodes=1,
+                                       order=2, solver_type='direct'))
+print(f"   |S21| at 1.2/1.3/1.4 GHz [dB]: "
+      f"{np.round(20 * np.log10(abs(res_ax['S'][:, 1, 0])), 1)} "
+      f"(TE11 cutoff of the 35 mm pipe is 2.51 GHz: evanescent ports)")
+# Its (K, M) fundamental, proj_ax.fds.fom.get_resonant_frequencies(1), is
+# 1.2873 GHz -- cavsim2d's 2D solve of the same meridian gives 1.28739 GHz.
+
+# Figures of merit of an eigenmode: get_figures_of_merit(i) takes the mode index
+# of the spectrum listed last (full-order, reduced or joined model) and returns
+# cavsim2d's keys and units: R/Q = V^2/(w U) along the beam axis, Eacc over the
+# cavity's active length (2 L n_cells), peak surface fields, the wall Q and
+# G = Q_wall Rs (copper walls unless conductivity= / surface_resistance=),
+# Rsh, the transverse kick (Panofsky-Wenzel), and with lossy materials Q_diel.
+# Absolute values are for a stored energy of 1 J.  get_rq(i) gives R/Q alone,
+# get_cell_coupling(i_0, i_pi) the kcc of a multi-cell passband.
+f_ax = proj_ax.fds.get_resonant_frequencies(n_modes=1)
+fm_ax = proj_ax.fds.get_figures_of_merit(0)
+print(f"   TM010 {f_ax[0] / 1e9:.4f} GHz: R/Q = {fm_ax['R/Q [Ohm]']:.1f} Ohm, "
+      f"G = {fm_ax['G [Ohm]']:.1f} Ohm, Epk/Eacc = {fm_ax['Epk/Eacc []']:.2f}, "
+      f"Bpk/Eacc = {fm_ax['Bpk/Eacc [mT/MV/m]']:.2f} mT/(MV/m)")
+# cavsim2d on the same meridian: 117.7 Ohm, 269.6 Ohm, 1.76, 4.09.  This mesh
+# (maxh 0.04, order 2) is coarse; peak fields converge last (order 3, finer maxh).
+
+
+# --------------------------------------------------------------------------- #
+# 1e. LOADED RESONANCES:  rom.get_external_q() -> Q_L and Qext per port        #
+# --------------------------------------------------------------------------- #
+banner("1e. Loaded Q:  fds.fom.reduce(tol).get_external_q(fmin, fmax)")
+
+# The (K, M) resonances have magnetic walls at the ports: no power leaves.
+# get_external_q() terminates every port mode in its reference impedance (the
+# load the S-parameters assume) and solves the reduced model's loaded
+# eigenproblem: frequency, loaded Q and each port's external Q.  Pole residues
+# of the closed problem are NOT used -- a feed line or a strongly coupled
+# neighbour at the port changes Qext, here the guide stubs in front of the
+# irises.  Any geometry is a BaseGeometry with a build(): a guide, two irises.
+from cavsim3d.geometry.base import BaseGeometry
+from netgen.occ import Box, Pnt, Z as OCC_Z
+
+
+class IrisCavity(BaseGeometry):
+    """A 100 x 50 mm guide with two irises (20 mm windows) 100 mm apart."""
+
+    def build(self):
+        a, b, lin, lc, t, w = 0.10, 0.05, 0.06, 0.10, 0.003, 0.02
+        self.geo = Box(Pnt(0, 0, 0), Pnt(a, b, 2 * lin + lc + 2 * t))
+        for z0 in (lin, lin + t + lc):
+            self.geo -= (Box(Pnt(0, 0, z0), Pnt(a, b, z0 + t))
+                         - Box(Pnt((a - w) / 2, 0, z0), Pnt((a + w) / 2, b, z0 + t)))
+        for f in self.geo.faces:
+            f.name = "default"
+        self.geo.faces.Min(OCC_Z).name, self.geo.faces.Max(OCC_Z).name = "port1", "port2"
+        self.geo.mat("vacuum")
+        self.bc = "default"
+
+
+proj_q = EMProject(name="iris_cavity", base_dir=str(WORK), overwrite=True)
+proj_q.geometry = IrisCavity()
+proj_q.generate_mesh(maxh=0.02)
+proj_q.fds.solve(config=dict(fmin=1.9, fmax=2.3, nsamples=7, nportmodes=1, order=1))
+rom_q = proj_q.fds.fom.reduce(tol=1e-9)
+q = rom_q.get_external_q(fmin=1.9, fmax=2.3)      # also strongly damped stub modes
+k = int(np.argmax(q["Q_L"]))                      # the cavity mode
+f0, q_l = q["frequencies"][k], q["Q_L"][k]
+print(f"   cavity mode {f0 / 1e9:.4f} GHz: Q_L = {q_l:.0f}, "
+      f"Qext port1/port2 = {q['Qext']['port1'][k]:.0f}/{q['Qext']['port2'][k]:.0f}")
+# Q_L is the 3-dB width of |S21| (1/Q_L = 1/Qext1 + 1/Qext2):
+rom_q.solve(fmin=f0 * (1 - 3 / q_l) / 1e9, fmax=f0 * (1 + 3 / q_l) / 1e9, nsamples=3001)
+s21 = np.abs(np.asarray(rom_q.S_dict["1(1)2(1)"]))
+band = rom_q.frequencies[s21 >= s21.max() / np.sqrt(2)]
+print(f"   |S21| 3-dB width: Q_L = {f0 / (band[-1] - band[0]):.0f}")
+# The unloaded Q (copper walls) of the same mode, from its closed-problem index:
+fm_q = rom_q.get_figures_of_merit(int(q["mode_index"][k]))
+print(f"   unloaded Q = {fm_q['Q []']:.0f}, G = {fm_q['G [Ohm]']:.0f} Ohm")
+# get_external_q(), get_rq() and get_figures_of_merit() work the same way on a
+# joined model (roms.concatenate()): its coupled eigenproblem, with the parts
+# of a coupled chain laid end to end along the beam axis.
+
+
 # =========================================================================== #
 # 2. MULTI-SOLID MODEL (one glued mesh):  foms -> roms -> concat [-> rom]     #
 # =========================================================================== #
 banner("2. Multi-solid: fds.foms.reduce() -> roms.concatenate() [-> .reduce()]")
 
 proj2 = EMProject(name="multi_solid", base_dir=str(WORK), overwrite=True)
-asm_geo = proj2.create_assembly(main_axis="Z")       # assembly AS geometry
-asm_geo.add("h1", RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH))
-asm_geo.add("h2", RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH), after="h1")
-asm_geo.generate_mesh(maxh=MAXH)                     # ONE glued mesh
+proj2.create_primitive("rwg", name="h1", a=A, L=L, b=B_, maxh=MAXH)
+proj2.create_primitive("rwg", name="h2", a=A, L=L, b=B_, maxh=MAXH)
+#   a second part: the geometry becomes a chain h1 -> h2 along +Z
+proj2.generate_mesh(maxh=MAXH)
+#   prints "Main axis: Z (default)", the parts in order, and
+#   "Mesh strategy: glued" -- plain parts, each used once: ONE glued mesh
 
 proj2.fds.solve(config=dict(**FOM_CFG, per_domain=True,
                             store_snapshots=True, global_method=None))
@@ -184,13 +331,13 @@ print(f"   per-solid ROMs coupled: Z shape {res2['Z'].shape}")
 # =========================================================================== #
 # 3. REPEAT-N NETLIST — same pipeline, components computed ONCE               #
 # =========================================================================== #
-banner("3. Netlist repeat-N:  asm.add(geo, n=3) -> the SAME fds pipeline")
+banner("3. Netlist repeat-N:  create_primitive(..., n=3) -> the SAME fds pipeline")
 
 proj3 = EMProject(name="chain_module", base_dir=str(WORK), overwrite=True)
-asm3 = proj3.create_assembly(main_axis="Z")          # passive netlist
-asm3.add("cell", RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH), n=3)
-#        ^ 3 consecutive copies, computed ONCE (default n=1).
-#          Consecutive instances couple port2 -> port1.
+proj3.create_primitive("rwg", name="cell", n=3, a=A, L=L, b=B_, maxh=MAXH)
+#        ^ 3 consecutive copies, computed ONCE (default n=1).  A repeated part
+#          is COUPLED: consecutive copies join through the ports that face
+#          each other along the main axis.
 
 proj3.fds.solve(config=FOM_CFG)             # STAGE 1: FOM per UNIQUE section
 #   ONE fds, laid out exactly like a multi-solid project (a section == a
@@ -239,32 +386,47 @@ print(f"   reconstructed '{label3}' on {cmesh3.ne} elements")
 # =========================================================================== #
 # 4. IMPORT AN ALREADY-RUN PROJECT and mix it with new geometry               #
 # =========================================================================== #
-banner("4. Cross-project reuse:  proj.fds.import_model(path) -> asm.add(...)")
+banner("4. Cross-project reuse:  proj.import_project(path) -> the SAME pipeline")
 
 proj4 = EMProject(name="mixed_module", base_dir=str(WORK), overwrite=True)
-asm4 = proj4.create_assembly(main_axis="Z")
+proj4.create_primitive("rwg", name="fresh", a=A, L=L, b=B_, maxh=MAXH)
 
-# 'single_rwg' from section 1 is a campaign you ran earlier — import it:
-legacy = proj4.fds.import_model(str(WORK / "single_rwg"))
-legacy2 = proj4.fds.import_model(str(WORK / "single_rwg"))
-print(f"   {legacy}")                        # fail-fast handle: ports, band
+# 'single_rwg' from section 1 is a campaign you ran earlier -- import it twice:
+legacy = proj4.import_project(WORK / "single_rwg", name="legacy", n=2)
+print(f"   {legacy}")               # handle: mode, what it holds, ports, band
 
-asm4.add("fresh", RectangularWaveguide(a=A, L=L, b=B_, maxh=MAXH))
-asm4.add("legacy", legacy, after="fresh")    # imported model in the netlist
-asm4.add("legacy2", legacy2, after="legacy")    # imported model in the netlist
-
-proj4.fds.solve(config=FOM_CFG)              # runs 'fresh'; 'legacy' is loaded
+proj4.fds.solve(config=FOM_CFG)
+#   prints the solve plan: 'fresh' -> compute (full-order solve),
+#   'legacy' -> reuse (its reduced model fits the request)
 concat4 = proj4.fds.foms.reduce(tol=1e-9).concatenate()
 res4 = concat4.solve(config=dict(fmin=1.8, fmax=2.4, nsamples=100))
 print(f"   mixed netlist coupled: {len(concat4.structures)} sections, "
       f"|S21| ~ {abs(res4['S'][50, 1, 0]):.3f}")
-# Importing copies folder-to-matching-folder, renamed to the section's index —
-# on disk there is NO distinction between 'legacy' (imported) and 'fresh'
-# (computed):  K_legacy.h5 next to K_fresh.h5, mesh/mesh_legacy.pkl next to
-# mesh/mesh_fresh.pkl, geometry/components/legacy.step next to fresh.step.
-# The module is SELF-CONTAINED — it keeps working even if the source project
-# is later moved or deleted.  Nothing is ever recomputed for an import.
-#   * A missing source at solve time -> FileNotFoundError (nothing to copy).
+# mode='reference' (default): nothing of 'legacy' is copied -- its reduced
+# model is read from single_rwg/ (recorded with a fingerprint in
+# fds/imports.json; reopening this project warns if single_rwg changed or
+# moved).  mode='copy' copies it in, folder-to-matching-folder and renamed to
+# the part's name (K_legacy.h5 next to K_fresh.h5 ...), so the project stands
+# alone; a copy is a snapshot and keeps working if the source is deleted.
+n_local = proj4.localize()          # turn the references into copies now
+print(f"   localize(): {n_local} referenced part(s) copied into the project")
+
+
+# --------------------------------------------------------------------------- #
+# 4a. WHEN AN IMPORTED PART DOES NOT FIT: solve() computes it HERE             #
+# --------------------------------------------------------------------------- #
+banner("4a. Solve plan: an imported part that does not fit is recomputed here")
+
+proj4a = EMProject(name="wider_band", base_dir=str(WORK), overwrite=True)
+proj4a.import_project(WORK / "single_rwg", name="guide", n=2)
+# single_rwg was trained on 1.8-2.4 GHz; this project asks for up to 2.6 GHz,
+# so the plan says 'recompute' and the full-order solve runs in THIS project
+# (from single_rwg's geometry).  single_rwg itself is never touched.  In a
+# script (nobody to answer), a full-order recompute of an imported part needs
+# rerun=True; in a notebook the plan is printed and run.
+proj4a.fds.solve(config=dict(FOM_CFG, fmax=2.6), rerun=True)
+concat4a = proj4a.fds.foms.reduce(tol=1e-9).concatenate()
+print(f"   trained band now {concat4a.structures[0].training_band}")
 
 
 # =========================================================================== #
@@ -310,8 +472,13 @@ print("""
      ("The number of port modes must match at connected interfaces...")
    * Mode FINGERPRINT mismatch (type / indices / cutoff kc / polarization)
      -> ValueError.  Matching cross-section dimensions give matching kc;
-     polarization matters for degenerate (e.g. TE11) and NUMERIC modes:
-     solve both sections with the same polarization_angle convention.
+     degenerate modes (e.g. the two TE11 polarisations) must be numbered
+     alike on both sides -- parts solved with cavsim3d are.
+   * A join that carries FEWER modes than propagate below the band's top
+     -> UserWarning naming the port and the count needed: the modes left out
+     see a magnetic wall and are reflected at the join.
+   * flip=True turns a GLUED part end-for-end; a coupled part must be solved
+     in the orientation it is used (NotImplementedError).
    * ROM training bands: sections reduced over DISJOINT frequency bands
      cannot be coupled (ValueError).  Narrow overlap or sweeping outside the
      shared band -> UserWarning (extrapolation beyond snapshot coverage:
@@ -320,7 +487,9 @@ print("""
      (a section is one domain; add its solids individually instead).
    * Port modes are built in a frame that does not depend on which way a
      port face points, so odd modes (TE01, TE20, ...) have the SAME sign on
-     both faces of a join and couple correctly mode-by-mode.
+     both faces of a join and couple correctly mode-by-mode.  Modes with
+     equal cutoffs (TE01/TE20 when a = 2b) are ordered by type and indices,
+     so 'mode 2' is the same mode on every port.
 """)
 
 print(f"All tutorial artifacts under: {WORK}")

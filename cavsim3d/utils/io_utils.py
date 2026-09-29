@@ -6,6 +6,16 @@ from IPython import get_ipython
 
 
 
+def is_interactive() -> bool:
+    """True in a terminal session or a Jupyter/IPython kernel (someone can answer)."""
+    try:
+        if get_ipython() is not None:
+            return True
+    except (ImportError, NameError):
+        pass
+    return sys.stdin.isatty()
+
+
 def get_user_confirmation(message: str, default: bool = True) -> bool:
     """
     Prompt the user for a yes/no confirmation.
@@ -26,15 +36,7 @@ def get_user_confirmation(message: str, default: bool = True) -> bool:
     """
     # Check if we are in an interactive environment
     # In Jupyter, sys.stdin.isatty() might be False but input() still works.
-    is_interactive = sys.stdin.isatty()
-    
-    try:
-        if get_ipython() is not None:
-            is_interactive = True
-    except (ImportError, NameError):
-        pass
-
-    if not is_interactive:
+    if not is_interactive():
         # Nobody can answer: never take a destructive action on a default.
         # Callers expose force=True for scripts that really mean it.
         print(f"\n[WARNING] Non-interactive environment detected.")

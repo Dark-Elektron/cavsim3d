@@ -27,6 +27,7 @@ from ngsolve import (
 )
 
 from cavsim3d.core.constants import c0, mu0, eps0, Z0
+from cavsim3d.solvers.nedelec import check_kind, hcurl_flags
 import cavsim3d.utils.printing as pr
 
 # PARDISO ships with MKL, which the macOS ngsolve wheels do not link, so a
@@ -273,11 +274,14 @@ class PortEigenmodeSolver:
         polarization_angle: float = 0.0,
         global_up: Tuple[float, float, float] = (0.0, 1.0, 0.0),
         propagation_axis: Tuple[float, float, float] = (0.0, 0.0, 1.0),
-        ensure_inward_power: bool = True
+        ensure_inward_power: bool = True,
+        nedelec: str = 'first',
     ):
         self.mesh = mesh
         self.order = order
         self.bc = bc
+        # Nedelec kind of every H(curl) space built here (see solvers.nedelec)
+        self.nedelec = check_kind(nedelec)
         self.mode_source = mode_source
         self.mode_source_internal = mode_source_internal
         self.geometry_tolerance = geometry_tolerance
@@ -709,7 +713,18 @@ class PortEigenmodeSolver:
                 modes.append(AnalyticMode(type='TM', indices=(m, n), kc=kc, degeneracy=1))
 
         modes.sort(key=lambda mode: mode.kc)
-        return modes[:nmodes * 2 + 4]
+        # Equal cutoffs (TE20 and TE01 when a = 2b) must come in the same order
+        # on every port.  Each port's a, b are fitted from its own mesh face and
+        # differ in the last digits, which alone would decide the order -- and
+        # 'port1 mode 2' and 'port2 mode 2' would be different modes.
+        ordered, group = [], []
+        for mode in modes:
+            if group and mode.kc - group[0].kc > 1e-6 * group[0].kc:
+                ordered += sorted(group, key=lambda m: (m.type, m.indices))
+                group = []
+            group.append(mode)
+        ordered += sorted(group, key=lambda m: (m.type, m.indices))
+        return ordered[:nmodes * 2 + 4]
 
     def _generate_coaxial_modes(self, geometry: PortGeometry, nmodes: int) -> List[AnalyticMode]:
         """
@@ -1173,7 +1188,7 @@ class PortEigenmodeSolver:
         def _nmodes_for(port: str) -> int:
             return _mode_counts[port]
 
-        fes_full = HCurl(self.mesh, order=self.order, dirichlet=self.bc)
+        fes_full = HCurl(self.mesh, order=self.order, **hcurl_flags(self.nedelec), dirichlet=self.bc)
 
         # Detect geometry for all ports
         for port in ports:
@@ -1265,7 +1280,7 @@ class PortEigenmodeSolver:
 
     def _solve_port_analytic(self, port: str, geometry: PortGeometry, nmodes: int, fes_full: HCurl) -> None:
         fes_port = HCurl(
-            self.mesh, order=self.order,
+            self.mesh, order=self.order, **hcurl_flags(self.nedelec),
             dirichlet=self.bc,
             definedon=self.mesh.Boundaries(port)
         )
@@ -1352,7 +1367,7 @@ class PortEigenmodeSolver:
 
     def _solve_port_numeric(self, port: str, nmodes: int, fes_full: HCurl) -> None:
         fes_port = HCurl(
-            self.mesh, order=self.order,
+            self.mesh, order=self.order, **hcurl_flags(self.nedelec),
             dirichlet=self.bc,
             definedon=self.mesh.Boundaries(port)
         )
@@ -1447,7 +1462,7 @@ class PortEigenmodeSolver:
                 f"k0_ref (set from the solve frequency range).")
 
         # Mixed space on the port trace, PEC (Dirichlet) on conductor edges.
-        fesEt = HCurl(self.mesh, order=self.order,
+        fesEt = HCurl(self.mesh, order=self.order, **hcurl_flags(self.nedelec),
                       definedon=port_region, complex=True,
                       dirichlet_bbnd=(cond_bbnd or ''))
         GEt, fesEz = fesEt.CreateGradient()
@@ -1525,7 +1540,7 @@ class PortEigenmodeSolver:
                   self.port_line_impedance):
             d[port] = {}
 
-        fes_port = HCurl(self.mesh, order=self.order, complex=False,
+        fes_port = HCurl(self.mesh, order=self.order, **hcurl_flags(self.nedelec), complex=False,
                          definedon=port_region)
         omega = k0 * c0
 
@@ -1681,6 +1696,7 @@ class PortEigenmodeSolver:
         save_data = {
             # Solver configuration
             'order': self.order,
+            'nedelec': self.nedelec,
             'bc': self.bc,
             'mode_source': self.mode_source,
             'mode_source_internal': self.mode_source_internal,
@@ -1803,6 +1819,7 @@ class PortEigenmodeSolver:
             global_up=tuple(data['global_up']),
             propagation_axis=tuple(data['propagation_axis']),
             ensure_inward_power=data['ensure_inward_power'],
+            nedelec=data.get('nedelec', 'second'),
         )
 
         # Restore simple data
@@ -1856,7 +1873,8 @@ class PortEigenmodeSolver:
 
         # Create full FES if not provided
         if fes_full is None:
-            fes_full = HCurl(mesh, order=data['order'], dirichlet=data['bc'])
+            fes_full = HCurl(mesh, order=data['order'], dirichlet=data['bc'],
+                             **hcurl_flags(solver.nedelec))
 
         # Precompute mass matrices for basis vector creation
         ports = data['ports']
@@ -1874,7 +1892,7 @@ class PortEigenmodeSolver:
         for port in ports:
             # Create port-specific FES
             fes_port = HCurl(
-                mesh, order=data['order'],
+                mesh, order=data['order'], **hcurl_flags(solver.nedelec),
                 dirichlet=data['bc'],
                 definedon=mesh.Boundaries(solver._region(port))
             )
@@ -2004,7 +2022,7 @@ class PortEigenmodeSolver:
 
         # HCurl space on port surface with Dirichlet BC on waveguide walls
         fes_te = HCurl(
-            self.mesh, order=self.order,
+            self.mesh, order=self.order, **hcurl_flags(self.nedelec),
             dirichlet=self.bc,
             definedon=self.mesh.Boundaries(port)
         )
@@ -2132,7 +2150,7 @@ class PortEigenmodeSolver:
 
         # HCurl space for storing the transverse E field
         fes_hcurl = HCurl(
-            self.mesh, order=self.order,
+            self.mesh, order=self.order, **hcurl_flags(self.nedelec),
             dirichlet=self.bc,
             definedon=self.mesh.Boundaries(port)
         )
@@ -2310,7 +2328,8 @@ class PortEigenmodeSolver:
         This is the reference CST uses for TEM ports (verified against its
         exports to 0.000%). TE/TM modes have no unique voltage/current, so no
         line impedance exists and CST reports only a wave impedance -- this
-        returns None for them.
+        returns None for them, also for the higher (TE11, ...) modes of a
+        coaxial port.
         """
         p_key = port
         if p_key not in self.port_geometries and isinstance(port, str):
@@ -2321,6 +2340,10 @@ class PortEigenmodeSolver:
                     p_key = int(port[4:])
                 except ValueError:
                     pass
+        types = getattr(self, 'port_mode_types', {}) or {}
+        mode_type = (types.get(port) or types.get(p_key) or {}).get(mode)
+        if mode_type is not None and mode_type != 'TEM':
+            return None
         geom = self.port_geometries.get(p_key)
         if geom is None:
             return None

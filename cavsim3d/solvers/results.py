@@ -331,6 +331,22 @@ class FOMResult(PlotMixin):
             return self._solver_ref.get_resonant_frequencies(**kwargs)
         raise RuntimeError("Resonant frequencies not available for this FOMResult.")
 
+    def get_rq(self, mode_index: int, **kwargs):
+        """R/Q of one eigenmode (see :meth:`FrequencyDomainSolver.get_rq`)."""
+        kwargs.setdefault('domain', self.domain)
+        return self._solver_ref.get_rq(mode_index, **kwargs)
+
+    def get_figures_of_merit(self, mode_index: int, **kwargs):
+        """Figures of merit of one eigenmode (see
+        :meth:`FrequencyDomainSolver.get_figures_of_merit`)."""
+        kwargs.setdefault('domain', self.domain)
+        return self._solver_ref.get_figures_of_merit(mode_index, **kwargs)
+
+    def get_cell_coupling(self, first: int, last: int, **kwargs):
+        """Cell-to-cell coupling [%] (see :meth:`FrequencyDomainSolver.get_cell_coupling`)."""
+        kwargs.setdefault('domain', self.domain)
+        return self._solver_ref.get_cell_coupling(first, last, **kwargs)
+
     def get_eigenmodes(self, _auto_save=True, **kwargs):
         """
         Standardized API for retrieving eigenvalues and eigenvectors.
@@ -1499,6 +1515,18 @@ class ROMCollection(PlotMixin):
     def get_resonant_frequencies(self, **kwargs):
         return self._mor_ref.get_resonant_frequencies(**kwargs)
 
+    def get_external_q(self, **kwargs):
+        return self._mor_ref.get_external_q(**kwargs)
+
+    def get_rq(self, mode_index: int, **kwargs):
+        return self._mor_ref.get_rq(mode_index, **kwargs)
+
+    def get_figures_of_merit(self, mode_index: int, **kwargs):
+        return self._mor_ref.get_figures_of_merit(mode_index, **kwargs)
+
+    def get_cell_coupling(self, first: int, last: int, **kwargs):
+        return self._mor_ref.get_cell_coupling(first, last, **kwargs)
+
     def __repr__(self) -> str:
         domains = ', '.join(self._mor_ref.domains)
         return f"ROMCollection([{domains}])"
@@ -1750,8 +1778,29 @@ class NetlistFOMs:
         import shutil as _shutil
 
         project_root = Path(self._fds_ref._project_path)
+        flat = project_root / "fds" / "foms" / "roms" / "structures.json"
+        existing = {}
+        if flat.exists():
+            import json as _json
+            existing = {e.get("domain"): e for e in
+                        _json.loads(flat.read_text()).get("structures", [])}
         entries = []
         for base, rec in self._components.items():
+            if rec.get("local") and base in existing \
+                    and not existing[base].get("source_rom_dir"):
+                entries.append(existing[base])      # copied earlier: reuse
+                continue
+            if rec["kind"] == "imported" and rec.get("reduce"):
+                # Full-order results but no reduced model: reduce them here
+                # (the source is read, never written) and keep the result.
+                import tempfile as _tf
+                work = Path(_tf.mkdtemp(prefix="cavsim3d_reduce_"))
+                try:
+                    npz.reduce_source_into(Path(rec["source"]), work, tol, max_rank)
+                    entries.append(npz.stage_rom(work, base, project_root))
+                finally:
+                    _shutil.rmtree(work, ignore_errors=True)
+                continue
             if rec["kind"] == "imported":
                 src = Path(rec["source"])
                 try:
@@ -1761,7 +1810,11 @@ class NetlistFOMs:
                         f"Imported section '{base}' has no saved reduced model "
                         f"under {src}. Reduce it in its own project first "
                         "(fds.fom.reduce / fds.foms.reduce).")
-                entries.append(npz.stage_rom(src, base, project_root))
+                if rec.get("mode") == "reference":
+                    # read in place from the source project; nothing copied
+                    entries.append(npz.reference_rom(src, base, project_root))
+                else:
+                    entries.append(npz.stage_rom(src, base, project_root))
             else:
                 sub = rec["project"]
                 if getattr(sub.fds, "is_compound", False):

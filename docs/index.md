@@ -3,42 +3,33 @@
 </p>
 <h1 align="center">cavsim3d</h1>
 
-**cavsim3d** is a 3D electromagnetic simulation and model-order reduction library for radio frequency (RF) components. It is built on [NGSolve](https://ngsolve.org/) and [PythonOCC](https://github.com/tpaviot/pythonocc-core).
+**cavsim3d** is a 3D electromagnetic simulation and model-order reduction library for radio
+frequency (RF) components, built on [NGSolve](https://ngsolve.org/) and
+[PythonOCC](https://github.com/tpaviot/pythonocc-core).
 
-## What It Does
+## What it does
 
-- Simulate RF cavities, waveguides, and accelerator components
-- Compute S-parameters, Z-parameters, and eigenfrequencies
-- Accelerate electromagnetic field analysis through Model Order Reduction (MOR)
-- Handle multi-component assemblies with automatic concatenation
+- Computes S-parameters, Z-parameters, resonant frequencies and fields of RF cavities,
+  waveguides and accelerator components, from primitives or imported CAD models.
+- Reduces a full-order finite-element model to a model with tens of unknowns that sweeps
+  thousands of frequencies in a fraction of a second.
+- Solves large structures in pieces: each part (or each domain of a CAD model) is solved and
+  reduced on its own, and the reduced parts are joined into one model. A repeated part is
+  solved once; a part solved in an earlier project is reused.
 
-## Analysis Pathways
+## Ways to solve a model
 
-cavsim3d supports four distinct simulation workflows, from simple single-component model analysis to advanced hierarchical ROM concatenation of multiple models. See the [Architecture](architecture.md) page for details.
+| Model | Route | Tutorial |
+|---|---|---|
+| One part | full-order sweep → reduced model | [Build a reduced-order model](tutorials/basics/reduced_order_model.ipynb) |
+| Several parts, one mesh | solved in one piece → reduced model | [Join parts into one model](tutorials/multi_part/combine_parts.ipynb), §4 |
+| Several parts or domains | each solved → each reduced → joined | [Cut a model into domains](tutorials/models/splitting_cad.ipynb), [Join parts into one model](tutorials/multi_part/combine_parts.ipynb) |
+| Repeated or imported parts | unique parts solved once → reduced → copies joined | [Repeat a section](tutorials/multi_part/repeated_sections.ipynb), [Reuse a solved project](tutorials/multi_part/reuse_projects.ipynb) |
 
-| Pathway | Input | Method | Best For |
-|---------|-------|--------|----------|
-| 1 | Single solid | FDS → FOM → ROM | Single component models |
-| 2 | Multi-solid assembly | Global FDS → FOM → ROM | Small assemblies |
-| 3 | Multi-solid | Per-domain FDS → FOMs → FOMs Concatenation → ROM | Small assemblies, mostly for comparison |
-| 4 | Multi-solid | Per-domain FDS → FOMs → ROMs → ROMs Concatenation → ROM | Large assemblies, repeated components, maximum efficiency |
+[How a model is solved in pieces](explanation/architecture.md) explains the stages and when
+to use which route.
 
-FDS - Frequency Domain Solver,
-FOM(s) - Full Order Model(s),
-ROM(s) - Reduced Order Model(s)
-
-The overall workflow is as follows:
-
-The frequency domain solver (FDS) computes solutions to Maxwell’s equations over a specified frequency range for given material properties. This is performed using the full order model (FOM), which represents the physical system in its complete form.
-
-Input geometries may originate either as a single assembly or as multiple individual models. A single assembly exported from external software can be decomposed into smaller sub-models, which are analysed independently. Alternatively, individual models can be directly imported into the code and concatenated to form a multi-solid assembly.
-
-Each sub-model or solid is first solved independently at the full order level. Subsequently, a reduced order model (ROM) is constructed for each component, significantly lowering the computational complexity. These reduced models are then concatenated to form a coupled system representation. If required, an additional reduction step can be applied to the concatenated system to further compress the model.
-
-The resulting ROM enables the frequency domain problem to be evaluated over a much finer frequency grid at very low computational cost.
-
-
-## Quick Links
+## Where to start
 
 <div class="grid cards" markdown>
 
@@ -46,42 +37,40 @@ The resulting ROM enables the frequency domain problem to be evaluated over a mu
 
     ---
 
-    Run your first simulation in 5 minutes.
+    Install the code and run a first check.
 
     [:octicons-arrow-right-24: Getting Started](getting_started.md)
-
--   :material-sitemap:{ .lg } **Architecture**
-
-    ---
-
-    Understand the four analysis pathways.
-
-    [:octicons-arrow-right-24: Architecture](architecture.md)
 
 -   :material-school:{ .lg } **Tutorials**
 
     ---
 
-    Step-by-step guides for every workflow.
+    Step-by-step lessons, from a first waveguide to joined, repeated and imported parts.
 
-    [:octicons-arrow-right-24: Tutorials](tutorials/pathway1_single_solid.ipynb)
+    [:octicons-arrow-right-24: Tutorials](tutorials/index.md)
 
-<!-- Theory section temporarily excluded from docs (content kept in theory.md).
--   :material-function-variant:{ .lg } **Mathematical Theory**
-
-    ---
-
-    The physics and numerics behind the solver.
-
-    [:octicons-arrow-right-24: Theory](theory.md)
--->
-
--   :material-api:{ .lg } **API Reference**
+-   :material-hammer-wrench:{ .lg } **How-to guides**
 
     ---
 
-    Auto-generated from source docstrings.
+    Recipes for specific jobs: CAD import, materials, port modes, CST comparison.
 
-    [:octicons-arrow-right-24: API Reference](api/project.md)
+    [:octicons-arrow-right-24: How-to guides](how-to/index.md)
+
+-   :material-lightbulb-on:{ .lg } **Explanation**
+
+    ---
+
+    How the pipeline, the reduction, the ports and the joins work.
+
+    [:octicons-arrow-right-24: Explanation](explanation/index.md)
+
+-   :material-api:{ .lg } **Reference**
+
+    ---
+
+    solve() options, results, project files, and the API.
+
+    [:octicons-arrow-right-24: Reference](reference/index.md)
 
 </div>

@@ -89,68 +89,103 @@ def load_or_run_reduced(
 
 
 class ImportedModel:
-    """Handle to an ALREADY-RUN project's saved results (a portable part).
+    """Another project used as a part of this one.
 
-    Created via ``proj.fds.import_model(path)`` (named ``import_model`` because
-    ``import`` is a reserved Python keyword).  The handle validates at import
-    time that the project actually holds a saved reduced model, and can be
-    added to an :class:`~cavsim3d.geometry.assembly.Assembly` netlist exactly
-    like a geometry::
+    Created with ``proj.import_project(path, mode=...)`` (the method cannot be
+    called ``import``: that is a reserved Python keyword) and added to the
+    project's parts like any geometry::
 
-        hom = proj.fds.import_model("path/to/hom_coupler_project")
-        asm.add("hom", hom, after="cavity")
+        cavity = proj.import_project("path/to/cavity_project", n=2)
 
-    The saved FOM/ROM is then LOADED (never recomputed) when the assembly's
-    ROMs are concatenated.
+    ``mode='reference'`` reads the source project's saved results where they
+    are; ``mode='copy'`` copies them into this project, so it stands alone.
+    The source project is never written to: anything it lacks (a reduced
+    model, a wider band, more port modes) is computed into this project.
+
+    The source needs at least one of: a reduced model, full-order results, or
+    a geometry to compute them from.
     """
 
     # BaseGeometry duck-typing stubs so project bookkeeping treats the handle
     # as an inert component (nothing to build, mesh, or replay).
     geo = None
     mesh = None
+    MODES = ('reference', 'copy')
 
-    def __init__(self, project_path):
+    def __init__(self, project_path, mode: str = 'copy'):
+        from cavsim3d.solvers import netlist_persistence as npz
+
         self.project_path = Path(project_path)
         if not self.project_path.exists():
             raise FileNotFoundError(f"Project folder not found: {self.project_path}")
+        mode = str(mode).lower()
+        if mode not in self.MODES:
+            raise ValueError(f"mode must be one of {self.MODES}, got {mode!r}")
+        self.mode = mode
 
-        # Fail fast: locate the saved reduced-model metadata.
-        candidates = [
-            self.project_path,
-            self.project_path / "fds" / "foms" / "roms",
-            self.project_path / "fds" / "fom" / "rom",
-            self.project_path / "foms" / "roms",
-        ]
-        rom_dir = next((d for d in candidates
-                        if (d / "structures.json").exists()), None)
-        if rom_dir is None:
-            hits = sorted(self.project_path.rglob("structures.json"))
-            rom_dir = hits[0].parent if hits else None
-        if rom_dir is None:
+        try:
+            self.rom_dir = npz.find_rom_dir(self.project_path)
+        except FileNotFoundError:
+            self.rom_dir = None
+        try:
+            self.fom_dir = npz.find_fom_dir(self.project_path)
+        except FileNotFoundError:
+            self.fom_dir = None
+        self.has_geometry = (self.project_path / "geometry" / "history.json").exists()
+        if self.rom_dir is None and self.fom_dir is None and not self.has_geometry:
             raise FileNotFoundError(
-                f"No saved reduced model found under {self.project_path}. "
-                "Run the project first (fds.solve() then fom/foms.reduce()) "
-                "so its results can be imported."
-            )
-        self.rom_dir = rom_dir
+                f"Nothing to import from {self.project_path}: no reduced model, "
+                "no full-order results and no geometry. Run the project first "
+                "(fds.solve(), then fom/foms.reduce()), or give it a geometry.")
 
-        import json
-        with open(rom_dir / "structures.json") as fh:
-            meta = json.load(fh)
-        self.ports = [p for s in meta.get("structures", []) for p in s["ports"]]
-        self.port_modes = {p: s["port_modes"][p]
-                           for s in meta.get("structures", [])
-                           for p in s["port_modes"]}
-        self.training_band = meta.get("band")
+        self.ports, self.port_modes, self.training_band = [], {}, None
+        if self.rom_dir is not None:
+            import json
+            with open(self.rom_dir / "structures.json") as fh:
+                meta = json.load(fh)
+            self.ports = [p for s in meta.get("structures", []) for p in s["ports"]]
+            self.port_modes = {p: s["port_modes"][p]
+                               for s in meta.get("structures", [])
+                               for p in s["port_modes"]}
+            self.training_band = meta.get("band") or next(
+                (s.get("band") for s in meta.get("structures", []) if s.get("band")),
+                None)
+
+    @property
+    def available(self) -> str:
+        """What the source holds: 'rom', 'fom' or 'geometry' (most complete)."""
+        if self.rom_dir is not None:
+            return "rom"
+        if self.fom_dir is not None:
+            return "fom"
+        return "geometry"
+
+    def fingerprint(self) -> str:
+        """Hash of the source's saved results (detects a re-solved source)."""
+        import hashlib
+        h = hashlib.sha256()
+        for d in (self.rom_dir, self.fom_dir):
+            if d is None:
+                continue
+            for f in sorted(Path(d).rglob("*")):
+                if not f.is_file() or "concat" in f.relative_to(d).parts:
+                    continue
+                st = f.stat()
+                h.update(f"{f.relative_to(d).as_posix()}|{st.st_size}".encode())
+                if f.name == "structures.json" or f.name == "metadata.json" or (
+                        f.suffix == ".h5" and st.st_size < 50_000_000):
+                    h.update(f.read_bytes())
+        return h.hexdigest()
 
     def get_history(self):
         # Recorded so an assembly that references this model can be rebuilt
         # when its project is reopened.
-        return [{'op': 'import_model', 'project_path': str(self.project_path)}]
+        return [{'op': 'import_model', 'project_path': str(self.project_path),
+                 'mode': self.mode}]
 
     def __repr__(self):
         band = (f", band=[{self.training_band['fmin_GHz']:.3g}, "
                 f"{self.training_band['fmax_GHz']:.3g}] GHz"
                 if self.training_band else "")
-        return (f"ImportedModel('{self.project_path.name}', "
-                f"ports={self.ports}{band})")
+        return (f"ImportedModel('{self.project_path.name}', mode='{self.mode}', "
+                f"has={self.available}, ports={self.ports}{band})")

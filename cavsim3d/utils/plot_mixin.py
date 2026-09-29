@@ -398,6 +398,13 @@ class PlotMixin:
             plt.show()
         return fig, ax
 
+    def _excitation_labels(self, n_exc: int) -> List[str]:
+        """'port(mode)' names of the excitation columns, or 1..n."""
+        labels = getattr(self, 'mode_labels', None)
+        if labels and len(labels) == n_exc:
+            return [f"{p}({m})" for p, m in labels]
+        return [str(j + 1) for j in range(n_exc)]
+
     def plot_residual(
         self,
         what: str = 'both',
@@ -414,48 +421,41 @@ class PlotMixin:
         **kwargs
     ) -> Tuple:
         """
-        Plot iterative solver convergence data vs frequency.
+        Plot the convergence of the iterative solver at every frequency sample.
 
-        Requires that the result object has ``_residual_data`` attribute
-        (set automatically when using ``solver_type='iterative'``).
+        Available after a solve with ``solver_type='iterative'`` (the data is
+        saved with the results).
 
         Parameters
         ----------
-        what : {'iterations', 'residual', 'both'}
-            - ``'iterations'``: GMRES iterations per frequency
-            - ``'residual'``: relative residual ||Ax-b||/||b|| per frequency
-            - ``'both'``: dual-axis plot (iterations left, residual right)
+        what : {'both', 'iterations', 'residual'}
+            - ``'iterations'``: GMRES steps per solve
+            - ``'residual'``: true relative residual ||Ax-b||/||b||
+            - ``'both'``: steps above, residual below, sharing the frequency axis
         per_excitation : bool
-            If False (default), plot aggregated curves across excitations
-            (iterations mean, residual minimum).
-            If True, plot one line per excitation (semi-transparent).
-        ax : matplotlib.axes.Axes, optional
-            Axes to plot on. If None a new figure is created.
-            Ignored when ``what='both'`` (creates its own twin axes).
+            False (default): one curve per model -- the mean number of steps
+            and the largest residual over the excitations of a sample.
+            True: one curve per excitation (port mode), same colour in both
+            panels.
+        ax : Axes, or a pair of Axes for ``'both'``, optional
+            Axes to draw on; a new figure is created if None.
         label : str, optional
-            Legend label. If None the class name is used.
-        title : str, optional
-            Axis title.
-        xlabel : str, optional
-            X-axis label. Default: 'Frequency (GHz)'.
-        legend : bool
-            Show legend (default True).
-        grid : bool
-            Show grid (default True).
+            Name of this model in the legend (default: its domain name).
+        title, xlabel : str, optional
+        legend, grid : bool
         grid_alpha : float
-            Grid transparency (default 0.3).
         figsize : tuple
-            Figure size if creating new figure (default (10, 6)).
+            Size of a new figure.
         show : bool
-            Call ``plt.show()`` after plotting.
+            Call ``plt.show()``.
         **kwargs
-            Matplotlib plot kwargs. For 'both', these apply to both curves.
-            Use 'iter_kwargs' and 'res_kwargs' dicts within kwargs for
-            separate control.
+            Matplotlib line kwargs for both quantities; ``iter_kwargs`` and
+            ``res_kwargs`` (dicts) apply to one only.
 
         Returns
         -------
-        fig, ax : matplotlib Figure and Axes (or tuple of axes for 'both')
+        fig, ax
+            ``ax`` is a pair ``(steps, residual)`` for ``'both'``.
         """
         rd = getattr(self, '_residual_data', None)
         if rd is None:
@@ -463,129 +463,81 @@ class PlotMixin:
                 "No residual data available. Run solve() with "
                 "solver_type='iterative' first."
             )
+        if what not in ('both', 'iterations', 'residual'):
+            raise ValueError(f"Unknown what='{what}'. Use 'iterations', 'residual', or 'both'.")
 
         freq_ghz = rd['frequencies'] / 1e9
         base_label = label or getattr(self, 'domain', self.__class__.__name__)
 
-        # Extract separate kwargs for iterations and residuals if provided
         iter_kwargs = kwargs.pop('iter_kwargs', {})
         res_kwargs = kwargs.pop('res_kwargs', {})
 
-        # Check for zeros (direct solver)
         verbose = kwargs.pop('verbose', True)
         if np.all(rd.get('iterations', 0) == 0) and verbose:
             print(f"  Note: {base_label} residuals are zero. "
                   f"This is expected when using a direct solver (solver_type='direct').")
 
-        # Choose aggregated or per-excitation data
+        iters_all = np.asarray(rd.get('iterations_per_excitation', rd['iterations'][:, None]))
+        res_all = np.asarray(rd.get('residuals_per_excitation', rd['residuals'][:, None]))
         if per_excitation:
-            iters_2d = rd.get('iterations_per_excitation', rd['iterations'][:, None])
-            res_2d = rd.get('residuals_per_excitation', rd['residuals'][:, None])
+            iters_2d, res_2d = iters_all, res_all
+            names = self._excitation_labels(iters_2d.shape[1])
         else:
-            iters_2d = rd['iterations'][:, None]
-            res_2d = rd['residuals'][:, None]
+            iters_2d = iters_all.mean(axis=1)[:, None]
+            res_2d = res_all.max(axis=1)[:, None]
+            names = [base_label]
 
-        n_exc = iters_2d.shape[1]
-
-        # Default styles with markers
-        default_iter_style = {'marker': 'o', 'markersize': 3}
-        default_res_style = {'marker': 's', 'markersize': 3}
-
+        # Axes: 'both' -> (steps, residual) stacked on one frequency axis
         if what == 'both':
             if isinstance(ax, (tuple, list)) and len(ax) == 2:
-                ax1, ax2 = ax
-                fig = ax1.get_figure()
+                ax_it, ax_res = ax
+                fig = ax_it.get_figure()
             else:
-                fig, ax1 = self._ensure_ax(ax, figsize=figsize)
-                ax2 = ax1.twinx()
-
-            # Palette for multi-solid distinction (Cold for iterations, Warm for residuals)
-            cold_colors = ['tab:blue', 'tab:cyan', 'tab:green', 'teal', 'navy']
-            warm_colors = ['tab:red', 'tab:orange', 'tab:pink', 'magenta', 'darkred']
-            
-            # Determine color index from existing lines to support multi-solid or repeated calls
-            n_existing = len(ax1.get_lines())
-            color_idx = n_existing % min(len(cold_colors), len(warm_colors))
-
-            # Merge styles and apply default distinction if not provided
-            iter_style = self._merge_style({'linestyle': '-', **default_iter_style}, {**kwargs, **iter_kwargs})
-            res_style = self._merge_style({'linestyle': '--', **default_res_style}, {**kwargs, **res_kwargs})
-
-            for j in range(n_exc):
-                alpha = 0.4 if per_excitation and n_exc > 1 else iter_style.get('alpha', 1.0)
-                exc_lbl = f'{base_label} exc {j}' if per_excitation and n_exc > 1 else base_label
-
-                # Use palette colors if not explicitly provided by user
-                iter_style_j = {
-                    'color': cold_colors[color_idx], 
-                    **iter_style, 
-                    'alpha': alpha
-                }
-                res_style_j = {
-                    'color': warm_colors[color_idx], 
-                    **res_style, 
-                    'alpha': alpha
-                }
-
-                iter_label = f'{exc_lbl} iterations' if j == 0 or per_excitation else '_nolegend_'
-                res_label = f'{exc_lbl} residual' if j == 0 or per_excitation else '_nolegend_'
-
-                ax1.plot(freq_ghz, iters_2d[:, j], label=iter_label, **iter_style_j)
-                ax2.semilogy(freq_ghz, res_2d[:, j] + 1e-30, label=res_label, **res_style_j)
-
-            ax1.set_xlabel(xlabel or 'Frequency (GHz)')
-            ax1.set_ylabel('GMRES Iterations', color='tab:blue')
-            ax2.set_ylabel('Relative Residual', color='tab:red')
-            
-            suffix = ' (per excitation)' if per_excitation and n_exc > 1 else ' (iter avg, residual min)'
-            ax1.set_title(title or f'{base_label} Iterative Solver Convergence{suffix}')
-            
-            if legend:
-                lines1, labels1 = ax1.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2)
-            
-            if grid:
-                ax1.grid(True, alpha=grid_alpha)
-
-            if show:
-                plt.show()
-            return fig, (ax1, ax2)
+                fig, (ax_it, ax_res) = plt.subplots(2, 1, sharex=True, figsize=figsize)
         else:
-            # Single plot (iterations or residual)
-            fig, ax = self._ensure_ax(ax, figsize=figsize)
+            fig, single = self._ensure_ax(ax, figsize=figsize)
+            ax_it = single if what == 'iterations' else None
+            ax_res = single if what == 'residual' else None
 
-            if what == 'iterations':
-                style = self._merge_style(default_iter_style, kwargs)
-            else:
-                style = self._merge_style(default_res_style, kwargs)
+        it_style = self._merge_style({'marker': 'o', 'markersize': 3}, {**kwargs, **iter_kwargs})
+        res_style = self._merge_style({'marker': 's', 'markersize': 3}, {**kwargs, **res_kwargs})
+        cycle = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0'])
+        n_existing = len((ax_it or ax_res).get_lines())
 
-            for j in range(n_exc):
-                alpha = 0.4 if per_excitation and n_exc > 1 else style.get('alpha', 1.0)
-                exc_lbl = f'{base_label} exc {j}' if per_excitation and n_exc > 1 else base_label
-                style_j = {**style, 'alpha': alpha}
+        for j, name in enumerate(names):
+            color = kwargs.get('color') or cycle[(n_existing + j) % len(cycle)]
+            if ax_it is not None:
+                ax_it.plot(freq_ghz, iters_2d[:, j], label=name, **{'color': color, **it_style})
+            if ax_res is not None:
+                ax_res.semilogy(freq_ghz, res_2d[:, j] + 1e-30,
+                                label=name if ax_it is None else '_nolegend_',
+                                **{'color': color, **res_style})
 
-                if what == 'iterations':
-                    ax.plot(freq_ghz, iters_2d[:, j], label=exc_lbl, **style_j)
-                    ax.set_ylabel('GMRES Iterations')
-                elif what == 'residual':
-                    ax.semilogy(freq_ghz, res_2d[:, j] + 1e-30, label=exc_lbl, **style_j)
-                    ax.set_ylabel('Relative Residual')
-                else:
-                    raise ValueError(f"Unknown what='{what}'. Use 'iterations', 'residual', or 'both'.")
+        maxsteps = rd.get('maxsteps')
+        if ax_it is not None:
+            if maxsteps is not None and np.max(iters_all) >= 0.8 * maxsteps:
+                ax_it.axhline(maxsteps, color='gray', ls=':', lw=1, label='maxsteps')
+            ax_it.set_ylabel('GMRES steps')
+        if ax_res is not None:
+            ax_res.set_ylabel('relative residual')
 
-            ax.set_xlabel(xlabel or 'Frequency (GHz)')
-            suffix = ' (per excitation)' if per_excitation and n_exc > 1 else ''
-            ax.set_title(title or f'{base_label} Solver Convergence{suffix}')
-
-            if legend:
-                ax.legend()
-            if grid:
-                ax.grid(True, alpha=grid_alpha)
-
-            if show:
-                plt.show()
-            return fig, ax
+        bottom = ax_res if ax_res is not None else ax_it
+        top = ax_it if ax_it is not None else ax_res
+        bottom.set_xlabel(xlabel or 'Frequency (GHz)')
+        suffix = ' per excitation' if per_excitation else ''
+        top.set_title(title or f'{base_label}: iterative solver convergence{suffix}')
+        if legend:
+            n_lines = len(top.get_lines())
+            top.legend(fontsize=8, ncol=min(6, max(1, n_lines)),
+                       title='excitation' if per_excitation else None, title_fontsize=8)
+        if grid:
+            for a in {ax_it, ax_res} - {None}:
+                a.grid(True, alpha=grid_alpha)
+        if what == 'both':
+            fig.tight_layout()
+        if show:
+            plt.show()
+        return fig, ((ax_it, ax_res) if what == 'both' else top)
 
     # ------------------------------------------------------------------
     # Comparison helper

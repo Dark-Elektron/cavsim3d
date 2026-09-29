@@ -4,6 +4,10 @@ site_url: https://dark-elektron.github.io/cavsim3d/
 repo_url: https://github.com/Dark-Elektron/cavsim3d
 repo_name: Dark-Elektron/cavsim3d
 
+# project folders written by running the tutorial notebooks (gitignored too)
+exclude_docs: |
+  simulations/
+
 theme:
   name: material
   logo: assets/cavsim3d_logo_square.svg
@@ -26,6 +30,7 @@ theme:
   features:
     - navigation.tabs
     - navigation.sections
+    - navigation.indexes
     - navigation.expand
     - navigation.top
     - content.code.copy
@@ -83,28 +88,66 @@ extra_javascript:
 nav:
   - Home: index.md
   - Getting Started: getting_started.md
-  - Architecture: architecture.md
   - Tutorials:
-      - Quick Start Examples:
-          - "Pathway 1: Single Solid": tutorials/pathway1_single_solid.ipynb
-          - "Pathway 2: Global Assembly": tutorials/pathway2_global_assembly.ipynb
-          - "Pathway 3: FOM Concatenation": tutorials/pathway3_fom_concatenation.ipynb
-          - "Pathway 4: ROM Concatenation": tutorials/pathway4_rom_concatenation.ipynb
+      - tutorials/index.md
+      - Basics:
+          - tutorials/basics/index.md
+          - "Your first simulation": tutorials/basics/first_simulation.ipynb
+          - "Build a reduced-order model": tutorials/basics/reduced_order_model.ipynb
+          - "Find resonances and look at fields": tutorials/basics/resonances_and_fields.ipynb
+      - Building models:
+          - tutorials/models/index.md
+          - "Build cavities from parameters": tutorials/models/parametric_geometries.ipynb
+          - "Import a CAD model": tutorials/models/cad_import.ipynb
+          - "Cut a model into domains": tutorials/models/splitting_cad.ipynb
+          - "Fill a waveguide with lossy material": tutorials/models/materials_and_losses.ipynb
+      - Models of several parts:
+          - tutorials/multi_part/index.md
+          - "Join parts into one model": tutorials/multi_part/combine_parts.ipynb
+          - "Repeat a section": tutorials/multi_part/repeated_sections.ipynb
+          - "Reuse a solved project": tutorials/multi_part/reuse_projects.ipynb
+      - Ports and port modes:
+          - tutorials/ports/index.md
+          - "Carry several modes per port": tutorials/ports/multimode_ports.ipynb
+          - "Coaxial line with a dielectric window": tutorials/tem_transmission_line.ipynb
       - Applications:
-          - "TESLA 9-Cell Cavity Chain": tutorials/tesla_cavity_chain.ipynb
-          - "Coaxial Line with a Dielectric Window": tutorials/tem_transmission_line.ipynb
-      - Benchmarks:
-          - "C3794 Two-Cavity Module vs CST": tutorials/benchmarks/c3794_cavity_module.ipynb
-      - Model Preparation:
-          - Importing CAD Files: tutorials/importing_cad.ipynb
-          - Creating Models from Primitives: tutorials/creating_primitives.ipynb
-          - Creating Geometry from the Project: tutorials/creating_geometry_from_project.ipynb
-          - Persistence: tutorials/persistence.md
+          - tutorials/applications/index.md
+          - "TESLA 9-cell cavity chain": tutorials/tesla_cavity_chain.ipynb
+          - "C3794 two-cavity module vs CST": tutorials/benchmarks/c3794_cavity_module.ipynb
+          - "Cavity figures of merit: validation": tutorials/benchmarks/figures_of_merit.ipynb
+  - How-to guides:
+      - how-to/index.md
+      - Import a CAD file: how-to/import_cad.md
+      - Assign materials: how-to/materials.md
+      - Chain and arrange parts: how-to/chain_parts.md
+      - Choose the mesh size and element order: how-to/mesh_and_order.md
+      - Set up port modes: how-to/port_modes.md
+      - Model a microstrip line: how-to/microstrip.md
+      - Run large models: how-to/large_models.md
+      - Control recomputation and resume a sweep: how-to/rerun_and_resume.md
+      - Build a reliable reduced model: how-to/reduce_well.md
+      - Get the figures of merit of resonances: how-to/resonance_figures.md
+      - Compare with CST Studio Suite: how-to/compare_with_cst.md
+      - Export results: how-to/export_results.md
+      - Reuse and share projects: how-to/reuse_and_share.md
+  - Explanation:
+      - explanation/index.md
+      - How a model is solved in pieces: explanation/architecture.md
+      - How model order reduction works: explanation/model_reduction.md
+      - Ports and port modes: explanation/ports.md
+      - Parts, joins and netlists: explanation/parts_and_joins.md
+      - The project folder: explanation/project_layout.md
   # - Mathematical Theory: theory.md   # temporarily excluded from nav (content kept in docs/theory.md)
-  - API Reference:
-      - Project Management: api/project.md
-      - Geometry & Assembly: api/geometry.md
-      - Solvers & Results: api/solvers.md
-      - Model Reduction: api/rom.md
+  - Reference:
+      - reference/index.md
+      - solve() options: reference/solve_options.md
+      - Results: reference/results.md
+      - Project folder: reference/project_folder.md
+      - API:
+          - Project Management: api/project.md
+          - Geometry & Assembly: api/geometry.md
+          - Solvers & Results: api/solvers.md
+          - Model Reduction: api/rom.md
+          - Analysis & Comparison: api/analysis.md
   - Developers:
       - Viewing Locally: viewing_locally.md

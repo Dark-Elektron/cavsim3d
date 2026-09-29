@@ -8,6 +8,22 @@ import scipy.sparse as sp
 import inspect
 
 
+def draw(obj, *args, **kwargs) -> None:
+    """Draw a field, mesh or geometry in NGSolve's WebGUI.
+
+    Takes the same arguments as ``ngsolve.webgui.Draw``, e.g. the
+    ``(cf, mesh, label)`` returned by ``concat.reconstruct_chain_eigenmode``::
+
+        cf, mesh, label = concat.reconstruct_chain_eigenmode(idx)
+        draw(cf, mesh, label)
+
+    In Jupyter the interactive viewer is shown as with ``Draw``; a standalone
+    copy of the scene is attached as well, so the picture also appears where
+    the notebook is shown without a running kernel (e.g. the documentation).
+    """
+    from ngsolve.webgui import Draw
+    from cavsim3d.geometry.base import _display_webgui_fallback
+    _display_webgui_fallback(Draw(obj, *args, **kwargs))
 
 
 def spy_colored(

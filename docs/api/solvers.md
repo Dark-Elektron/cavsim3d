@@ -44,6 +44,10 @@
         - calculate_resonant_modes
         - get_eigenvalues
         - get_resonant_frequencies
+        - get_eigenmode
+        - get_figures_of_merit
+        - get_rq
+        - get_cell_coupling
       show_root_heading: false
       show_category_heading: false
 

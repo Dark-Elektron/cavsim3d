@@ -41,3 +41,4 @@ my_first_sim/
 
 # Notebook backups
 *.ipynb.bak
+claude*

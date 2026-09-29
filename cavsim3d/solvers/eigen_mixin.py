@@ -14,9 +14,12 @@ import scipy.sparse as sp
 import scipy.linalg as sl
 from scipy.sparse.linalg import eigsh
 from cavsim3d.core.persistence import H5Serializer
-from cavsim3d.core.constants import MIN_EIGENVALUE
+from cavsim3d.core.constants import MIN_EIGENVALUE, SIGMA_COPPER
+from cavsim3d.solvers.figures_of_merit import (ModePiece, beam_line, field_on_line,
+                                               figures_of_merit, voltage)
 import cavsim3d.utils.printing as pr
 from pathlib import Path
+from cavsim3d.geometry.base import _display_webgui_fallback
 
 
 class EigenMixinBase:
@@ -513,43 +516,43 @@ class EigenMixinBase:
         mode_field : GridFunction or CoefficientFunction
             Eigenmode field for visualization
         """
-        # Default domain selection
-        available_domains = self._get_available_eigen_domains()
-        if domain is None:
-            if 'global' in available_domains:
-                domain = 'global'
-            else:
-                domain = available_domains[0]
-
+        domain = domain or self._default_eigen_domain()
         if not self._can_reconstruct_field(domain):
             raise ValueError(
                 f"Field reconstruction not supported for domain '{domain}'. "
                 f"Ensure mesh and FES are available."
             )
+        frequency, eigenvector = self._eigenpair(mode_index, domain, filter_static,
+                                                 min_eigenvalue)
+        return frequency, self._reconstruct_eigenmode_field(eigenvector, domain)
 
-        # Get eigenvectors
-        eigs, vecs = self.get_eigenvectors(
-            domain=domain,
-            filter_static=filter_static,
-            min_eigenvalue=min_eigenvalue,
-            n_modes=mode_index + 10,  # Get enough modes
-            return_eigenvalues=True
-        )
+    def _eigenpair(self, mode_index: int, domain: str, filter_static: bool = True,
+                   min_eigenvalue: float = None) -> Tuple[float, np.ndarray]:
+        """``(frequency [Hz], eigenvector)`` of mode *mode_index* of *domain*."""
+        # mode_index points into the spectrum computed last (e.g. by
+        # get_resonant_frequencies), so it is the mode the user just listed.
+        # Recomputing a different number of modes around the shift would
+        # return a different set, and index 1 would be another mode.
+        cached_vecs = (getattr(self, '_eigenvectors_cache', None) or {}).get(domain)
+        if (filter_static and min_eigenvalue is None and cached_vecs is not None
+                and np.ndim(cached_vecs) == 2 and cached_vecs.shape[1] > mode_index):
+            eigs, vecs = self._eigenvalues_cache[domain], cached_vecs
+        else:
+            eigs, vecs = self.get_eigenvectors(
+                domain=domain,
+                filter_static=filter_static,
+                min_eigenvalue=min_eigenvalue,
+                n_modes=max(50, mode_index + 10),  # as get_resonant_frequencies
+                return_eigenvalues=True
+            )
 
         if mode_index >= vecs.shape[1]:
             raise IndexError(
                 f"Mode index {mode_index} out of range. "
                 f"Only {vecs.shape[1]} modes available."
             )
-
-        eigenvalue = eigs[mode_index]
-        frequency = np.sqrt(np.maximum(np.real(eigenvalue), 0)) / (2 * np.pi)
-
-        # Reconstruct field
-        eigenvector = vecs[:, mode_index]
-        mode_field = self._reconstruct_eigenmode_field(eigenvector, domain)
-
-        return frequency, mode_field
+        frequency = np.sqrt(np.maximum(np.real(eigs[mode_index]), 0)) / (2 * np.pi)
+        return float(frequency), vecs[:, mode_index]
 
     def plot_eigenmode(
             self,
@@ -649,10 +652,9 @@ class EigenMixinBase:
         def draw_field(cf, label):
             if use_boundary:
                 from ngsolve import BoundaryFromVolumeCF
-                Draw(BoundaryFromVolumeCF(cf), mesh, **draw_kwargs)
+                _display_webgui_fallback(Draw(BoundaryFromVolumeCF(cf), mesh, **draw_kwargs))
             else:
-                Draw(cf, mesh, **draw_kwargs)
-
+                _display_webgui_fallback(Draw(cf, mesh, **draw_kwargs))
         # Plot based on component selection
         if component == 'all':
             print(f"\nPlotting Real({field_label}):")
@@ -791,6 +793,356 @@ class EigenMixinBase:
                 print(f"\nDomain: {d} - Error: {e}")
 
         print("=" * 70)
+
+    # =========================================================================
+    # Figures of merit: external Q, R/Q, wall Q, peak fields, ...
+    # =========================================================================
+
+    def _eigen_port_coupling(self, domain: str) -> Tuple[np.ndarray, List[Tuple[str, int]]]:
+        """``(B, [(port, mode), ...])``: B's rows follow the eigenvector
+        entries of *domain*, its columns the port modes."""
+        raise NotImplementedError(
+            f"{type(self).__name__} gives no port coupling for eigenmodes of '{domain}'")
+
+    def _eigen_energy_operators(self, domain: str) -> Tuple[Any, Any, Any]:
+        """``(M, C, D)`` in the eigenvector coordinates of *domain*.
+
+        ``x^H M x / 2`` is the stored energy (M None: the coordinates are
+        mass-normalised), ``x^H (C + w D) x / 2`` the material loss; C and D
+        are None without conductivity or loss tangent.
+        """
+        raise NotImplementedError(f"{type(self).__name__} gives no energy operators")
+
+    def _eigen_fds(self) -> Any:
+        """The full-order solver: boundary names, materials and geometry."""
+        return None
+
+    def _eigen_mode_pieces(self, vector: np.ndarray, domain: str,
+                           axis: str) -> List[ModePiece]:
+        """The field of an eigenvector, one :class:`ModePiece` per mesh."""
+        return [self._mode_piece(self._get_mesh_for_plotting(domain),
+                                 self._reconstruct_eigenmode_field(vector, domain))]
+
+    def _mode_piece(self, mesh, E, shift: float = 0.0) -> ModePiece:
+        """A :class:`ModePiece` with the walls and materials of the solver."""
+        from ngsolve import CoefficientFunction
+        fds = self._eigen_fds()
+        names = list(mesh.GetMaterials())
+        props = {}
+        for name in names:
+            try:
+                props[name] = fds._material_props(name)
+            except Exception:
+                props[name] = (1.0, 1.0, 0.0, 0.0)
+        return ModePiece(mesh=mesh, E=E, shift=shift,
+                         walls=getattr(fds, 'bc', None) or 'default',
+                         mu_r=CoefficientFunction([props[n][1] for n in names]),
+                         eps_r={n: props[n][0] for n in names})
+
+    def _eigen_energy(self, vector: np.ndarray, domain: str, w: float) -> Tuple[float, float]:
+        """``(U, P_diel)`` of an eigenvector at its own amplitude."""
+        M, C, D = self._eigen_energy_operators(domain)
+        x = np.asarray(vector)
+
+        def quad(A):
+            return 0.0 if A is None else float(np.real(np.vdot(x, A @ x)))
+
+        U = 0.5 * (quad(M) if M is not None else float(np.vdot(x, x).real))
+        return U, 0.5 * quad(C) + 0.5 * w * quad(D)
+
+    def _default_eigen_domain(self) -> str:
+        available = self._get_available_eigen_domains()
+        return 'global' if 'global' in available else available[0]
+
+    def get_external_q(
+            self,
+            fmin: float = None,
+            fmax: float = None,
+            domain: str = None,
+            refine: int = 2,
+    ) -> Dict[str, Any]:
+        """Loaded resonances: frequency, loaded Q and external Q per port.
+
+        Every port mode is terminated in its reference impedance Z0, the
+        matched load the S-parameters assume, and the loaded eigenproblem of
+        the reduced model
+
+            (A + j w B Y0 B^T - w^2) x = 0,        Y0 = diag(1 / Z0)
+
+        is solved exactly (linearised to size 2r).  Its complex eigenvalues
+        are the loaded resonances, ``Q_L = Re(w) / (2 Im(w))``.  The external
+        Q of a port splits that damping by the power the port takes from the
+        loaded mode, ``Re(Y0) |B^T x|^2`` summed over the port's modes.
+
+        The residues of the closed problem (port faces as magnetic walls)
+        give Qext only when nothing else couples to the port.  A feed line
+        between coupler and port face, or a strongly coupled neighbouring
+        mode, adds reactance at the port that can change Qext by an order of
+        magnitude; the loaded eigenproblem includes it.
+
+        Only the external loading is included, no wall or dielectric losses.
+        The Z0 of a TE/TM mode depends on frequency: it is evaluated at each
+        resonance, refined *refine* times.
+
+        Parameters
+        ----------
+        fmin, fmax : float, optional
+            Band in GHz; loaded resonances outside it are left out.
+        domain : str, optional
+            As :meth:`get_eigenmode`.
+        refine : int
+            Re-solves with Z0 at the resonance (TE/TM ports only).
+
+        Returns
+        -------
+        dict
+            ``frequencies`` [Hz] and ``Q_L`` of the loaded resonances,
+            ``Qext`` ({port: array}), ``Qext_mode`` ({'port(m)': array},
+            1-based mode), and ``mode_index`` / ``f_closed``: the closed-problem
+            mode each one belongs to (for :meth:`get_eigenmode`, :meth:`get_rq`).
+        """
+        domain = domain or self._default_eigen_domain()
+        _M, K, free, n_dof = self._get_eigen_system_matrices(domain)
+        if free is not None:
+            raise NotImplementedError(
+                "get_external_q() needs a reduced model, which holds the in-band "
+                "response exactly: fds.fom.reduce(tol).get_external_q().")
+        A = np.asarray(K)
+        A = 0.5 * (A + A.conj().T)
+        B, pairs = self._eigen_port_coupling(domain)
+        B = np.asarray(B)
+        r = A.shape[0]
+
+        def admittance(f):
+            y = []
+            for port, mode in pairs:
+                z0 = self._port_wave_impedance(port, mode, f)
+                if z0 is None:
+                    z0 = self._get_port_impedance(port, mode, f)
+                y.append(1.0 / complex(z0))
+            return np.array(y)
+
+        f_lo = max((fmin or 0) * 1e9, np.sqrt(self.DEFAULT_MIN_EIGENVALUE) / (2 * np.pi))
+        f_hi = np.inf if fmax is None else fmax * 1e9
+        band = getattr(self, 'frequencies', None)
+        f_ref = (0.5 * (f_lo + f_hi) if np.isfinite(f_hi)
+                 else float(np.mean(band)) if band is not None and len(band) else 1e9)
+        w0 = 2 * np.pi * f_ref
+
+        def loaded(f):
+            """Loaded eigenpairs with Z0 at *f*; w = s * w0 keeps L well scaled."""
+            y0 = admittance(f)
+            G = (B * y0) @ B.T
+            L = np.block([[np.zeros((r, r)), np.eye(r)], [A / w0 ** 2, 1j * G / w0]])
+            s, X = sl.eig(L)
+            keep = s.real > 0
+            return s[keep] * w0, X[:r, keep], y0
+
+        w_all, X_all, y_ref = loaded(f_ref)
+        dispersive = not np.allclose(admittance(1.01 * f_ref), y_ref)
+        sel = np.flatnonzero((w_all.real >= 2 * np.pi * f_lo) & (w_all.real <= 2 * np.pi * f_hi))
+
+        # the closed-problem modes (and the get_eigenmode() cache) to map onto
+        eigs, V = self.get_eigenvectors(domain=domain, n_modes=n_dof, return_eigenvalues=True)
+        f_closed = np.sqrt(np.maximum(np.real(eigs), 0.0)) / (2 * np.pi)
+
+        rows = []
+        for k in sel:
+            w, x, y0 = w_all[k], X_all[:, k], y_ref
+            for _ in range(refine if dispersive else 0):
+                w_new, X_new, y0 = loaded(w.real / (2 * np.pi))
+                j = int(np.argmin(np.abs(w_new - w)))
+                w, x = w_new[j], X_new[:, j]
+            power = np.real(y0) * np.abs(B.T @ x) ** 2        # per port mode
+            # evanescent port modes (imaginary Z0) take no power: Q_L = inf
+            q_l = w.real / (2 * w.imag) if w.imag > 0 and power.sum() > 0 else np.inf
+            rows.append((w.real / (2 * np.pi), q_l, power,
+                         int(np.argmax(np.abs(V.conj().T @ x)))))
+        rows.sort(key=lambda row: row[0])
+
+        n = len(rows)
+        freqs = np.array([row[0] for row in rows])
+        q_l = np.array([row[1] for row in rows])
+        power = np.array([row[2] for row in rows]).reshape(n, len(pairs))
+        total = power.sum(axis=1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            def q_of(cols):
+                share = power[:, cols].sum(axis=1)
+                return np.where(share > 0, q_l * total / share, np.inf)
+            ports = list(dict.fromkeys(p for p, _ in pairs))
+            mode_index = np.array([row[3] for row in rows], dtype=int)
+            return {
+                'frequencies': freqs,
+                'Q_L': q_l,
+                'Qext': {p: q_of([j for j, (pp, _) in enumerate(pairs) if pp == p])
+                         for p in ports},
+                'Qext_mode': {f"{p}({m + 1})": q_of([j]) for j, (p, m) in enumerate(pairs)},
+                'mode_index': mode_index,
+                'f_closed': f_closed[mode_index] if n else np.array([]),
+            }
+
+    def get_rq(
+            self,
+            mode_index: int,
+            domain: str = None,
+            axis: str = 'Z',
+            offset: Tuple[float, float] = (0.0, 0.0),
+            span: Tuple[float, float] = None,
+            n_points: int = 2001,
+    ) -> Dict[str, float]:
+        """R/Q of one eigenmode for a beam (v = c) along a line.
+
+        ``R/Q = V^2 / (w U)`` with ``V = |int E_s exp(j w s / c) ds|`` along
+        the line parallel to *axis* through the transverse point *offset*,
+        and ``U = (eps0/2) int eps_r |E|^2 dV``, the stored energy.  This is
+        the accelerator (linac) convention, as in cavsim2d.  A dipole needs
+        an offset from the axis: take it in both transverse directions to
+        catch both polarisations, or use the transverse R/Q of
+        :meth:`get_figures_of_merit`.
+
+        Parameters
+        ----------
+        mode_index : int
+            As :meth:`get_eigenmode` (the spectrum computed last).
+        axis : {'X', 'Y', 'Z'}
+            Beam direction.
+        offset : (float, float)
+            Transverse position [m], in the order of the two other axes
+            (x, y for Z; y, z for X; x, z for Y).
+        span : (float, float), optional
+            Line start and end along *axis* [m]; default: the model's extent.
+        n_points : int
+            Samples along the line.
+
+        Returns
+        -------
+        dict
+            ``frequency`` [Hz], ``V`` [V], ``U`` [J] and ``RQ`` [Ohm], for the
+            mode scaled to a stored energy of 1 J.
+        """
+        domain = domain or self._default_eigen_domain()
+        freq, x = self._eigenpair(mode_index, domain)
+        w = 2 * np.pi * freq
+        U, _ = self._eigen_energy(x, domain, w)
+        pieces = self._eigen_mode_pieces(x, domain, axis)
+        a = 'XYZ'.index(axis.upper())
+        s = beam_line(pieces, a, span, n_points)
+        V = abs(voltage(field_on_line(pieces, a, offset, s)[0], s, w)) / np.sqrt(U)
+        return {'frequency': freq, 'V': V, 'U': 1.0, 'RQ': V ** 2 / w}
+
+    def get_figures_of_merit(
+            self,
+            mode_index: int,
+            domain: str = None,
+            axis: str = 'Z',
+            offset: Tuple[float, float] = (0.0, 0.0),
+            span: Tuple[float, float] = None,
+            n_points: int = 2001,
+            beta: float = 1.0,
+            active_length: float = None,
+            n_cells: int = None,
+            conductivity: float = SIGMA_COPPER,
+            surface_resistance: float = None,
+            walls: str = None,
+            kick_step: float = None,
+    ) -> Dict[str, float]:
+        """Cavity figures of merit of one eigenmode, as cavsim2d reports them.
+
+        The keys and units are cavsim2d's (``'R/Q [Ohm]'``, ``'Epk/Eacc []'``,
+        ``'Bpk/Eacc [mT/MV/m]'``, ...).  Absolute quantities (voltages,
+        fields, losses) are for the mode scaled to a stored energy of 1 J.
+
+        - Beam: ``Vacc`` along the line through *offset* parallel to *axis*
+          for a charge at ``beta * c0``; ``Eacc = Vacc / active_length``;
+          ``R/Q = Vacc^2 / (w U)`` (linac convention, twice the circuit one);
+          the mode's loss factor ``k_loss = Vacc^2 / (4 U)``.
+        - Transverse kick (Panofsky-Wenzel): ``Vt = (beta c0 / w) |grad_t V|``
+          at *offset*, ``Et``, ``R/Q_t = Vt^2 / (w U)`` and the kick factor
+          ``k_kick = (w / (beta c0)) Vt^2 / (4 U)``.  For a dipole it is the
+          cavsim2d m = 1 value; a monopole on the axis gives ~0.
+        - Walls: peak surface fields ``Epk``, ``Hpk``, ``Bpk``; the wall
+          loss ``Ploss = (Rs / 2) int |H|^2 dS`` with the surface resistance
+          of *conductivity* (copper by default) or *surface_resistance*;
+          the geometry factor ``G = Q_wall Rs`` (independent of the wall
+          material), ``Rsh = R/Q Q`` and ``GR/Q``.
+        - Materials: with a loss tangent or conductivity, ``Q_diel`` and
+          ``Pdiel`` from the loss terms, and ``Q`` the unloaded Q of walls and
+          materials together (``1/Q = 1/Q_wall + 1/Q_diel``).  With several
+          materials, each one's share of the electric energy (``U_frac_*``)
+          and its peak field (``Epk_*``).
+        - Multi-cell (*n_cells* > 1): field flatness ``ff``, min/max of the
+          cells' on-axis peaks of ``|E_s|``.
+
+        The ports are magnetic walls in this eigenproblem and are not
+        counted as walls; the external Q is :meth:`get_external_q`.
+        Re-entrant edges have singular fields, so Epk (and Hpk at a sharp
+        edge) grows as the mesh is refined there.
+
+        Parameters
+        ----------
+        mode_index : int
+            As :meth:`get_eigenmode` (the spectrum computed last).
+        domain : str, optional
+            As :meth:`get_eigenmode`.
+        axis, offset, span, n_points
+            The beam line, as :meth:`get_rq`.
+        beta : float
+            Particle velocity over c0, for the transit-time phase.
+        active_length : float, optional
+            Length [m] that ``Eacc`` is normalised to.  Default: the
+            geometry's ``active_length()`` (an elliptical cavity:
+            ``2 L n_cells``, as cavsim2d), else the length of the line.
+        n_cells : int, optional
+            Cells, for the field flatness.  Default: the geometry's.
+        conductivity : float
+            Wall conductivity [S/m].
+        surface_resistance : float, optional
+            Wall surface resistance [Ohm], replacing *conductivity*.
+        walls : str, optional
+            Boundaries that are conducting walls (a region pattern such as
+            ``'default|coupler'``).  Default: the solver's ``bc``.
+        kick_step : float, optional
+            Transverse step [m] of the Panofsky-Wenzel gradient; default
+            2 % of the smallest transverse extent, halved until the shifted
+            lines stay inside the aperture.
+
+        Returns
+        -------
+        dict
+        """
+        domain = domain or self._default_eigen_domain()
+        freq, x = self._eigenpair(mode_index, domain)
+        w = 2 * np.pi * freq
+        U, P_diel = self._eigen_energy(x, domain, w)
+        pieces = self._eigen_mode_pieces(x, domain, axis)
+        if walls is not None:
+            for p in pieces:
+                p.walls = walls
+
+        geometry = getattr(self._eigen_fds(), 'geometry', None)
+        if active_length is None:
+            length = getattr(geometry, 'active_length', None)
+            active_length = length() if callable(length) else None
+        if n_cells is None:
+            n_cells = int(getattr(geometry, 'n_cells', 1) or 1) * int(
+                getattr(geometry, 'chain', 1) or 1)
+        return figures_of_merit(
+            pieces, freq, U, P_diel, axis=axis, offset=offset, span=span,
+            n_points=n_points, beta=beta, active_length=active_length,
+            n_cells=n_cells, conductivity=conductivity,
+            surface_resistance_ohm=surface_resistance, kick_step=kick_step)
+
+    def get_cell_coupling(self, first: int, last: int, domain: str = None) -> float:
+        """Cell-to-cell coupling [%] of a passband, as cavsim2d.
+
+        ``kcc = 2 (f_last - f_first) / (f_last + f_first)``, with *first* and
+        *last* the passband's lowest (0) and highest (pi) mode, indexed as
+        :meth:`get_eigenmode` (the spectrum computed last).
+        """
+        domain = domain or self._default_eigen_domain()
+        f0 = self._eigenpair(first, domain)[0]
+        f1 = self._eigenpair(last, domain)[0]
+        return 200 * (f1 - f0) / (f1 + f0)
 
     @property
     def eigenvalues(self) -> Dict[str, np.ndarray]:
@@ -1044,6 +1396,14 @@ class FDSEigenMixin(EigenMixinBase):
         """Get mesh from FDS."""
         return self.mesh
 
+    def _eigen_fds(self):
+        return self
+
+    def _eigen_energy_operators(self, domain: str):
+        if domain == 'global':
+            return self.M_global, self.C_global, self.D_global
+        return self.M[domain], self.C.get(domain), self.D.get(domain)
+
 
 class ROMEigenMixin(EigenMixinBase):
     """
@@ -1150,6 +1510,29 @@ class ROMEigenMixin(EigenMixinBase):
         """Get mesh from underlying solver."""
         return self.mesh
 
+    def _eigen_port_coupling(self, domain: str):
+        """Reduced port basis B_r of *domain* and its column order."""
+        if domain not in self._B_r:
+            raise NotImplementedError(
+                f"No port coupling for the reduced domain '{domain}'; use one of "
+                f"{list(self._B_r)} (a joined model: its concat object).")
+        pairs = self._domain_port_mode_pairs(domain, self._n_modes_per_port or 1)
+        return self._B_r[domain], [(p, m) for (_i, p, m) in pairs]
+
+    def _eigen_fds(self):
+        return getattr(self, 'solver', None)
+
+    def _eigen_energy_operators(self, domain: str):
+        # A single domain's 'global' spectrum is that domain's (see
+        # _reconstruct_eigenmode_field); several domains join in a concat.
+        if domain not in self._A_r and domain == 'global' and self.n_domains == 1:
+            domain = self.domains[0]
+        if domain not in self._A_r:
+            raise NotImplementedError(
+                f"No energy operators for the reduced domain '{domain}'; use one of "
+                f"{list(self._A_r)} (a joined model: its concat object).")
+        return None, self._C_r.get(domain), self._D_r.get(domain)
+
 
 class ConcatEigenMixin(EigenMixinBase):
     """
@@ -1250,6 +1633,79 @@ class ConcatEigenMixin(EigenMixinBase):
         gf.vec.FV().NumPy()[:] = x_full
 
         return gf
+
+    def _eigen_fds(self):
+        ref = getattr(self, '_solver_ref', None)
+        return getattr(ref, 'solver', ref)
+
+    def _structure_index(self, domain: str) -> int:
+        for i, s in enumerate(self.structures):
+            if s.domain == domain:
+                return i
+        raise KeyError(f"Domain '{domain}' not found")
+
+    def _eigen_energy_operators(self, domain: str):
+        # W_coupled is orthonormal and every section's reduced coordinates
+        # are mass-normalised, so the coupled coordinates are too.
+        if domain in (None, 'global'):
+            return None, getattr(self, 'C_coupled', None), getattr(self, 'D_coupled', None)
+        s = self.structures[self._structure_index(domain)]
+        return None, getattr(s, 'Crd', None), getattr(s, 'Drd', None)
+
+    def _eigen_port_coupling(self, domain: str):
+        """The coupled system's external port basis; columns follow ``ports``
+        (``'port1(1)'`` is port1, mode 0)."""
+        import re
+        if domain not in (None, 'global') or self.B_coupled is None:
+            raise NotImplementedError(
+                "The loaded eigenproblem of a joined model is its coupled one "
+                "(domain='global').")
+        pairs = []
+        for name in self.ports:
+            m = re.match(r'^(.*)\((\d+)\)$', name)
+            pairs.append((m.group(1), int(m.group(2)) - 1) if m else (name, 0))
+        return np.asarray(self.B_coupled), pairs
+
+    def _eigen_mode_pieces(self, vector, domain, axis):
+        """One mesh for a glued model; for a netlist, each section on its own
+        mesh, the sections laid end to end along *axis* in list order."""
+        vector = np.asarray(vector)
+        if domain not in (None, 'global'):
+            i = self._structure_index(domain)
+            if self.mesh is not None:
+                return super()._eigen_mode_pieces(vector, domain, axis)
+            return [self._section_mode_piece(i, self.structures[i].reconstruct(vector))]
+        x = self.W_coupled @ vector
+        if self.mesh is not None:
+            E = self._reconstruct_field_from_vector(
+                x, np.ones(self.n_structures, dtype=complex))
+            return [self._mode_piece(self.mesh, E)]
+        a = 'XYZ'.index(axis.upper())
+        pieces, end = [], None
+        for i, st in enumerate(self.structures):
+            start = self._structure_dof_offsets[i]
+            piece = self._section_mode_piece(i, st.reconstruct(x[start:start + st.r]))
+            z = np.asarray(piece.mesh.ngmesh.Coordinates())[:, a]
+            piece.shift = 0.0 if end is None else end - float(z.min())
+            end = float(z.max()) + piece.shift
+            pieces.append(piece)
+        return pieces
+
+    def _section_mode_piece(self, section_idx: int, x_full) -> ModePiece:
+        """A netlist section's field on its own mesh (a complex space: the
+        coupled eigenvector need not be real)."""
+        from ngsolve import GridFunction, HCurl
+        from cavsim3d.solvers.nedelec import hcurl_flags, kind_of
+        mesh, fes = self._section_mesh_fes(section_idx)
+        if not fes.is_complex:
+            fes = HCurl(mesh, order=fes.globalorder, complex=True,
+                        **hcurl_flags(kind_of(fes)))
+        E = GridFunction(fes)
+        vec = E.vec.FV().NumPy()
+        n = min(len(vec), len(x_full))
+        vec[:] = 0
+        vec[:n] = np.asarray(x_full)[:n]
+        return self._mode_piece(mesh, E)
 
     def _get_mesh_for_plotting(self, domain: str) -> Any:
         """Get mesh from solver reference."""

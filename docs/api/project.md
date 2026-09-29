@@ -8,11 +8,17 @@ The `EMProject` class is the central entry point for managing simulations, geome
     options:
       members:
         - __init__
-        - create_assembly
-        - create_primitive
-        - create_importer
         - import_geometry
+        - create_primitive
+        - import_project
+        - add
+        - parts
+        - main_axis
+        - localize
+        - create_assembly
         - generate_mesh
+        - draw_material_cf
+        - timing_summary
         - save
         - load
         - has_mesh

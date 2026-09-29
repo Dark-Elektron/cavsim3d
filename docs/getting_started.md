@@ -1,128 +1,64 @@
 # Getting Started
 
-This guide walks you through a simple simulation.
+This page installs cavsim3d, checks that it works with a one-minute simulation, and points
+to where to go next.
 
-## 📦 Installation
-### Prerequisites
+## Install
 
-- Python 3.9-3.13
-- Conda environment
-
-To install `cavsim3d` from source, clone the repository and install it using `pip` in editable or normal mode:
+You need [conda](https://docs.conda.io) (Anaconda or Miniconda) and git. In a terminal:
 
 ```bash
+conda create -n cavsim3d python=3.11 -y
+conda activate cavsim3d
+conda install -c conda-forge -y pythonocc-core pythreejs ipywidgets jupyterlab
 git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
-pip install --upgrade pip
-conda install -c conda-forge -y pythonocc-core pythreejs ipywidgets ipykernel --no-update-deps
 pip install -e .
 ```
 
-## Your First Simulation
+`pip install -e .` installs the code with its dependencies (NGSolve among them) in editable
+mode, so a `git pull` updates it. `pythonocc-core` (for CAD import) is only available from
+conda-forge, which is why it is installed first.
 
-This example creates a rectangular waveguide, inspects it, runs an FEM frequency sweep, reduces it via proper orthogonal decomposition (POD), and plots S-parameters. To keep the installation folder clean, navigate to a folder where you want your
-simulation saved and either create a `getting_started.py` file or a Jupyter Notebook in order to follow the example.
+## Check the installation
 
-### Step 1: Create the Geometry
+Start Jupyter (`jupyter lab`) in an empty folder, open a notebook, and run:
 
 ```python
 from cavsim3d.core.em_project import EMProject
-from cavsim3d.geometry.primitives import RectangularWaveguide
 
-# Create a project (results will be saved here)
-proj = EMProject(name='my_first_sim', base_dir='./simulations')
+proj = EMProject(name="install_check", base_dir="./simulations", overwrite=True)
+proj.create_primitive("rwg", name="guide", a=0.1, b=0.05, L=0.2, maxh=0.03)
+res = proj.fds.solve(fmin=1.6, fmax=2.9, nsamples=5, solver_type="direct")
 
-# Define a rectangular waveguide: 100 mm wide, 200 mm long
-wg = RectangularWaveguide(a=0.1, L=0.2, maxh=0.04)
-
-# Add the geometry to the project
-proj.geometry = wg
-
-# # Alternatively, the geometry can be created directly in the project
-# proj.create_primitive('rwg', a=0.1, L=0.2, maxh=0.04)
+print(abs(res["S"][:, 1, 0]))
 ```
 
-### Step 2: Inspect the Geometry
-
-Before committing to a solve, check that the geometry and its mesh are what you expect.
-Primitives build and mesh themselves on construction (using the `maxh` you passed), so
-nothing extra is needed here.
-
-```python
-# Interactive 3D view of the CAD solid
-proj.geo.show()
-
-# ...or view the mesh the solver will actually use
-proj.geo.show('mesh')
-
-# Text summary: mesh size, port boundaries, geometry tag
-proj.geo.print_info()
-```
+After the solver's log, the last line shows five values of $|S_{21}|$, all equal to 1 to
+seven decimals or more:
 
 ```text
-======================================================================
-RectangularWaveguide Geometry Information
-======================================================================
-Geometry type:          RectangularWaveguide
-Compute method:         numeric
-Supports analytical:    True
-Boundary condition:     left|right|top|bottom
-
-Component Tag:
-  Full:                 RectangularWaveguide:a9dccab0
-  Geometry hash:        a9dccab0e52c9952...
-
-Cache status:           NOT CACHED
-
-Mesh generated:         True
-  Vertices:             48
-  Elements:             90
-  Ports:                ['port1', 'port2']
-======================================================================
+[1.         1.         1.         1.         0.99999996]
 ```
 
-The two `port*` faces are the boundaries the solver excites, so this waveguide yields a
-2 x 2 S-matrix. If the mesh looks too coarse, recreate the geometry with a smaller `maxh`.
-
-!!! note
-    `show()` renders through NGSolve's WebGUI, so it displays inside Jupyter (or the
-    rendered notebook tutorials). Called from a plain `.py` script it opens no viewer —
-    use `print_info()` there instead.
-
-### Step 3: Solve the Full-Order Model (FOM)
+A uniform, lossless waveguide transmits everything, so this is the expected result. Then
+draw the mesh:
 
 ```python
-# Run an FEM frequency sweep from 1.5 to 3.0 GHz with 30 sample points
-results = proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30, rerun=True)
+proj.geo.show("mesh")
 ```
 
-This assembles the stiffness ($\mathbf{K}$), mass ($\mathbf{M}$), and port excitation ($\mathbf{B}$) matrices, solves
-a linear system at each frequency point, and computes the S- and Z-parameter matrices.
+An interactive 3D view of a meshed box appears below the cell. If it stays empty, the
+Jupyter widget extensions are missing: install `webgui-jupyter-widgets` and restart Jupyter.
 
-### Step 4: Reduce to a ROM
+## Where to go next
 
-```python
-# Create a Reduced Order Model using POD (Proper Orthogonal Decomposition)
-rom = proj.fds.fom.reduce(tol=1e-6)
-
-# Solve the ROM over a much finer frequency grid (fast — milliseconds)
-rom.solve(fmin=1.5, fmax=3.0, nsamples=500, rerun=True)
-```
-
-### Step 5: Plot Results
-
-```python
-# Plot S-parameters
-rom.plot_s(plot_type='db', show=True)
-
-# Plot Z-parameters
-rom.plot_z(plot_type='db', show=True)
-```
-
-## Next Steps
-
-- [**Pathway 1: Single Solid**](tutorials/pathway1_single_solid.ipynb) — Full walkthrough with analytical comparison
-- [**Pathway 3: FOM Concatenation**](tutorials/pathway3_fom_concatenation.ipynb) — Multi-domain simulation
-- [**Pathway 4: ROM Concatenation**](tutorials/pathway4_rom_concatenation.ipynb) — Most efficient multi-component workflow
-- [**Importing CAD Files**](tutorials/importing_cad.ipynb) — Using STEP/IGES geometry
-- [**Architecture Overview**](architecture.md) — Understanding the analysis pathways
+- **Learn the code step by step**: the [tutorials](tutorials/index.md), starting with
+  [Your first simulation](tutorials/basics/first_simulation.ipynb). Each one builds a small
+  model and checks it against the exact answer.
+- **Get a specific job done**: the [how-to guides](how-to/index.md), for example
+  [importing a CAD file](how-to/import_cad.md) or
+  [comparing with CST](how-to/compare_with_cst.md).
+- **Understand how it works**: [Explanation](explanation/index.md), starting with
+  [How a model is solved in pieces](explanation/architecture.md).
+- **Look something up**: the [reference](reference/index.md) and the API pages.

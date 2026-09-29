@@ -1379,17 +1379,38 @@ class OCCImporter(BaseGeometry):
         return get_shape_bounding_box(self._occ_shape)
 
     def _detect_main_axis(self) -> str:
-        """Return the longest bounding-box dimension as 'X', 'Y' or 'Z'.
+        """Return the port axis for position-based port assignment.
 
-        Used as the default port axis for position-based port assignment so
-        that e.g. an X-aligned structure gets X-facing ports automatically.
+        The longest bounding-box dimension whose two extreme faces are flat
+        and perpendicular to it (the end faces of a guide), so that e.g. an
+        X-aligned structure gets X-facing ports automatically.  The extents
+        alone are ambiguous when they tie -- a cylinder as long as it is wide
+        -- so the end faces decide.  Without such an axis: the longest extent,
+        Z on a tie.
         """
         try:
             pmin, pmax = get_shape_bounding_box(self._occ_shape)
             extents = [pmax[i] - pmin[i] for i in range(3)]
-            return ['X', 'Y', 'Z'][int(np.argmax(extents))]
         except Exception:
             return 'Z'
+        big = max(max(extents), 1e-12)
+        # longest first; equal extents: Z, then Y, then X
+        order = sorted(range(3), key=lambda i: (-round(extents[i] / big, 6), -i))
+        try:
+            faces = (getattr(self, '_geometry_faces', None)
+                     or self._collect_occ_geometry_faces())
+            tol = 1e-6 * big
+            for i in order:
+                ends = [any(f["is_planar"]
+                            and abs(abs(f["normal"].Coord(i + 1)) - 1.0) < 1e-6
+                            and abs(f["center"].Coord(i + 1) - bound) < tol
+                            for f in faces)
+                        for bound in (pmin[i], pmax[i])]
+                if all(ends):
+                    return 'XYZ'[i]
+        except Exception:
+            pass
+        return 'XYZ'[order[0]]
 
     def get_info(self) -> Dict:
         """Get geometry information."""
@@ -1513,13 +1534,8 @@ class OCCImporter(BaseGeometry):
         # (subdomainN/...) that the auto-naming above overwrote, so the mesh
         # materials stay in sync with _domain_materials and the structure is
         # still recognised as compound.  Port assignment by position already
-        # gives the shared split face an internal port, so no separate
-        # split-plane port pass is needed here.
+        # names the cuts and records them in internal_ports.
         if self._is_split and self._plane_corners:
-            # The shared split face is named like any other position port; the
-            # solver detects it as internal via mesh adjacency, so drop any
-            # stale named split-plane ports recorded by a prior split() pass.
-            self._internal_ports = []
             self._assign_split_subdomains()
 
         self._record('name_solids', sort_axis=sort_axis, port_axis=port_axis,
@@ -2008,62 +2024,109 @@ class OCCImporter(BaseGeometry):
                 best_face.name = port["name"]
                 best_face.col = (1, 0, 0)
 
+    def _clear_port_names(self, keep=()) -> List[str]:
+        """Rename every port face not in *keep* back to a wall or interface.
+
+        A face on one solid becomes the boundary ``self.bc``; a face shared
+        by two solids becomes ``'interface'``.  Returns the cleared names.
+        """
+        if self.geo is None:
+            return []
+        try:
+            face_count = {}
+            for solid in self.geo.solids:
+                for face in solid.faces:
+                    face_count[face] = face_count.get(face, 0) + 1
+        except AttributeError:
+            face_count = {face: 1 for face in self.geo.faces}
+
+        bc_name = self.bc or 'default'
+        cleared = set()
+        for face, count in face_count.items():
+            if face.name and 'port' in face.name and face.name not in keep:
+                cleared.add(face.name)
+                face.name = 'interface' if count > 1 else bc_name
+        return sorted(cleared)
+
     def _auto_assign_ports_by_position(
             self,
             port_axis: str = 'Z',
             port_prefix: str = 'port',
     ) -> None:
-        """Fallback port assignment using Min/Max faces along an axis.
+        """Fallback port assignment when the STEP file defines no ports.
 
-        Used when no STEP port definitions are found.  For multi-solid
-        geometry, ports are assigned sequentially: ``port1`` at the
-        global minimum, ``portN+1`` at the global maximum, with internal
-        ports at solid boundaries.
+        ``port1`` is the flat end face (or faces) at the model's minimum
+        along *port_axis*, the last port the one at its maximum.  On a
+        split geometry each cutting plane across that axis is a port in
+        between, numbered in axial order and recorded in
+        :attr:`internal_ports`.  Other faces between solids stay material
+        interfaces: a multi-solid model (PEC hooks in a vacuum chamber, a
+        dielectric window) gets two ports, not a pair per solid.  Faces of
+        solids already known to be PEC are ignored.
         """
         if self.geo is None:
             return
 
-        axis_map = {'X': X, 'Y': Y, 'Z': Z}
-        axis_index = {'X': 0, 'Y': 1, 'Z': 2}
+        axis = port_axis.upper() if port_axis.upper() in ('X', 'Y', 'Z') else 'Z'
+        ax = 'XYZ'.index(axis)
 
-        ax = axis_map.get(port_axis.upper(), Z)
-        sort_idx = axis_index.get(port_axis.upper(), 2)
-
+        # Every face with the number of (non-PEC) solids it bounds
         try:
             solids = list(self.geo.solids)
-            n_solids = len(solids)
-
-            if n_solids <= 1:
-                solid = solids[0] if n_solids == 1 else self.geo
-                solid.faces.Min(ax).name = f'{port_prefix}1'
-                solid.faces.Min(ax).col = (1, 0, 0)
-                solid.faces.Max(ax).name = f'{port_prefix}2'
-                solid.faces.Max(ax).col = (1, 0, 0)
-                print(f"Ports: {port_prefix}1, {port_prefix}2 (by position)")
-                return
-
-            # Sort solids by centroid
-            def _centroid(solid):
-                bb = solid.bounding_box
-                return (bb[0][sort_idx] + bb[1][sort_idx]) / 2
-
-            solids_sorted = sorted(solids, key=_centroid)
-
-            for i, solid in enumerate(solids_sorted):
-                solid.faces.Min(ax).name = f'{port_prefix}{i + 1}'
-                solid.faces.Min(ax).col = (1, 0, 0)
-                solid.faces.Max(ax).name = f'{port_prefix}{i + 2}'
-                solid.faces.Max(ax).col = (1, 0, 0)
-
-            print(f"Ports: {n_solids + 1} ports assigned by position "
-                  f"({port_prefix}1 ... {port_prefix}{n_solids + 1})")
-
         except AttributeError:
-            self.geo.faces.Min(ax).name = f'{port_prefix}1'
-            self.geo.faces.Min(ax).col = (1, 0, 0)
-            self.geo.faces.Max(ax).name = f'{port_prefix}2'
-            self.geo.faces.Max(ax).col = (1, 0, 0)
-            print(f"Ports: {port_prefix}1, {port_prefix}2 (by position)")
+            solids = [self.geo]
+        solids = [s for s in solids if not self._is_solid_pec(s)] or solids
+        count = {}
+        for solid in solids:
+            for face in solid.faces:
+                count[face] = count.get(face, 0) + 1
+        if not count:
+            return
+
+        span = {}
+        for face in count:
+            bb = face.bounding_box
+            span[face] = (bb[0][ax], bb[1][ax])
+        lo = min(a for a, _ in span.values())
+        hi = max(b for _, b in span.values())
+        tol = max(1e-4 * (hi - lo), 1e-9)
+
+        def on_plane(face, pos):
+            a, b = span[face]
+            return b - a < tol and abs((a + b) / 2 - pos) < tol
+
+        planes = [(lo, False)]
+        if self._is_split:
+            cuts = sorted(c1[ax] for c1, _c2, na in self._plane_corners
+                          if str(na).upper() == axis)
+            planes += [(pos, True) for pos in cuts]
+        planes.append((hi, False))
+
+        names, internal = [], []
+        external = [f for f, n in count.items() if n == 1]
+        for pos, is_cut in planes:
+            if is_cut:
+                faces = [f for f, n in count.items() if n > 1 and on_plane(f, pos)]
+            else:
+                faces = [f for f in external if on_plane(f, pos)]
+                if not faces and external:
+                    # No flat face at this end: take the outermost face
+                    outer = min if pos == lo else max
+                    faces = [outer(external, key=lambda f: sum(span[f]) / 2)]
+            if not faces:
+                continue
+            name = f'{port_prefix}{len(names) + 1}'
+            for face in faces:
+                face.name = name
+                face.col = (1, 0, 0)
+            names.append(name)
+            if is_cut:
+                internal.append(name)
+
+        if self._is_split:
+            self._internal_ports = internal
+        print(f"Ports by position along {axis}: {', '.join(names)}"
+              + (f" (at cuts: {', '.join(internal)})" if internal else ""))
 
     def _name_split_plane_ports(self, tol: float = 1e-4) -> 'OCCImporter':
         """Rename faces lying on splitting planes to internal port names.
@@ -2109,29 +2172,39 @@ class OCCImporter(BaseGeometry):
 
         self._internal_ports = []
         next_port = max_port + 1
+        n_solids = {}
+        for f in faces:
+            n_solids[f] = n_solids.get(f, 0) + 1
 
         for corner1, _corner2, normal_axis in self._plane_corners:
             ax = axis_index.get(str(normal_axis).lower(), 2)
             plane_pos = corner1[ax]
-            port_name = f'port{next_port}'
-            n_faces = 0
+            on_plane = []
             for f in faces:
-                if f.name != 'interface':
-                    continue
                 bb = f.bounding_box
                 extent = bb[1][ax] - bb[0][ax]
                 center = (bb[0][ax] + bb[1][ax]) / 2
                 if extent < tol and abs(center - plane_pos) < tol:
+                    on_plane.append(f)
+            # A cut the position-based naming already made a port keeps
+            # its name (ports in axial order); otherwise number a new one.
+            named = sorted({f.name for f in on_plane if n_solids[f] > 1
+                            and f.name and f.name.startswith('port')})
+            port_name = named[0] if named else f'port{next_port}'
+            n_faces = 0
+            for f in on_plane:
+                if f.name == 'interface':
                     f.name = port_name
                     f.col = (1, 0, 0)
                     n_faces += 1
 
-            if n_faces:
+            if named or n_faces:
                 self._internal_ports.append(port_name)
-                next_port += 1
-                print(f"Internal port '{port_name}' created at "
-                      f"{str(normal_axis).upper()}={plane_pos:.6f} "
-                      f"({n_faces} face(s))")
+                if not named:
+                    next_port += 1
+                    print(f"Internal port '{port_name}' created at "
+                          f"{str(normal_axis).upper()}={plane_pos:.6f} "
+                          f"({n_faces} face(s))")
 
         # Mesh is now stale relative to the renamed boundaries.
         self.mesh = None
@@ -2273,6 +2346,12 @@ class OCCImporter(BaseGeometry):
         Use :meth:`list_planar_faces` or :meth:`show_planar_faces` to
         identify the face indices first.
 
+        The map is the complete set of external ports: every other port
+        face (named automatically, from the STEP file or by an earlier
+        call) becomes a wall or interface again.  Ports on splitting
+        planes (:attr:`internal_ports`) are kept.  An existing mesh is
+        dropped; call :meth:`generate_mesh` afterwards.
+
         Parameters
         ----------
         port_face_map : dict
@@ -2290,7 +2369,7 @@ class OCCImporter(BaseGeometry):
         if self._occ_shape is None:
             raise RuntimeError("No OCC shape loaded.")
         if self.geo is None:
-            raise RuntimeError("Geometry not built. Call build() first.")
+            self.build()
 
         if not self._geometry_faces:
             self._collect_occ_geometry_faces()
@@ -2317,8 +2396,19 @@ class OCCImporter(BaseGeometry):
             print(f"  {port_name} -> Face #{face_idx} "
                   f"at ({c.X():.4f}, {c.Y():.4f}, {c.Z():.4f})")
 
+        cleared = self._clear_port_names(keep=self._internal_ports)
+        cleared = [n for n in cleared if n not in port_face_map]
+        if cleared:
+            print(f"  Cleared {len(cleared)} other port name(s): {cleared}")
+
         # Apply to netgen
         self._apply_matched_ports_to_netgen()
+        self._apply_material_colors()
+
+        # The mesh carries the old boundary names
+        self.mesh = None
+        self._ports = None
+        self._boundaries = None
 
         self._record('assign_ports', port_face_map=port_face_map)
         return self
@@ -2537,35 +2627,41 @@ class OCCImporter(BaseGeometry):
             else:
                 normalised[key] = val
 
-        # Validate material keys against known solid names
-        import fnmatch
-        known_names = set()
+        # Validate material keys with the same resolution the PEC
+        # subtraction and get_material() use, so a key that selects no
+        # solid there is reported here.  The original STEP solids count
+        # too: a PEC solid already subtracted is still a valid key.
+        solid_names = {_simplify_label(i['label']) for i in self._original_solids_info}
         if self.mesh is not None:
-            known_names = set(self.mesh.GetMaterials())
+            solid_names.update(self.mesh.GetMaterials())
         elif self.geo is not None:
             try:
-                for solid in self.geo.solids:
-                    known_names.add(solid.name)
+                solid_names.update(s.name for s in self.geo.solids if s.name)
             except AttributeError:
                 pass
-        # Add all STEP label variants (full path + segments)
-        for label in self._solid_labels:
-            known_names.add(label)
-            short = label.split('/')[-1]
-            known_names.add(short)
-            known_names.update(short.split('|'))
+        labels_by_name = {}
+        for info in self._original_solids_info:
+            labels_by_name.setdefault(_simplify_label(info['label']), []).append(info['label'])
 
         for key in normalised:
-            if '*' in key:
-                matched = any(fnmatch.fnmatchcase(kn, key) for kn in known_names)
-            else:
-                matched = key in known_names
-
-            if not matched and known_names:
+            if solid_names and not any(self._resolve_material_key(key, n)
+                                       for n in solid_names):
                 warnings.warn(
-                    f"Material key '{key}' does not match any known solid label. "
-                    f"Known labels: {sorted(known_names)}"
+                    f"Material key '{key}' does not match any solid. Solids: "
+                    f"{sorted(solid_names)}; STEP labels: {sorted(self._solid_labels)}. "
+                    f"A key is a solid name, a STEP label, or a '/'- or "
+                    f"'|'-separated segment of one ('*' wildcards allowed)."
                 )
+            # STEP solids with the same short name share one mesh material,
+            # so a key naming only some of them applies to all of them.
+            for name, labels in labels_by_name.items():
+                hit = [lb for lb in labels if self._key_matches(key, self._label_variants(lb))]
+                if hit and len(hit) < len(labels):
+                    warnings.warn(
+                        f"Material key '{key}' selects {hit}, but the STEP solids "
+                        f"{labels} all become the material '{name}' in the mesh, "
+                        f"so the key applies to all of them."
+                    )
 
         self._materials = normalised
 
@@ -2586,16 +2682,26 @@ class OCCImporter(BaseGeometry):
         print(f"Material properties assigned: {', '.join(parts)}")
         return self
 
+    @staticmethod
+    def _label_variants(full_label: str) -> set:
+        """A STEP label and its segments: ``a/hook_top|lh4`` -> itself,
+        ``hook_top|lh4``, ``hook_top``, ``lh4``."""
+        short = full_label.split('/')[-1]
+        return {full_label, short, *short.split('|')}
+
+    @staticmethod
+    def _key_matches(mat_key: str, names) -> bool:
+        """Exact match, or glob match when *mat_key* contains ``*``."""
+        import fnmatch
+        if '*' in mat_key:
+            return any(fnmatch.fnmatchcase(n, mat_key) for n in names)
+        return mat_key in names
+
     def _get_all_names_for_solid(self, solid_name: str) -> List[str]:
         """Return all name variants for a solid (simplified + full STEP label parts).
 
         This lets material keys reference a solid by its simplified mesh name,
         the full STEP path, or any segment of it (e.g. ``hook_top|lh4``).
-
-        For solids that were suffixed after PEC subtraction (e.g.
-        ``solid1_1``, ``solid1_2``), the base name without suffix
-        (``solid1``) is also included so that material config keys
-        written against the original name still match.
         """
         names = {solid_name}
         # Strip a split sub-domain prefix (``subdomain1/vacuum`` -> ``vacuum``)
@@ -2603,19 +2709,10 @@ class OCCImporter(BaseGeometry):
         if '/' in solid_name and solid_name.split('/', 1)[0].startswith('subdomain'):
             solid_name = solid_name.split('/', 1)[1]
             names.add(solid_name)
-        # Strip auto-generated suffix (_1, _2) to find the base
-        base = solid_name.rsplit('_', 1)[0] if '_' in solid_name else solid_name
-        names.add(base)
-        # Look up the original STEP label for this solid
+        # Every STEP label this mesh name came from
         for info in self._original_solids_info:
-            full_label = info['label']
-            if _simplify_label(full_label) == base:
-                names.add(full_label)
-                # Add intermediate segments: "hook_top|lh4", "hook_top", "lh4"
-                short = full_label.split('/')[-1]
-                names.add(short)
-                names.update(short.split('|'))
-                break
+            if _simplify_label(info['label']) == solid_name:
+                names.update(self._label_variants(info['label']))
         return list(names)
 
     def _resolve_material_key(self, mat_key: str, solid_name: str) -> bool:
@@ -2627,14 +2724,7 @@ class OCCImporter(BaseGeometry):
 
         No fuzzy substring matching — ``'solid'`` does NOT match ``'solid1'``.
         """
-        import fnmatch
-
-        candidates = self._get_all_names_for_solid(solid_name)
-
-        if '*' in mat_key:
-            return any(fnmatch.fnmatchcase(c, mat_key) for c in candidates)
-
-        return mat_key in candidates
+        return self._key_matches(mat_key, self._get_all_names_for_solid(solid_name))
 
     def _subtract_pec_solids(self, pec_labels: List[str]) -> None:
         """Remove PEC solids from the geometry.
@@ -2754,8 +2844,15 @@ class OCCImporter(BaseGeometry):
                 remaining_solids = list(self.geo.solids)
             except AttributeError:
                 remaining_solids = []
+            # A port that still has a face on the remaining geometry (e.g. a
+            # coax end: annulus kept, inner-conductor disk removed) stays put.
+            present = {f.name for s in remaining_solids for f in s.faces}
+            moved = set()
 
             for port_name, port_center in pec_port_info:
+                if port_name in present or port_name in moved:
+                    continue
+                moved.add(port_name)
                 best_face = None
                 best_dist = float('inf')
                 for solid in remaining_solids:
@@ -3196,6 +3293,7 @@ class OCCImporter(BaseGeometry):
                 geo.generate_mesh(
                     maxh=entry.get('maxh'),
                     curve_order=entry.get('curve_order', 3),
+                    curvaturesafety=entry.get('curvaturesafety', 2),
                 )
 
             # Operations that change the physics/topology.  Without replaying

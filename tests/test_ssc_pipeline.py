@@ -61,10 +61,12 @@ class TestProjPipeline:
         f = concat.frequencies
         ana = RWGAnalytical(a=A, L=3 * SEC_L, b=A / 2)
         Sa = ana.s_parameters(f / 1e9, Z0_ref='ZTE')
-        assert np.all(np.abs(S[:, 0, 0]) < 0.05)
+        # Coarse mesh (maxh 0.06), default first-kind elements: measured
+        # max |S11| 0.058 and S21 phase error 6.4 deg (second kind: 0.035, 15 deg).
+        assert np.all(np.abs(S[:, 0, 0]) < 0.08)
         dphase = np.angle(S[:, 1, 0]) - np.angle(Sa['S21'])
         dphase = (dphase + np.pi) % (2 * np.pi) - np.pi
-        assert np.all(np.abs(np.degrees(dphase)) < 25)
+        assert np.all(np.abs(np.degrees(dphase)) < 10)
 
         # STANDARD project layout (identical to a multi-solid project): ONE
         # fds; sections distinguished ONLY by the filename suffix convention;

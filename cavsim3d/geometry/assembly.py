@@ -45,8 +45,10 @@ def _netlist_reference(geometry_type: str, geometry_history):
         if path is None:
             return None
         from cavsim3d.core.reuse import ImportedModel
+        mode = next((h.get('mode') for h in geometry_history
+                     if isinstance(h, dict) and h.get('op') == 'import_model'), None)
         try:
-            return ImportedModel(path)
+            return ImportedModel(path, mode=mode or 'copy')
         except FileNotFoundError:
             return str(path)
     if geometry_type in ('str', 'PosixPath', 'WindowsPath', 'Path'):
@@ -156,6 +158,15 @@ class Connection:
     to_port: str = "port1"
     connection_type: ConnectionType = ConnectionType.PORT_TO_PORT
     gap: float = 0.0
+    # True when the ports were named by the user (align_port).  Otherwise the
+    # coupled (netlist) path joins the ports that face each other along the
+    # main axis, whatever their names.
+    explicit: bool = False
+
+
+# Rotation (degrees about x, y, z) that turns a part end-for-end along an axis.
+_FLIP_ROTATION = {'X': (0.0, 180.0, 0.0), 'Y': (0.0, 0.0, 180.0), 'Z': (180.0, 0.0, 0.0)}
+_MESH_STRATEGIES = ('auto', 'glued', 'coupled')
 
 
 class Assembly(BaseGeometry):
@@ -194,10 +205,12 @@ class Assembly(BaseGeometry):
     _AXIS_VEC = {'X': X, 'Y': Y, 'Z': Z}
     _AXIS_IDX = {'X': 0, 'Y': 1, 'Z': 2}
     
-    def __init__(self, main_axis: Literal['X', 'Y', 'Z'] = 'Z'):
+    def __init__(self, main_axis: Optional[Literal['X', 'Y', 'Z']] = None):
         super().__init__()
-        self.main_axis = main_axis.upper()
-        
+        # None means "not chosen": Z is used and the mesh summary says so.
+        self.main_axis = (main_axis or 'Z').upper()
+        self._main_axis_is_default = main_axis is None
+
         self._components: Dict[str, ComponentEntry] = {}
         self._component_order: List[str] = []
         self._connections: List[Connection] = []
@@ -208,7 +221,12 @@ class Assembly(BaseGeometry):
         
         self._layout_computed = False
         self._is_built = False
-        
+
+        # How the parts are meshed: 'auto' glues plain parts into one mesh and
+        # couples imported or repeated parts through port modes; 'glued' and
+        # 'coupled' force one or the other (see set_mesh_strategy).
+        self.mesh_strategy = 'auto'
+
         # Port and solid information (populated by build())
         self._port_info: Dict[str, Dict] = {}
         self._solid_info: Dict[str, Dict] = {}
@@ -229,6 +247,7 @@ class Assembly(BaseGeometry):
         before: Optional[str] = None,
         align_port: Optional[str] = None,
         n: int = 1,
+        flip: bool = False,
         **metadata
     ) -> 'Assembly':
         """
@@ -259,6 +278,8 @@ class Assembly(BaseGeometry):
         n : int
             Number of consecutive repetitions of this component (default 1).
             The component is computed ONCE and referenced n times.
+        flip : bool
+            Turn the component end-for-end along the main axis.
         **metadata
             Additional metadata
 
@@ -278,6 +299,12 @@ class Assembly(BaseGeometry):
         if n < 1:
             raise ValueError("n must be >= 1")
         metadata["n"] = int(n)
+        if flip:
+            metadata["flip"] = True
+            # A geometry part is rotated 180 deg; a coupled (imported) section
+            # has no shape to rotate -- its ports swap roles instead.
+            if rotation is None and not _is_netlist_ref(geometry):
+                rotation = _FLIP_ROTATION[self.main_axis]
 
         base_name = name
         
@@ -301,20 +328,10 @@ class Assembly(BaseGeometry):
             self._base_name_groups[base_name] = []
         self._base_name_groups[base_name].append(key)
         
-        # Handle sub-assemblies / netlist references (project path or an
-        # ImportedModel handle from fds.import_model()).
-        if _is_netlist_ref(geometry):
-            pass  # existing-project reference; resolved at concatenation time
-        elif isinstance(geometry, Assembly):
-            if not geometry._is_built:
-                geometry.build()
-        elif geometry.geo is None:
-            # Auto-build if possible instead of raising error
-            try:
-                geometry.build()
-            except Exception as e:
-                raise ValueError(f"Geometry '{name}' not built and auto-build failed: {e}. Call build() first.")
-        
+        # Build geometry / sub-assemblies on the way in; project references are
+        # resolved at concatenation time.
+        self._prepare_component(name, geometry)
+
         transform = Transform3D(
             translation=position or (0.0, 0.0, 0.0),
             rotation=rotation or (0.0, 0.0, 0.0)
@@ -356,7 +373,8 @@ class Assembly(BaseGeometry):
                 to_key=key,
                 from_port='port2',
                 to_port=align_port or 'port1',
-                gap=gap
+                gap=gap,
+                explicit=align_port is not None,
             ))
             
         elif resolved_before is not None:
@@ -368,7 +386,8 @@ class Assembly(BaseGeometry):
                 to_key=resolved_before,
                 from_port=align_port or 'port2',
                 to_port='port1',
-                gap=gap  # distance from.port2 -> to.port1, as for 'after'
+                gap=gap,  # distance from.port2 -> to.port1, as for 'after'
+                explicit=align_port is not None,
             ))
         else:
             self._component_order.append(key)
@@ -508,6 +527,169 @@ class Assembly(BaseGeometry):
         
         return self
     
+    def replace(
+        self,
+        ref: str,
+        geometry: Union[BaseGeometry, 'Assembly', str, Path, 'ImportedModel'],
+        n: int = 1,
+        flip: bool = False,
+    ) -> 'Assembly':
+        """Swap the geometry of an existing component, keeping its place in the chain.
+
+        ``ref`` is a component key or a base name that belongs to exactly one
+        component.  The new component takes over the old one's position in the
+        order and its connections.
+        """
+        key = ref if ref in self._components else None
+        if key is None:
+            group = self._base_name_groups.get(ref, [])
+            if len(group) > 1:
+                raise ValueError(
+                    f"'{ref}' names {len(group)} components ({group}); replace one "
+                    "of them by its key.")
+            key = group[0] if group else None
+        if key is None:
+            raise KeyError(f"Component '{ref}' not found")
+        if n < 1:
+            raise ValueError("n must be >= 1")
+
+        old = self._components[key]
+        rotation = old.transform.rotation
+        if flip and not _is_netlist_ref(geometry):
+            rotation = _FLIP_ROTATION[self.main_axis]
+        elif not flip and old.metadata.get('flip'):
+            rotation = (0.0, 0.0, 0.0)
+        self._prepare_component(key, geometry)
+
+        metadata = {**old.metadata, 'n': int(n)}
+        metadata.pop('flip', None)
+        if flip:
+            metadata['flip'] = True
+        self._components[key] = ComponentEntry(
+            geometry=geometry,
+            key=key,
+            base_name=old.base_name,
+            transform=Transform3D(translation=old.transform.translation
+                                  if old.explicit_position else (0.0, 0.0, 0.0),
+                                  rotation=rotation),
+            aligned_port=old.aligned_port,
+            metadata=metadata,
+            explicit_position=old.explicit_position,
+        )
+        self._layout_computed = False
+        self._is_built = False
+        self.invalidate_tag()
+        self._record(
+            'replace',
+            ref=ref,
+            geometry_type=type(geometry).__name__,
+            geometry_history=(str(geometry) if isinstance(geometry, (str, Path))
+                              else geometry.get_history()),
+            n=int(n),
+            flip=bool(flip),
+        )
+        return self
+
+    def _prepare_component(self, name: str, geometry) -> None:
+        """Build a component on the way in, as add() does."""
+        if _is_netlist_ref(geometry):
+            return  # existing-project reference; resolved at concatenation time
+        if isinstance(geometry, Assembly):
+            if not geometry._is_built:
+                geometry.build()
+        elif geometry.geo is None:
+            try:
+                geometry.build()
+            except Exception as e:
+                raise ValueError(f"Geometry '{name}' not built and auto-build failed: "
+                                 f"{e}. Call build() first.")
+
+    # =========================================================================
+    # Mesh strategy and layout summary
+    # =========================================================================
+
+    def set_main_axis(self, axis: str) -> 'Assembly':
+        """Axis along which the parts are chained ('X', 'Y' or 'Z')."""
+        axis = str(axis).upper()
+        if axis not in self._AXIS_IDX:
+            raise ValueError(f"main axis must be 'X', 'Y' or 'Z', got {axis!r}")
+        self.main_axis = axis
+        self._main_axis_is_default = False
+        self._layout_computed = False
+        self._is_built = False
+        self.invalidate_tag()
+        self._record('set_main_axis', axis=axis)
+        return self
+
+    def set_mesh_strategy(self, strategy: str) -> 'Assembly':
+        """Choose how the parts are meshed.
+
+        ``'auto'`` (default): plain parts are glued into one conformal mesh;
+        if any part is an imported project or is repeated (``n > 1``), every
+        unique part is meshed and solved on its own and the parts are joined
+        through their port modes.  ``'glued'`` / ``'coupled'`` force one of
+        the two.
+        """
+        strategy = str(strategy).lower()
+        if strategy not in _MESH_STRATEGIES:
+            raise ValueError(f"mesh strategy must be one of {_MESH_STRATEGIES}, "
+                             f"got {strategy!r}")
+        self.mesh_strategy = strategy
+        self._record('set_mesh_strategy', strategy=strategy)
+        return self
+
+    def resolved_mesh_strategy(self) -> Tuple[str, str]:
+        """``('glued' | 'coupled', reason)`` for the current parts."""
+        imported = [e.key for e in self._components.values() if _is_netlist_ref(e.geometry)]
+        repeated = [f"{e.key} (n={e.metadata.get('n')})" for e in self._components.values()
+                    if int(e.metadata.get('n', 1)) > 1]
+        if self.mesh_strategy == 'glued':
+            if imported or repeated:
+                raise ValueError(
+                    "mesh strategy 'glued' needs every part as geometry, once: "
+                    + "; ".join(filter(None, [
+                        f"imported: {imported}" if imported else "",
+                        f"repeated: {repeated}" if repeated else ""]))
+                    + ". Use 'coupled', or add the copies one by one.")
+            return 'glued', "set with set_mesh_strategy('glued')"
+        if self.mesh_strategy == 'coupled':
+            return 'coupled', "set with set_mesh_strategy('coupled')"
+        if imported or repeated:
+            why = []
+            if imported:
+                why.append(f"imported: {', '.join(imported)}")
+            if repeated:
+                why.append(f"repeated: {', '.join(repeated)}")
+            return 'coupled', "; ".join(why)
+        return 'glued', "all parts are geometry, each used once"
+
+    def describe_layout(self) -> str:
+        """The chain as it will be meshed: axis, parts in order, mesh strategy."""
+        axis = self.main_axis + (" (default)" if self._main_axis_is_default else "")
+        lines = [f"Main axis: {axis}. Parts follow the list order along +{self.main_axis}:"]
+        idx = self._AXIS_IDX[self.main_axis]
+        try:
+            self.compute_layout()
+        except Exception:
+            pass
+        for i, key in enumerate(self._component_order, 1):
+            e = self._components[key]
+            n = int(e.metadata.get('n', 1))
+            extra = (f" x{n}" if n > 1 else "") + (" (flipped)" if e.metadata.get('flip') else "")
+            if _is_netlist_ref(e.geometry):
+                where = "imported project"
+            else:
+                lo = e.original_bounds[0][idx] + e.transform.translation[idx]
+                hi = e.original_bounds[1][idx] + e.transform.translation[idx]
+                where = f"{self.main_axis.lower()} = [{lo:.4g}, {hi:.4g}] m"
+            lines.append(f"  {i}. {key}{extra}: {where}")
+        strategy, why = self.resolved_mesh_strategy()
+        explain = {'glued': "one conformal mesh of all parts",
+                   'coupled': "each unique part meshed and solved on its own, "
+                              "joined through port modes"}[strategy]
+        lines.append(f"Mesh strategy: {strategy} ({explain}; {why})")
+        return "\n".join(lines)
+
     def remove(self, ref: str) -> 'Assembly':
         """Remove a component by key or base name (removes all instances if base name)."""
         keys_to_remove = []
@@ -889,8 +1071,29 @@ class Assembly(BaseGeometry):
 
     def generate_mesh(self, maxh=None, curve_order: int = 3, curvaturesafety: float = 2.0) -> Mesh:
         """
-        Generate mesh with support for per-component refinement.
+        Mesh the assembly and print its layout (axis, part order, mesh strategy).
+
+        Glued: one conformal mesh of all parts, with per-component refinement.
+        Coupled: every unique geometry part gets its own mesh (the parts are
+        solved one by one and joined through their port modes); returns None.
         """
+        if not getattr(self, '_replaying', False):
+            print(self.describe_layout())
+        strategy, _ = self.resolved_mesh_strategy()
+        if strategy == 'coupled':
+            seen = set()
+            for entry in self._components.values():
+                part = entry.geometry
+                if _is_netlist_ref(part) or id(part) in seen:
+                    continue
+                seen.add(id(part))
+                if maxh is not None or getattr(part, 'mesh', None) is None:
+                    part.generate_mesh(maxh=maxh, curve_order=curve_order,
+                                       curvaturesafety=curvaturesafety)
+            self._record('generate_mesh', maxh=maxh, curve_order=curve_order,
+                         curvaturesafety=curvaturesafety)
+            return None
+
         if self.geo is None:
             self.build()
             
@@ -1927,71 +2130,55 @@ class Assembly(BaseGeometry):
         """Reconstruct assembly by replaying operation history."""
         project_path = Path(project_path)
         obj = None
-        
+
+        def _component(sub_type, sub_history):
+            # Netlist references: an imported model or a bare project path.
+            ref = _netlist_reference(sub_type, sub_history)
+            if ref is not None:
+                return ref
+            sub_history = list(sub_history)
+            sub_cls = BaseGeometry._get_subclass(sub_type)
+            if sub_cls is None:
+                raise ValueError(f"Unknown geometry type '{sub_type}'")
+            # Resolve source file from rewritten paths
+            sub_source = None
+            for sh in sub_history:
+                if sh.get('op') in ('import_occ', 'import_step'):
+                    candidate = project_path / sh.get('filepath', '')
+                    if candidate.exists():
+                        sub_source = candidate
+                    break
+            return sub_cls._rebuild_from_history(
+                sub_history, project_path, source_file=sub_source)
+
         for entry in history:
             op = entry['op']
             params = {k: v for k, v in entry.items() if k not in ['op', 'timestamp']}
-            
+
             if op == '__init__':
-                obj = cls(main_axis=params.get('main_axis', 'Z'))
-            
+                obj = cls(main_axis=params.get('main_axis'))
+                obj._replaying = True
+
             elif op == 'add':
-                sub_type = params.pop('geometry_type')
-                sub_history = params.pop('geometry_history')
-
-                # Netlist references: an imported model or a bare project path.
-                ref = _netlist_reference(sub_type, sub_history)
-                if ref is not None:
-                    name = params.pop('name')
-                    obj.add(name, ref, **params)
-                    continue
-
-                sub_history = list(sub_history)
-                sub_cls = BaseGeometry._get_subclass(sub_type)
-                if sub_cls is None:
-                    raise ValueError(f"Unknown geometry type '{sub_type}'")
-                
-                # Resolve source file from rewritten paths
-                sub_source = None
-                for sh in sub_history:
-                    if sh.get('op') in ('import_occ', 'import_step'):
-                        fp = sh.get('filepath', '')
-                        candidate = project_path / fp
-                        if candidate.exists():
-                            sub_source = candidate
-                        break
-                
-                sub_geo = sub_cls._rebuild_from_history(
-                    sub_history, project_path, source_file=sub_source
-                )
-                
+                sub = _component(params.pop('geometry_type'), params.pop('geometry_history'))
                 name = params.pop('name')
-                obj.add(name, sub_geo, **params)
-            
+                obj.add(name, sub, **params)
+
+            elif op == 'replace':
+                sub = _component(params.pop('geometry_type'), params.pop('geometry_history'))
+                obj.replace(params.pop('ref'), sub, **params)
+
+            elif op == 'set_mesh_strategy':
+                obj.set_mesh_strategy(params['strategy'])
+
+            elif op == 'set_main_axis':
+                obj.set_main_axis(params['axis'])
+
             elif op == 'connect':
-                sub_history = list(params.pop('geometry_history'))
-                sub_type = params.pop('geometry_type')
-                
-                sub_cls = BaseGeometry._get_subclass(sub_type)
-                if sub_cls is None:
-                    raise ValueError(f"Unknown geometry type '{sub_type}'")
-                
-                sub_source = None
-                for sh in sub_history:
-                    if sh.get('op') in ('import_occ', 'import_step'):
-                        fp = sh.get('filepath', '')
-                        candidate = project_path / fp
-                        if candidate.exists():
-                            sub_source = candidate
-                        break
-                
-                sub_geo = sub_cls._rebuild_from_history(
-                    sub_history, project_path, source_file=sub_source
-                )
-                
+                sub = _component(params.pop('geometry_type'), params.pop('geometry_history'))
                 name = params.pop('name')
-                obj.connect(name, sub_geo, **params)
-            
+                obj.connect(name, sub, **params)
+
             elif op == 'remove':
                 obj.remove(**params)
             
@@ -2009,5 +2196,7 @@ class Assembly(BaseGeometry):
             
             elif op == 'generate_mesh':
                 obj.generate_mesh(**params)
-                
+
+        if obj is not None:
+            obj._replaying = False
         return obj

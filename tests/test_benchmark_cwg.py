@@ -20,10 +20,10 @@ from cavsim3d.analytical.circular_waveguide import CWGAnalytical
 
 CWG_RADIUS = 50e-3    # 50 mm radius
 CWG_LENGTH = 200e-3   # 200 mm length
-CWG_MAXH = 0.04       # Mesh element size
+CWG_MAXH = 0.02       # Mesh element size (0.04 left the 3rd sample 65% off, next to a resonance)
 NSAMPLES = 3           # Keep tests fast
 ORDER = 3
-RTOL_FOM = 0.60        # 60% tolerance for FOM vs analytical (curved geometry + very coarse mesh)
+RTOL_FOM = 0.05        # 5% tolerance for FOM vs analytical (measured max 1.9%)
 
 
 class TestCWGSingleModel:

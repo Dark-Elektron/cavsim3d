@@ -19,6 +19,7 @@ import numpy as np
 import scipy.linalg as sl
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from cavsim3d.solvers.nedelec import hcurl_flags, kind_of
 
 from ngsolve import (
     Norm, curl, BoundaryFromVolumeCF, GridFunction, HCurl, Mesh, VOL
@@ -36,11 +37,108 @@ import json
 from pathlib import Path
 from datetime import datetime
 import cavsim3d.utils.printing as pr
+from cavsim3d.geometry.base import _display_webgui_fallback
 
 
 # Connection specification: ((struct_idx, port_name), (struct_idx, port_name))
 Conn = Tuple[Tuple[int, str], Tuple[int, str]]
 ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1)
+
+_AXIS_IDX = {'X': 0, 'Y': 1, 'Z': 2}
+
+
+def _facing_port(struct, axis_idx: int, direction: int) -> Optional[str]:
+    """Port of ``struct`` whose outward normal points along ``direction`` x axis.
+
+    Among several such ports the one furthest out along the axis is taken.
+    None when the structure has no saved port positions.
+    """
+    best = None
+    for p, g in (getattr(struct, 'port_geometry', None) or {}).items():
+        if p not in struct.ports:
+            continue
+        try:
+            facing = direction * float(g['normal'][axis_idx])
+            reach = direction * float(g['center'][axis_idx])
+        except (KeyError, TypeError, IndexError):
+            continue
+        if facing > 0.9 and (best is None or reach > best[1]):
+            best = (p, reach)
+    return best[0] if best else None
+
+
+def _n_propagating(geom: dict, fmax_hz: float, eps: float = 1.0,
+                   mu: float = 1.0) -> Optional[int]:
+    """Waveguide modes above cutoff at ``fmax_hz`` for a circular, rectangular
+    or coaxial port (coaxial higher modes approximated); None if unknown."""
+    from scipy.special import jn_zeros, jnp_zeros
+    from cavsim3d.core.constants import c0
+    k = 2 * np.pi * fmax_hz * np.sqrt(eps * mu) / c0
+    typ = str(geom.get('type') or '').lower()
+    if typ == 'circular' and geom.get('radius'):
+        R = float(geom['radius'])
+        count = 0
+        for m in range(40):
+            te = jnp_zeros(m, 20) / R          # TE_mn (excludes the trivial zero)
+            tm = jn_zeros(m, 20) / R           # TM_mn
+            n_m = int(np.sum(te < k) + np.sum(tm < k))
+            if n_m == 0:
+                break
+            count += n_m * (1 if m == 0 else 2)
+        return count
+    if typ == 'rectangular' and geom.get('a') and geom.get('b'):
+        a, b = float(geom['a']), float(geom['b'])
+        mmax, nmax = int(k * a / np.pi) + 1, int(k * b / np.pi) + 1
+        count = 0
+        for m in range(mmax + 1):
+            for n in range(nmax + 1):
+                if (m, n) == (0, 0):
+                    continue
+                if np.pi * np.hypot(m / a, n / b) < k:
+                    count += 1 + (1 if m > 0 and n > 0 else 0)   # TE (+ TM)
+        return count
+    if typ == 'coaxial' and geom.get('radius') and geom.get('inner_radius'):
+        ro, ri = float(geom['radius']), float(geom['inner_radius'])
+        count = 1                                                  # TEM
+        m = 1
+        while 2 * m / (ro + ri) < k:                               # TE_m1 (approx.)
+            count += 2
+            m += 1
+        if np.pi / (ro - ri) < k:                                  # TM_01 (approx.)
+            count += 1
+        return count
+    return None
+
+
+def _warn_unresolved_join_modes(structures, connections) -> None:
+    """Warn when a join carries fewer modes than propagate at the band's top.
+
+    A mode that is not carried sees a magnetic wall at the join and is fully
+    reflected there, so the coupled result is wrong wherever it propagates.
+    """
+    import warnings
+    seen = set()
+    for (ia, pa), (ib, pb) in connections:
+        for s, p in ((structures[ia], pa), (structures[ib], pb)):
+            key = (getattr(s, 'base_domain', s.domain), p)
+            if key in seen:
+                continue
+            seen.add(key)
+            geom = (getattr(s, 'port_geometry', None) or {}).get(p)
+            band = getattr(s, 'training_band', None)
+            if not geom or not band:
+                continue
+            media = (getattr(s, 'port_media', None) or {}).get(p, {})
+            n_prop = _n_propagating(geom, float(band['fmax_GHz']) * 1e9,
+                                    media.get('eps', 1.0), media.get('mu', 1.0))
+            n_have = len(s.port_modes.get(p, {}))
+            if n_prop and n_have < n_prop:
+                warnings.warn(
+                    f"Join at '{key[0]}' {p}: {n_have} port mode(s) carried, but "
+                    f"{n_prop} propagate below {band['fmax_GHz']:g} GHz. The others "
+                    f"are reflected at the join. Solve that part with "
+                    f"nportmodes={{'{p}': {n_prop}, ...}}.",
+                    UserWarning, stacklevel=3)
 
 
 class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
@@ -209,6 +307,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             for key in asm._component_order:
                 entry = asm._components[key]
                 comp = entry.geometry
+                if entry.metadata.get("flip"):
+                    raise NotImplementedError(
+                        f"'{key}' is flipped, but it is coupled through port modes "
+                        "(imported or repeated). flip is supported for parts glued "
+                        "into one mesh; a coupled part must be solved in the "
+                        "orientation it is used.")
                 n = int(entry.metadata.get("n", 1))
                 for i in range(n):
                     suffix = f"_{i + 1}" if n > 1 else ""
@@ -230,7 +334,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 W=s.W, Q_L_inv=s.Q_L_inv, fes=s.fes, mesh=s.mesh,
                 Crd=s.Crd, Drd=s.Drd)
             for attr in ("port_fingerprints", "training_band", "impedance_func",
-                         "wave_impedance_func"):
+                         "wave_impedance_func", "port_geometry", "port_media",
+                         "mesh_source"):
                 if hasattr(s, attr):
                     setattr(c, attr, getattr(s, attr))
             # Keep the SOURCE (base) domain so a per-section field can find its
@@ -248,14 +353,28 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             structures.append(_instance_copy(by_domain[base], iname))
             inst_keys.append(key)
 
-        # ---- consecutive connections (ports from the assembly's netlist) ----
-        conn_ports = {(c.from_key, c.to_key): (c.from_port, c.to_port)
-                      for c in getattr(assembly, "_connections", [])}
+        # ---- consecutive connections ------------------------------------------
+        # Parts follow the list order along the main axis, so part i joins
+        # part i+1 through the port of i that faces +axis and the port of i+1
+        # that faces -axis -- whatever those ports are called.  Ports named
+        # explicitly (align_port) are used as given; without saved port
+        # positions the default names (port2 -> port1) apply.
+        axis_idx = _AXIS_IDX.get(str(getattr(assembly, "main_axis", "Z")).upper(), 2)
+        conns = {(c.from_key, c.to_key): c for c in getattr(assembly, "_connections", [])}
         connections = []
         for i in range(len(structures) - 1):
-            fp, tp = conn_ports.get((inst_keys[i], inst_keys[i + 1]),
-                                    (from_port, to_port))
+            c = conns.get((inst_keys[i], inst_keys[i + 1]))
+            fp = tp = None
+            if c is not None and c.explicit:
+                fp, tp = c.from_port, c.to_port
+            else:
+                fp = _facing_port(structures[i], axis_idx, +1)
+                tp = _facing_port(structures[i + 1], axis_idx, -1)
+                if fp is None or tp is None:
+                    fp, tp = ((c.from_port, c.to_port) if c is not None
+                              else (from_port, to_port))
             connections.append(((i, fp), (i + 1, tp)))
+        _warn_unresolved_join_modes(structures, connections)
 
         concat = cls(structures=structures,
                      mesh=structures[0].mesh, fes=structures[0].fes)
@@ -307,13 +426,16 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         # Determine polynomial order from structures or solver_ref
         order = 3  # default
+        kind = 'second'
         if self._solver_ref is not None:
             order = getattr(self._solver_ref, 'order', order)
+            kind = getattr(self._solver_ref, 'nedelec', kind)
         
         # Try to get from first structure's fes
         for struct in self.structures:
             if struct.fes is not None:
                 order = struct.fes.globalorder
+                kind = kind_of(struct.fes)
                 break
 
         # Determine Dirichlet BC label
@@ -322,7 +444,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             bc = getattr(self._solver_ref, 'bc', bc)
 
         from ngsolve import HCurl
-        self.fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc)
+        self.fes = HCurl(self.mesh, order=order, complex=True, dirichlet=bc,
+                         **hcurl_flags(kind))
         pr.debug(f"  Created unified FES: {self.fes.ndof} DOFs (order={order})")
 
     @property
@@ -956,6 +1079,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         used by _port_mode_order ("s0:port2"), and return the external name."""
         if port in self._external_port_mode_map:
             return port
+        if f"{port}({int(mode) + 1})" in self._external_port_mode_map:
+            return f"{port}({int(mode) + 1})"
         m = re.match(r'^s(\d+):(.+)$', str(port))
         if m:
             loc = (int(m.group(1)), m.group(2), int(mode))
@@ -1480,7 +1605,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             return matched if matched else {domain_name}
 
         # Global GridFunction
-        E_gf = GridFunction(self.fes, complex=True)
+        E_gf = GridFunction(self.fes)                    # self.fes is complex
         global_vec = E_gf.vec.FV().NumPy()
         global_vec[:] = 0
 
@@ -1502,11 +1627,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             # Create a fresh per-domain FES on the current mesh
             domain_mats = _get_domain_mats(struct.domain)
             region = self.mesh.Materials("|".join(domain_mats))
-            fes_local = HCurl(self.mesh, order=order, dirichlet=bc,
-                              definedon=region)
+            # complex: GridFunction(real_fes, complex=True) is a REAL vector,
+            # which silently dropped the imaginary part of the coefficients
+            fes_local = HCurl(self.mesh, order=order, dirichlet=bc, complex=True,
+                              definedon=region, **hcurl_flags(kind_of(self.fes)))
 
             # Fill a local GridFunction with the reconstructed vector
-            gf_local = GridFunction(fes_local, complex=True)
+            gf_local = GridFunction(fes_local)
             local_np = gf_local.vec.FV().NumPy()
             n = min(len(x_full_scaled), len(local_np))
             local_np[:n] = x_full_scaled[:n]
@@ -1862,8 +1989,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 "This concatenated system has no unified mesh (its sections "
                 "are meshed independently). Use reconstruct_section_field() "
                 "or plot_eigenmode(..., section_idx=N) instead.")
-        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs)
-
+        _display_webgui_fallback(Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, plot_name, **draw_kwargs))
     # =========================================================================
     # Per-section field reconstruction (netlist concat: independent meshes)
     # =========================================================================
@@ -1879,9 +2005,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if struct.mesh is not None and struct.fes is not None:
             return struct.mesh, struct.fes
         base = getattr(struct, 'base_domain', struct.domain)
+        source_mesh = getattr(struct, 'mesh_source', None)   # referenced section
         mesh_dir = Path(mesh_dir) if mesh_dir is not None else getattr(
             self, '_project_mesh_dir', None)
-        if mesh_dir is None:
+        if mesh_dir is None and source_mesh is None:
             raise FileNotFoundError(
                 "No mesh directory known for section field reconstruction. "
                 "Pass mesh_dir=<project>/mesh.")
@@ -1890,11 +2017,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         if base in self._section_mesh_cache:
             mesh, fes = self._section_mesh_cache[base]
         else:
-            mf, ff = mesh_dir / f"mesh_{base}.pkl", mesh_dir / f"fes_{base}.pkl"
+            if source_mesh is not None:
+                mesh_dir = Path(source_mesh)
+                mf, ff = mesh_dir / "mesh.pkl", mesh_dir / "fes.pkl"
+            else:
+                mf, ff = mesh_dir / f"mesh_{base}.pkl", mesh_dir / f"fes_{base}.pkl"
             if not mf.exists() or not ff.exists():
                 raise FileNotFoundError(
                     f"Section '{base}' mesh/FES not found in {mesh_dir} "
-                    f"(need mesh_{base}.pkl and fes_{base}.pkl).")
+                    f"(need {mf.name} and {ff.name}).")
             with open(mf, "rb") as fh:
                 mesh = pickle.load(fh)
             with open(ff, "rb") as fh:
@@ -1945,7 +2076,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # field keeps its imaginary part (only 'abs' was unaffected).
         if not fes.is_complex:
             fes = HCurl(mesh, order=fes.globalorder, complex=True,
-                        dirichlet=getattr(fes, '_dirichlet', '') or '')
+                        dirichlet=getattr(fes, '_dirichlet', '') or '',
+                        **hcurl_flags(kind_of(fes)))
         E_gf = GridFunction(fes)
         vec = E_gf.vec.FV().NumPy()
         n = min(len(vec), len(x_full))
@@ -2066,9 +2198,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         comp_mesh = replicate_mesh(ref_mesh, placements)
         order = ref_fes.globalorder
-        comp_fes = HCurl(comp_mesh, order=order, complex=True)
+        kind = hcurl_flags(kind_of(ref_fes))
+        comp_fes = HCurl(comp_mesh, order=order, complex=True, **kind)
         if not ref_fes.is_complex:
-            ref_fes = HCurl(ref_mesh, order=order, complex=True)
+            ref_fes = HCurl(ref_mesh, order=order, complex=True, **kind)
         maps = block_dof_maps(ref_fes, comp_fes, ref_mesh, comp_mesh, n_sec)
         E_gf = assemble_compound_field(comp_fes, vecs, maps)
         return E_gf, comp_mesh
@@ -2472,10 +2605,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
             domain_mats = _get_domain_mats(struct.domain)
             region = self.mesh.Materials("|".join(domain_mats))
-            fes_local = HCurl(self.mesh, order=order, dirichlet=bc,
-                              definedon=region)
+            fes_local = HCurl(self.mesh, order=order, dirichlet=bc, complex=True,
+                              definedon=region, **hcurl_flags(kind_of(self.fes)))
 
-            gf_local = GridFunction(fes_local, complex=True)
+            gf_local = GridFunction(fes_local)
             local_np = gf_local.vec.FV().NumPy()
             n = min(len(x_full_local), len(local_np))
             local_np[:n] = x_full_local[:n]
@@ -2648,8 +2781,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         draw_mesh = self.mesh
         if draw_mesh is None:
             draw_mesh, _ = self._section_mesh_fes(section_idx)
-        Draw(BoundaryFromVolumeCF(cf_plot), draw_mesh, plot_name, **draw_kwargs)
-
+        _display_webgui_fallback(Draw(BoundaryFromVolumeCF(cf_plot), draw_mesh, plot_name, **draw_kwargs))
     def get_reconstruction_info(self) -> Dict:
         """Get information about field reconstruction capability."""
         info = {

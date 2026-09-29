@@ -16,6 +16,14 @@ from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
 from ngsolve import Mesh  # type: ignore
 
 
+def _default_part_name(geometry) -> str:
+    """Name for a part that was set without one (file name or class name)."""
+    fp = getattr(geometry, 'filepath', None)
+    if fp:
+        return Path(str(fp)).stem
+    return type(geometry).__name__.lower()
+
+
 class EMProject:
     """
     Central class for managing electromagnetic simulation projects.
@@ -26,17 +34,19 @@ class EMProject:
     - Provide a unified entry point for simulation.
     """
     
-    def create_assembly(self, main_axis: str = 'Z', force: bool = False) -> 'Assembly':
+    def create_assembly(self, main_axis: Optional[str] = None, force: bool = False) -> 'Assembly':
         """
-        Create a new multi-component assembly for this project.
+        Start the project's part list afresh as an empty assembly.
 
-        This sets the project's geometry to an empty Assembly and returns it.
-        You can then add components to the assembly using assembly.add().
+        Usually not needed: ``import_geometry``, ``create_primitive``,
+        ``import_project`` and ``add`` build the list on their own.  Use this to
+        discard the current parts, or to choose the axis up front.
 
         Parameters
         ----------
-        main_axis : str
-            Primary axis for concatenation ('X', 'Y', or 'Z')
+        main_axis : str, optional
+            Axis along which the parts are chained ('X', 'Y' or 'Z'); defaults
+            to the project's ``main_axis`` (Z unless set)
         force : bool
             Replace an existing mesh / results without asking.
 
@@ -57,7 +67,10 @@ class EMProject:
         elif force and (self.has_mesh() or self.has_results()):
             self.invalidate_mesh()
 
-        self.geometry = Assembly(main_axis=main_axis)  # the setter saves
+        if main_axis is not None:
+            self._main_axis = str(main_axis).upper()
+        self._part_name = None
+        self.geometry = Assembly(main_axis=self._main_axis)  # the setter saves
         return self.geometry
 
     def __init__(
@@ -106,6 +119,10 @@ class EMProject:
         self._order = 3
         self._n_port_modes = 1
         self._loading = False  # Guard flag to prevent save() during _initial_load()
+        # Axis along which parts are chained (None = not chosen -> Z) and the
+        # name of the part while the project holds a single geometry.
+        self._main_axis: Optional[str] = None
+        self._part_name: Optional[str] = None
         
         # Automatic Loading or Creation
         if self.project_path.exists():
@@ -165,6 +182,8 @@ class EMProject:
         self.bc = metadata.get("bc", self.bc)
         self._order = metadata.get("order", self._order)
         self._n_port_modes = metadata.get("n_port_modes", self._n_port_modes)
+        self._main_axis = metadata.get("main_axis")
+        self._part_name = metadata.get("part_name")
 
         # 1. Load Geometry FIRST
         has_geo = metadata.get("has_geometry", False)
@@ -187,6 +206,10 @@ class EMProject:
         if has_mesh:
             pm = ProjectManager(self.base_dir)
             self.mesh = pm.load_ngs_mesh(self.mesh_path)
+            # A reloaded chain has no mesh of its own until meshed again; give
+            # it the project's, so proj.geo.show('mesh') works after reopening.
+            if self.geometry is not None and getattr(self.geometry, 'mesh', None) is None:
+                self.geometry.mesh = self.mesh
 
         # 3. Load Solver (FDS) LAST - needs mesh for port mode reconstruction
         if metadata.get("has_fds"):
@@ -208,6 +231,15 @@ class EMProject:
                 # (a pickled FES would carry its own, separate mesh copy).
                 if self.mesh and self._fds.mesh is None:
                     self._fds.mesh = self.mesh
+
+        # Referenced parts: say so if a source moved or was re-solved since.
+        try:
+            from cavsim3d.solvers.netlist_persistence import check_references
+            for msg in check_references(self.project_path):
+                pr.warning(f"{msg}. The saved results may be out of date: solve() "
+                           "again to refresh them (or localize() to keep copies).")
+        except Exception as e:
+            pr.warning(f"Could not check referenced projects: {e}")
 
         self._loading = False  # Re-enable save()
 
@@ -243,51 +275,259 @@ class EMProject:
             value.order = self._order
             value.n_port_modes = self._n_port_modes
 
-    def import_geometry(self, filepath: Union[str, Path], force: bool = False, **kwargs) -> 'OCCImporter':
-        """Import geometry from a file into the project."""
-        if (self.has_mesh() or self.has_results()) and not force:
-            if not get_user_confirmation(
-                "\nWARNING: Importing new geometry will invalidate the current mesh and simulation results.\n"
-                "Do you want to continue and delete existing results?"
-            ):
-                pr.info("Aborting geometry import.")
-                return self.geometry
+    # =========================================================================
+    # Parts: the project's geometry list
+    # =========================================================================
+    #
+    # A project holds a list of parts.  With one part the project's geometry is
+    # that part itself; adding a second part turns the geometry into an
+    # Assembly holding both, chained in list order along ``main_axis``.
+    # Adding a part under a name the project already has REPLACES that part
+    # (re-running a notebook cell does not double the model); use ``n=`` to
+    # repeat a part.
 
-            self.invalidate_mesh()
+    @property
+    def main_axis(self) -> str:
+        """Axis along which the parts are chained (Z unless set)."""
+        return self._main_axis or 'Z'
 
-        self.geometry = self.create_importer(filepath, **kwargs)  # the setter saves
-        return self.geometry
+    @main_axis.setter
+    def main_axis(self, axis: str) -> None:
+        axis = str(axis).upper()
+        if axis not in ('X', 'Y', 'Z'):
+            raise ValueError(f"main axis must be 'X', 'Y' or 'Z', got {axis!r}")
+        self._main_axis = axis
+        if isinstance(self.geometry, Assembly):
+            self.geometry.set_main_axis(axis)
+        if not self._loading:
+            self.save()
 
-    def create_importer(self, filepath: Union[str, Path], **kwargs) -> 'OCCImporter':
-        """Create an OCCImporter for a CAD file (without necessarily setting it as the project geometry)."""
-        return OCCImporter(str(filepath), **kwargs)
+    @property
+    def parts(self) -> dict:
+        """The project's parts in chain order, ``{name: part}``."""
+        g = self.geometry
+        if g is None:
+            return {}
+        if isinstance(g, Assembly):
+            return {k: g._components[k].geometry for k in g._component_order}
+        return {self._part_name or _default_part_name(g): g}
 
-    def create_primitive(self, primitive_type: str, force: bool = False, **kwargs) -> BaseGeometry:
-        """Create a primitive geometry and associate it with the project."""
-        if (self.has_mesh() or self.has_results()) and not force:
-            if not get_user_confirmation(
-                "\nWARNING: Geometry change will invalidate the current mesh and simulation results.\n"
-                "Do you want to continue and delete existing results?"
-            ):
-                pr.info("Aborting primitive creation.")
-                return self.geometry
+    def import_geometry(self, filepath: Union[str, Path], name: Optional[str] = None, *,
+                        n: int = 1, flip: bool = False, after: Optional[str] = None,
+                        before: Optional[str] = None, force: bool = False,
+                        **kwargs) -> BaseGeometry:
+        """Import a CAD file (STEP, IGES, BREP) as a part of this project.
 
-            self.invalidate_mesh()
-        
-        # Map string names to classes
+        The first part becomes the project's geometry; further parts are
+        appended and chained along ``main_axis``.  A part with the same
+        ``name`` (default: the file name) is replaced.  ``**kwargs`` go to the
+        importer (``unit=``, ``auto_build=`` ...).  Returns the part.
+        """
+        part = OCCImporter(str(filepath), **kwargs)
+        name = name or Path(filepath).stem
+        return self._add_part(name, part, n=n, flip=flip, after=after,
+                              before=before, force=force)
+
+    def create_primitive(self, primitive_type: str, name: Optional[str] = None, *,
+                         n: int = 1, flip: bool = False, after: Optional[str] = None,
+                         before: Optional[str] = None, force: bool = False,
+                         **kwargs) -> BaseGeometry:
+        """Create a primitive as a part of this project.
+
+        ``primitive_type`` is one of (case and underscores ignored, so the
+        class name works too):
+
+        - ``'rectangular_waveguide'`` / ``'rwg'``, ``'circular_waveguide'`` /
+          ``'cwg'`` (dimensions in metres);
+        - the bodies of revolution ported from cavsim2d, with the cavsim2d
+          constructor arguments (dimensions in mm unless ``unit=`` says
+          otherwise): ``'elliptical_cavity'``, ``'elliptical_cavity_flattop'``
+          / ``'flattop'``, ``'rfgun'``, ``'pillbox'``, ``'spline_cavity'``,
+          ``'beampipe'``, ``'bla'``, ``'bellows'``, ``'taper'``.  These are
+          built without a mesh: :meth:`generate_mesh` makes it (or the first
+          solve, with the part's ``maxh``).
+
+        ``**kwargs`` go to the class (``maxh`` in metres); the bodies of
+        revolution also take them as one dict, ``config={...}``.  Parts are
+        handled as in :meth:`import_geometry`.  Returns the part.
+
+        >>> tesla = [42, 42, 12, 19, 35, 57.7, 103.353]
+        >>> proj.create_primitive('elliptical_cavity', name='tesla', n_cells=9,
+        ...                       mid_cell=tesla, beampipe='both', maxh=0.02)
+        """
+        from cavsim3d.geometry import axisymmetric as axi
         mapping = {
-            'rectangular_waveguide': primitives.RectangularWaveguide,
-            'circular_waveguide': primitives.CircularWaveguide,
+            'rectangularwaveguide': primitives.RectangularWaveguide,
+            'circularwaveguide': primitives.CircularWaveguide,
             'rwg': primitives.RectangularWaveguide,
             'cwg': primitives.CircularWaveguide,
+            'ellipticalcavity': axi.EllipticalCavity,
+            'ellipticalcavityflattop': axi.EllipticalCavityFlatTop,
+            'flattop': axi.EllipticalCavityFlatTop,
+            'rfgun': axi.RFGun,
+            'pillbox': axi.Pillbox,
+            'splinecavity': axi.SplineCavity,
+            'beampipe': axi.Beampipe,
+            'bla': axi.BLA,
+            'bellows': axi.Bellows,
+            'taper': axi.Taper,
         }
-        
-        cls = mapping.get(primitive_type.lower())
+        key = primitive_type.lower().replace('_', '').replace(' ', '')
+        cls = mapping.get(key)
         if not cls:
-            raise ValueError(f"Unknown primitive type: {primitive_type}")
-            
-        self.geometry = cls(**kwargs)  # the setter saves
-        return self.geometry
+            raise ValueError(f"Unknown primitive type: {primitive_type!r}. Known: "
+                             f"{sorted(mapping)}")
+        return self._add_part(name or primitive_type.lower(), cls(**kwargs), n=n,
+                              flip=flip, after=after, before=before, force=force)
+
+    def import_project(self, project_path: Union[str, Path], name: Optional[str] = None, *,
+                       mode: str = 'reference', n: int = 1, after: Optional[str] = None,
+                       before: Optional[str] = None, force: bool = False):
+        """Use another (solved) project as a part of this one.
+
+        ``mode='reference'`` (default) reads the source's saved results where
+        they are; ``mode='copy'`` copies them into this project so it stands
+        alone (:meth:`localize` converts references later).  The source is
+        never written to.  An imported project is always coupled to the other
+        parts through its port modes.  Returns the imported-project handle.
+        """
+        from cavsim3d.core.reuse import ImportedModel
+        handle = ImportedModel(project_path, mode=mode)
+        name = name or Path(project_path).name
+        return self._add_part(name, handle, n=n, after=after, before=before,
+                              force=force)
+
+    def add(self, name: str, part, *, n: int = 1, flip: bool = False,
+            after: Optional[str] = None, before: Optional[str] = None,
+            force: bool = False):
+        """Add any geometry, sub-assembly or imported project as a named part."""
+        return self._add_part(name, part, n=n, flip=flip, after=after,
+                              before=before, force=force)
+
+    def localize(self) -> int:
+        """Copy every referenced project into this one, so it stands alone.
+
+        Run it before sharing or archiving a project that uses
+        ``import_project(..., mode='reference')``.  Already-solved results are
+        copied now; parts not solved yet are copied at the next ``solve()``.
+        Returns the number of parts converted.
+        """
+        from cavsim3d.solvers import netlist_persistence as npz
+        g = self.geometry
+        if not isinstance(g, Assembly):
+            return 0
+        refs = [e for e in g._components.values()
+                if getattr(e.geometry, 'mode', None) == 'reference']
+        if not refs:
+            return 0
+
+        roms_dir = self.project_path / "fds" / "foms" / "roms"
+        flat = roms_dir / "structures.json"
+        entries = json.loads(flat.read_text())["structures"] if flat.exists() else None
+        localized = set()
+        for e in refs:
+            e.geometry.mode = 'copy'
+            base = e.base_name
+            if base in localized:
+                continue
+            localized.add(base)
+            src = Path(e.geometry.project_path)
+            if not src.exists():
+                raise FileNotFoundError(
+                    f"Cannot localize part '{base}': its project {src} is gone.")
+            if entries is not None and any(x.get("domain") == base and
+                                           x.get("source_rom_dir") for x in entries):
+                npz.stage_fom(src, base, self.project_path)
+                new = npz.stage_rom(src, base, self.project_path)
+                entries = [new if x.get("domain") == base else x for x in entries]
+        # The recorded import mode must follow, so a reopened project copies too.
+        for h in g._history:
+            if h.get('op') in ('add', 'replace') and h.get('geometry_type') == 'ImportedModel':
+                for gh in h.get('geometry_history') or []:
+                    if isinstance(gh, dict) and gh.get('op') == 'import_model':
+                        gh['mode'] = 'copy'
+        if entries is not None:
+            npz.write_flat_structures(self.project_path, entries)
+        nl = getattr(self._fds, '_netlist_foms', None) if self._fds else None
+        for base, rec in (getattr(nl, '_components', {}) or {}).items():
+            if base in localized:
+                rec['mode'] = 'copy'
+        imports = npz.read_imports(self.project_path)
+        for e in refs:
+            r = imports.setdefault(e.base_name, {"source": str(e.geometry.project_path),
+                                                 "fingerprint": e.geometry.fingerprint()})
+            r["mode"] = "copy"
+        npz.write_imports(self.project_path, imports)
+        self.save()
+        pr.milestone(f"Localized {len(localized)} part(s): {sorted(localized)}")
+        return len(localized)
+
+    def create_importer(self, filepath: Union[str, Path], **kwargs) -> 'OCCImporter':
+        """Deprecated: use :meth:`import_geometry`, which adds the part to the project."""
+        import warnings
+        warnings.warn(
+            "create_importer() is deprecated: use proj.import_geometry(path, name=...), "
+            "which adds the part to the project (a second part is chained after the "
+            "first).", DeprecationWarning, stacklevel=2)
+        return OCCImporter(str(filepath), **kwargs)
+
+    def _add_part(self, name, part, n=1, flip=False, after=None, before=None,
+                  force=False):
+        from cavsim3d.geometry.assembly import _is_netlist_ref
+        g = self.geometry
+        simple = (n == 1 and not flip and after is None and before is None
+                  and not _is_netlist_ref(part))
+
+        if g is not None and not self._confirm_geometry_change(force):
+            return self.geometry
+
+        if g is None or (not isinstance(g, Assembly)
+                         and name == (self._part_name or _default_part_name(g))):
+            # First part, or the single part replaced.
+            if simple:
+                self._part_name = name
+                self._setting_part = True
+                try:
+                    self.geometry = part                   # the setter saves
+                finally:
+                    self._setting_part = False
+                return part
+            asm = Assembly(main_axis=self._main_axis)
+            asm.add(name, part, n=n, flip=flip)
+            self._part_name = None
+            self.geometry = asm
+            return part
+
+        if not isinstance(g, Assembly):
+            # A second part: the geometry becomes a chain of both.
+            asm = Assembly(main_axis=self._main_axis)
+            asm.add(self._part_name or _default_part_name(g), g)
+            asm.add(name, part, n=n, flip=flip, after=after, before=before)
+            self._part_name = None
+            self.geometry = asm
+            return part
+
+        if name in g._components or name in g._base_name_groups:
+            if after is not None or before is not None:
+                pr.info(f"Part '{name}' replaced in place; after=/before= ignored.")
+            g.replace(name, part, n=n, flip=flip)
+        else:
+            g.add(name, part, n=n, flip=flip, after=after, before=before)
+        self.save()
+        return part
+
+    def _confirm_geometry_change(self, force: bool) -> bool:
+        """Changing the parts invalidates a mesh / results: ask unless forced."""
+        if not (self.has_mesh() or self.has_results()):
+            return True
+        if not force and not get_user_confirmation(
+            "\nWARNING: Changing the parts will invalidate the current mesh and "
+            "simulation results.\nDo you want to continue and delete existing results?"
+        ):
+            pr.info("Keeping the existing parts and results.")
+            return False
+        self.invalidate_mesh()
+        return True
 
     def generate_mesh(self, force: bool = False, **kwargs) -> Mesh:
         """
@@ -298,8 +538,10 @@ class EMProject:
         if self.geometry is None:
             raise RuntimeError("Cannot generate mesh without geometry.")
 
-        if self.has_results() and not force:
-            if not get_user_confirmation(
+        if self.has_results():
+            # force only skips the question: results of the old mesh must go
+            # either way, or the next solve() would return them unchanged.
+            if not force and not get_user_confirmation(
                 "\nWARNING: Re-generating the mesh will invalidate existing simulation results.\n"
                 "Do you want to continue and delete existing results?"
             ):
@@ -309,6 +551,10 @@ class EMProject:
             self.invalidate_results()
 
         self.mesh = self.geometry.generate_mesh(**kwargs)  # the setter saves
+        if self.mesh is None:
+            # A coupled chain has no project-level mesh (each part is meshed
+            # when solved); still save, so changes made to the chain persist.
+            self.save()
         return self.mesh
     
     def draw_material_cf(self, which: str = 'eps'):
@@ -377,6 +623,10 @@ class EMProject:
 
     @geometry.setter
     def geometry(self, value: Optional[BaseGeometry]):
+        # A geometry assigned directly has no part name (it gets a default);
+        # _add_part sets the name itself.
+        if not getattr(self, '_loading', False) and not getattr(self, '_setting_part', False):
+            self._part_name = None
         self._geometry = value
         # Sync solver with new geometry object
         if self._fds:
@@ -485,6 +735,8 @@ class EMProject:
             "order": self._order,
             "n_port_modes": self._n_port_modes,
             "bc": self.bc,
+            "main_axis": self._main_axis,
+            "part_name": self._part_name,
         }
         ProjectManager.save_json(self.project_path, metadata, filename="project.json")
 

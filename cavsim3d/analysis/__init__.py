@@ -5,5 +5,17 @@ from cavsim3d.analysis.eigenmodes import (
     compare_spectra,
     SpectrumComparison,
 )
+from cavsim3d.analysis.network import (
+    band_difference,
+    keep_port_modes,
+    network_matrix,
+    plot_entries,
+    plot_matrix,
+    port_mode_labels,
+)
 
-__all__ = ["cluster_frequencies", "compare_spectra", "SpectrumComparison"]
+__all__ = [
+    "cluster_frequencies", "compare_spectra", "SpectrumComparison",
+    "band_difference", "keep_port_modes", "network_matrix",
+    "plot_entries", "plot_matrix", "port_mode_labels",
+]

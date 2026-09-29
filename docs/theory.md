@@ -823,9 +823,11 @@ which depends on the **geometry**, whereas the TEM wave impedance $Z_\mathrm{TEM
 depends only on the **medium**. For an inhomogeneous cross-section (a quasi-TEM line such as
 microstrip) the three definitions separate, and $Z_{PV}$ is used.
 
-In the code, TEM and quasi-TEM ports are referenced to the line impedance and TE/TM ports to
-the wave impedance, which is the convention CST uses. It is selectable through
-`impedance_reference`, either `'line'` (default) or `'wave'`.
+In the code, TEM and quasi-TEM modes are referenced to the line impedance and TE/TM modes to
+their wave impedance, which is the convention CST uses. The choice is made per mode: the
+higher (TE, TM) modes of a coaxial port are referenced to their own wave impedance, not to
+the line impedance of its TEM mode. It is selectable through `impedance_reference`, either
+`'line'` (default) or `'wave'`.
 
 **The S-matrix cannot reveal the choice.** Let $\mathbf{A} = \mathrm{diag}(\alpha_1, \dots,
 \alpha_N)$, $\alpha_i > 0$, collect the per-mode ratio between the two references, so that

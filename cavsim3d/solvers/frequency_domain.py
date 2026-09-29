@@ -5,6 +5,7 @@ if TYPE_CHECKING:
     import matplotlib.pyplot as plt
     from ngsolve import Mesh
     from cavsim3d.geometry.base import BaseGeometry
+import time
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -18,14 +19,16 @@ from ngsolve import (
     curl, dx, ds, BoundaryFromVolumeCF, CoefficientFunction, Norm, preconditioners,
 )
 from ngsolve.webgui import Draw
-from ngsolve.krylovspace import GMRes
+from ngsolve.krylovspace import GMResSolver
 from cavsim3d.solvers.results import build_fom_collection
+from cavsim3d.solvers.nedelec import check_kind, hcurl_flags
 from cavsim3d.core.constants import mu0, eps0, c0, Z0, MIN_EIGENVALUE
 from cavsim3d.solvers.base import BaseEMSolver, ParameterConverter
 from cavsim3d.solvers.ports import (
     PortEigenmodeSolver, group_port_faces, sorted_logical_ports, logical_port_name
 )
 import cavsim3d.utils.printing as pr
+from cavsim3d.geometry.base import _display_webgui_fallback
 
 # PARDISO ships with MKL, which the macOS ngsolve wheels do not link, so a
 # fallback is needed there. UMFPACK is NOT it: it aborts with "Numeric
@@ -89,9 +92,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     """
 
     # --- Iterative solver defaults ---
-    AUTO_DOF_THRESHOLD = 50_000
+    AUTO_DOF_THRESHOLD = 400_000   # solver_type="auto": iterative above this many DOFs
     DEFAULT_ITERATIVE_OPTS = {
-        'precond': 'local',
+        'precond': 'bddc',
         'maxsteps': 500,
         'tol': 1e-6,
         'printrates': False,
@@ -102,13 +105,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         geometry,
         order: int = 3,
         bc: Optional[str] = None,
-        use_wave_impedance: bool = True
+        use_wave_impedance: bool = True,
+        nedelec: str = 'first',
     ):
         super().__init__()
 
         self.geometry = geometry
         self._mesh: Optional[Mesh] = None
         self.order = order
+        # Nedelec element kind of every H(curl) space ('first' | 'second'; see
+        # solvers.nedelec).  Set before the mesh: the mesh builds the spaces.
+        self.nedelec = check_kind(nedelec)
         self.bc = bc if bc is not None else getattr(geometry, 'bc', None)
         self.use_wave_impedance = use_wave_impedance
         
@@ -189,6 +196,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Convergence info (iterative solver residuals)
         self._residuals: Dict[str, dict] = {}
+        # Sweep checkpoint folder override (see _checkpoint_root)
+        self._checkpoint_dir: Optional[Path] = None
 
         # Reset resonant mode cache
         self._resonant_mode_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -294,6 +303,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         ``port_media_eps`` treats dielectric-filled ports as vacuum.
         """
         ps = PortEigenmodeSolver(self._mesh, self.order, self.bc,
+                                 nedelec=self.nedelec,
                                  mode_source=self.port_mode_source,
                                  mode_source_internal=self.port_mode_source_internal)
         self._attach_port_media(ps)
@@ -327,6 +337,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 fes = HCurl(
                     self._mesh,
                     order=self.order,
+                    **hcurl_flags(self.nedelec),
                     dirichlet=self.bc,
                     definedon=region,
                     complex=self._is_lossy(),
@@ -458,29 +469,31 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         -------
         >>> hom = proj.fds.import_model("path/to/hom_coupler_project")
         >>> asm.add("hom", hom, after="cavity")
+
+        Deprecated: use ``proj.import_project(path, name=..., mode=...)``, which
+        adds the project as a part (``mode='copy'`` matches this method).
         """
+        import warnings
+        warnings.warn(
+            "fds.import_model() is deprecated: use proj.import_project(path, name=..., "
+            "mode='copy' | 'reference'), which adds the project as a part.",
+            DeprecationWarning, stacklevel=2)
         from cavsim3d.core.reuse import ImportedModel
         return ImportedModel(project_path)
 
     def _netlist_assembly(self):
-        """Return the geometry if it is an assembly NETLIST, else None.
+        """Return the geometry if its parts are COUPLED (a netlist), else None.
 
-        A netlist assembly holds components that are references (imported
-        project paths / :class:`ImportedModel`) and/or repeat counts n > 1.
-        Plain geometry assemblies (all n == 1) keep the glued multi-solid
-        path unchanged.
+        With the default strategy an assembly is coupled when a part is an
+        imported project or is repeated (n > 1); plain geometry parts are glued
+        into one multi-solid mesh.  ``Assembly.set_mesh_strategy`` overrides.
         """
         from cavsim3d.geometry.assembly import Assembly
         g = self.geometry
         if not isinstance(g, Assembly):
             return None
-        for e in g._components.values():
-            comp = e.geometry
-            if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
-                return g
-            if int(e.metadata.get('n', 1)) > 1:
-                return g
-        return None
+        strategy, _ = g.resolved_mesh_strategy()
+        return g if strategy == 'coupled' else None
 
     def _solve_netlist(self, asm, cfg: Dict) -> Dict:
         """FOM stage for a netlist assembly — SINGLE fds, flat per-domain layout.
@@ -499,28 +512,229 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 "Assembly netlists must be driven from an EMProject "
                 "(proj.fds.solve()), so the flat fds/foms tree has a home.")
         project_root = Path(self._project_path)
+        _strategy, why = asm.resolved_mesh_strategy()
+        pr.milestone(f"Mesh strategy: coupled ({why}): each unique part is solved on "
+                f"its own and the parts are joined through their port modes.")
 
+        from cavsim3d.solvers import netlist_persistence as npz
+        plan = self._netlist_plan(asm, cfg)
+        previous = npz.read_imports(project_root)
         components: Dict[str, Dict] = {}
+        imports: Dict[str, Dict] = {}
         for key in asm._component_order:
             entry = asm._components[key]
             base = entry.base_name
             if base in components:
                 continue
             comp = entry.geometry
-            if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
-                components[base] = self._stage_imported_section(
-                    base, comp, project_root)
+            action = plan[base][1]
+            if action == 'recompute':
+                # The imported part does not fit (or has no results): solve it
+                # here from its geometry.  Written into THIS project only.
+                from cavsim3d.geometry.base import BaseGeometry
+                src = Path(getattr(comp, 'project_path', comp))
+                geo = BaseGeometry.load_geometry(src)
+                if getattr(geo, 'mesh', None) is None:
+                    geo.generate_mesh()
+                components[base] = self._run_section_fom(base, geo, cfg, project_root)
+                components[base]["derived_from"] = str(src)
+                continue
+            if action == 'reduce':
+                src = Path(getattr(comp, 'project_path', comp))
+                mode = getattr(comp, 'mode', 'copy')
+                if mode == 'reference':
+                    components[base] = {"kind": "imported", "mode": "reference",
+                                        "source": str(src), "reduce": True,
+                                        "fingerprint": comp.fingerprint()}
+                else:
+                    components[base] = self._stage_imported_section(base, comp, project_root)
+                    components[base]["reduce"] = True
+                imports[base] = components[base]
+                continue
+            if getattr(comp, 'mode', None) == 'reference':
+                components[base] = self._reference_imported_section(base, comp)
+                imports[base] = components[base]
+            elif isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
+                src = Path(getattr(comp, 'project_path', comp))
+                prev = previous.get(base, {})
+                same_source = (prev.get("source")
+                               and Path(prev["source"]).resolve() == src.resolve())
+                if (same_source and npz.has_local_copy(project_root, base)
+                        and not (cfg.get('rerun') is True and src.exists())):
+                    # A copy is a snapshot: keep using it (the source may be gone).
+                    pr.info(f"  netlist section '{base}': using the local copy")
+                    components[base] = {"kind": "imported", "mode": "copy",
+                                        "source": str(src), "local": True,
+                                        "fingerprint": prev.get("fingerprint")}
+                else:
+                    components[base] = self._stage_imported_section(
+                        base, comp, project_root)
+                    if hasattr(comp, 'fingerprint'):
+                        components[base]["fingerprint"] = comp.fingerprint()
+                imports[base] = components[base]
             else:
                 components[base] = self._run_section_fom(
                     base, comp, cfg, project_root)
+        npz.write_imports(project_root, imports)
 
         from cavsim3d.solvers.results import NetlistFOMs
         self._netlist_foms = NetlistFOMs(asm, components, self, dict(cfg))
         self._persist_netlist_project(cfg, project_root)
+        # every section is staged: their sweep checkpoints are spent
+        from cavsim3d.solvers.sweep_checkpoint import clear_checkpoints
+        clear_checkpoints(self._checkpoint_root())
 
         pr.milestone(f"Netlist FOM stage complete: {len(components)} unique "
                      f"section(s) for {sum(int(e.metadata.get('n', 1)) for e in asm._components.values())} instance(s)")
         return {"netlist_sections": list(components.keys())}
+
+    def _netlist_plan(self, asm, cfg: Dict) -> Dict[str, Tuple[str, str, str]]:
+        """Decide, print and (if needed) gate what each unique part needs.
+
+        ``{base: (kind, action, reason)}`` with action one of ``compute``
+        (a geometry part: full-order solve), ``reuse`` (an imported reduced
+        model that fits), ``reduce`` (imported full-order results without a
+        reduced model) or ``recompute`` (an imported part that does not fit
+        the request or has no results: full-order solve from its geometry).
+        Imported parts are never written to; what they lack is computed here.
+        """
+        from cavsim3d.utils.io_utils import is_interactive
+        from cavsim3d.solvers import netlist_persistence as npz
+        previous = npz.read_imports(Path(self._project_path))
+        plan: Dict[str, Tuple[str, str, str]] = {}
+        for key in asm._component_order:
+            entry = asm._components[key]
+            base = entry.base_name
+            if base in plan:
+                continue
+            comp = entry.geometry
+            if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
+                action, reason = self._plan_imported_section(base, comp, cfg, previous)
+                plan[base] = (f"imported ({getattr(comp, 'mode', 'copy')})", action, reason)
+            else:
+                plan[base] = ("geometry", "compute",
+                              f"full-order solve, {cfg.get('nsamples')} samples")
+        width = max(len(b) for b in plan)
+        lines = ["Solve plan:"] + [
+            f"  {b:<{width}}  {kind:<20} {action:<9} {reason}"
+            for b, (kind, action, reason) in plan.items()]
+        pr.milestone("\n".join(lines))
+        redo = [b for b, (_k, a, _r) in plan.items() if a == 'recompute']
+        if redo and cfg.get('rerun') is not True and not is_interactive():
+            raise RuntimeError(
+                "\n".join(lines) + f"\nImported part(s) {redo} need a full-order "
+                "solve in this project. Pass rerun=True to run it (non-interactive "
+                "session).")
+        return plan
+
+    @staticmethod
+    def _fit_problems(band, modes, cfg: Dict) -> List[str]:
+        """Why a part trained on ``band`` (GHz) with ``modes`` per port does not
+        fit the request in ``cfg`` (empty list: it fits)."""
+        from cavsim3d.solvers.ports import resolve_port_mode_counts
+        problems = []
+        fmin, fmax = cfg.get('fmin'), cfg.get('fmax')
+        if band and fmin is not None and fmax is not None:
+            tol = 1e-9 * max(1.0, float(fmax))
+            if float(fmin) < band[0] - tol or float(fmax) > band[1] + tol:
+                problems.append(f"band {float(fmin):g}-{float(fmax):g} GHz is not "
+                                f"covered by its {band[0]:g}-{band[1]:g} GHz")
+        if cfg.get('nportmodes') is not None and modes:
+            try:
+                want = resolve_port_mode_counts(cfg['nportmodes'], list(modes))
+            except ValueError:
+                want = None                      # request names other ports
+            short = [f"{p} has {modes[p]} < {want[p]}" for p in modes
+                     if want and modes[p] < want[p]]
+            if short:
+                problems.append("too few port modes (" + ", ".join(short) + ")")
+        return problems
+
+    def _plan_imported_section(self, base: str, comp, cfg: Dict,
+                               previous: Optional[Dict] = None) -> Tuple[str, str]:
+        """``(action, reason)`` for an imported part: reuse / reduce / recompute."""
+        import json as _json
+        from cavsim3d.core.reuse import ImportedModel
+        from cavsim3d.solvers.ports import resolve_port_mode_counts
+        from cavsim3d.solvers import netlist_persistence as npz
+        src = Path(getattr(comp, 'project_path', comp))
+
+        # A copy is a snapshot: if this project already holds one of the same
+        # source, judge the copy (the source may be gone).
+        prev = (previous or {}).get(base, {})
+        root = Path(self._project_path)
+        if (getattr(comp, 'mode', 'copy') == 'copy' and prev.get('source')
+                and Path(prev['source']).resolve() == src.resolve()
+                and npz.has_local_copy(root, base) and cfg.get('rerun') is not True):
+            flat = root / "fds" / "foms" / "roms" / "structures.json"
+            entry = next((e for e in (_json.loads(flat.read_text()).get("structures", [])
+                                      if flat.exists() else [])
+                          if e.get("domain") == base), None)
+            if entry is None:
+                return 'reuse', "its local copy (reduced at the next reduce)"
+            b = entry.get("band")
+            problems = self._fit_problems(
+                (b['fmin_GHz'], b['fmax_GHz']) if b else None,
+                {p: len(m) for p, m in entry.get("port_modes", {}).items()}, cfg)
+            if not problems:
+                return 'reuse', "its local copy fits the request"
+
+        if not src.exists():
+            raise FileNotFoundError(
+                f"Imported part '{base}': project not found at {src}. Restore it, or "
+                "point the part at its new location "
+                "(proj.import_project(new_path, name=...) replaces the part).")
+        info = comp if isinstance(comp, ImportedModel) else ImportedModel(src, mode='copy')
+
+        band, modes = None, None
+        if info.rom_dir is not None:
+            have = 'rom'
+            tb = info.training_band
+            band = (tb['fmin_GHz'], tb['fmax_GHz']) if tb else None
+            modes = {p: len(m) for p, m in info.port_modes.items()}
+        else:
+            snaps = info.fom_dir / "snapshots" if info.fom_dir is not None else None
+            have = ('fom' if snaps is not None and snaps.exists()
+                    and any(snaps.iterdir()) else 'geometry')
+            conf = src / "fds" / "config.json"
+            if have == 'fom' and conf.exists():
+                c = _json.loads(conf.read_text())
+                if c.get('fmin') is not None and c.get('fmax') is not None:
+                    band = (float(c['fmin']), float(c['fmax']))
+                spec = c.get('nportmodes_spec', c.get('n_modes_per_port'))
+                if c.get('ports') and spec is not None:
+                    modes = resolve_port_mode_counts(spec, c['ports'])
+        if have == 'geometry':
+            if not info.has_geometry:
+                raise ValueError(f"Imported part '{base}': {src} has neither results "
+                                 "nor a geometry to compute them from.")
+            return 'recompute', "no results yet: full-order solve from its geometry"
+
+        problems = self._fit_problems(band, modes, cfg)
+        if problems:
+            if not info.has_geometry:
+                raise ValueError(
+                    f"Imported part '{base}' does not fit this request "
+                    f"({'; '.join(problems)}) and {src} has no geometry to "
+                    "recompute it from.")
+            return 'recompute', "; ".join(problems)
+        if have == 'rom':
+            return 'reuse', "its reduced model fits the request"
+        return 'reduce', "full-order results, no reduced model yet"
+
+    @staticmethod
+    def _reference_imported_section(base: str, comp) -> Dict:
+        """Resolve a REFERENCED imported section: record where it lives and a
+        fingerprint of its results; nothing is copied or recomputed."""
+        src = Path(comp.project_path)
+        if not src.exists():
+            raise FileNotFoundError(
+                f"Referenced part '{base}': project not found at {src}. Restore it, "
+                "or point the part at its new location "
+                "(proj.import_project(new_path, name=...) replaces the part).")
+        pr.info(f"  netlist section '{base}': referenced from {src}")
+        return {"kind": "imported", "mode": "reference", "source": str(src),
+                "fingerprint": comp.fingerprint()}
 
     @staticmethod
     def _stage_imported_section(base: str, comp, project_root: Path) -> Dict:
@@ -534,7 +748,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 "Restore it or re-import.")
         npz.stage_fom(src, base, project_root)
         pr.info(f"  netlist section '{base}': imported (copied) from {src}")
-        return {"kind": "imported", "source": str(src)}
+        return {"kind": "imported", "mode": "copy", "source": str(src)}
 
     @staticmethod
     def _run_section_fom(base: str, comp, cfg: Dict, project_root: Path) -> Dict:
@@ -547,6 +761,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         work = Path(_tf.mkdtemp(prefix="cavsim3d_section_"))
         sub = EMProject(name=base, base_dir=str(work), overwrite=True)
         sub.geometry = comp
+        # the section's samples live in THIS project, so an interrupted
+        # netlist solve resumes the section instead of starting it over
+        sub.fds._checkpoint_dir = Path(project_root) / "fds" / "checkpoint" / "sections" / base
         sub.fds.solve(config=dict(cfg))
         sub.save()
         npz.stage_fom(work / base, base, project_root)
@@ -847,6 +1064,63 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             return None
         finally:
             ps.impedance_reference = saved
+
+    #: Reference-impedance convention of saved Z/S. 2: only the TEM mode of a
+    #: coaxial port is referred to the line impedance, its TE/TM modes to
+    #: their own wave impedance (1 referred every mode of a coax port to the
+    #: line impedance).
+    Z_REFERENCE_VERSION = 2
+
+    def _legacy_line_referred_modes(self) -> Dict[Tuple[str, int], complex]:
+        """TE/TM port modes that version-1 results referred to a coax line
+        impedance: ``{(port, mode): line impedance}``."""
+        ps = self.port_solver
+        if (ps is None or not self.use_wave_impedance
+                or getattr(self, 'impedance_reference', 'line') != 'line'):
+            return {}
+        out = {}
+        for port, types in (getattr(ps, 'port_mode_types', {}) or {}).items():
+            tem = [m for m, t in types.items() if t == 'TEM']
+            zl = ps.get_port_line_impedance(port, tem[0]) if tem else None
+            if zl is None:
+                continue
+            out.update({(str(port), int(m)): zl for m, t in types.items() if t != 'TEM'})
+        return out
+
+    def _upgrade_saved_reference(self) -> None:
+        """Re-refer version-1 results to the current convention.
+
+        Version 1 scaled the Z of a coax port's TE/TM modes by
+        |Z_line| / |Z_wave(f0)| and computed S against Z_line.  Undoing that
+        factor recovers the wave-normalised Z exactly, so the single-part
+        result is corrected here without a re-solve.
+        """
+        legacy = self._legacy_line_referred_modes()
+        fom = self._fom_cache
+        Z = getattr(fom, '_Z_matrix', None)
+        order = self._port_mode_order
+        if legacy and Z is not None and order and len(order) == Z.shape[1]:
+            f = np.asarray(fom.frequencies)
+            r = np.array([abs(legacy[(p, m)]) / abs(self._port_wave_impedance(p, m, f[0]))
+                          if (p, m) in legacy else 1.0 for p, m in order])
+            Z = Z / np.sqrt(np.outer(r, r))[None, :, :]
+            S = np.array([ParameterConverter.z_to_s(
+                Z[k], np.diag([self._get_port_impedance(p, m, fk) for p, m in order]))
+                for k, fk in enumerate(f)])
+            fom._Z_matrix, fom._S_matrix = Z, S
+            fom._Z_dict = fom._S_dict = None
+            self._Z_global_coupled = self._Z_matrix = Z
+            self._S_global_coupled = self._S_matrix = S
+            self._invalidate_cache()
+            pr.info(f"Saved S/Z re-referred: the TE/TM modes {sorted(legacy)} of coaxial "
+                    f"ports now use their own wave impedance, not the TEM line impedance.")
+        if legacy and (self._Z_per_domain or self._foms_cache is not None):
+            warnings.warn(
+                f"The saved per-domain S/Z refer the TE/TM modes {sorted(legacy)} of "
+                f"coaxial ports to the TEM line impedance. Solve again with rerun=True "
+                f"to refer them to their own wave impedance.", UserWarning, stacklevel=3)
+            return
+        self._z_reference = self.Z_REFERENCE_VERSION
 
     def _get_port_impedance(self, port: str, mode: int, freq: float) -> complex:
         """Get port wave impedance."""
@@ -1173,18 +1447,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         return False
 
     def _build_loss_cfs(self):
-        """``(sigma_cf, eps_tand_cf)`` over the mesh materials, or ``(None, None)``.
+        """``(sigma_cf, eps_tand_cf)`` over the mesh materials.
 
         ``eps_tand_cf`` is eps_r * tan_delta (the imaginary part of eps_r).
+        Each is None when that loss is zero everywhere: a zero coefficient
+        would drop the trial/test functions from the form (and assemble an
+        empty matrix).
         """
         sig, epst = [], []
         for name in self.mesh.GetMaterials():
             eps_r, _mu, sigma, tand = self._material_props(name)
             sig.append(sigma)
             epst.append(eps_r * tand)
-        if not any(sig) and not any(epst):
-            return None, None
-        return CoefficientFunction(sig), CoefficientFunction(epst)
+        return (CoefficientFunction(sig) if any(sig) else None,
+                CoefficientFunction(epst) if any(epst) else None)
 
     def _build_material_cfs(self):
         """Build CoefficientFunctions for eps_r and mu_r from mesh materials.
@@ -1214,10 +1490,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         eps_r_cf, mu_r_cf = self._build_material_cfs()
         if which == 'eps':
-            Draw(BoundaryFromVolumeCF(eps_r_cf), self.mesh)
+            _display_webgui_fallback(Draw(BoundaryFromVolumeCF(eps_r_cf), self.mesh))
         elif which == 'mu':
-            Draw(BoundaryFromVolumeCF(mu_r_cf), self.mesh)
-
+            _display_webgui_fallback(Draw(BoundaryFromVolumeCF(mu_r_cf), self.mesh))
     def _assemble_per_domain_matrices(self) -> None:
         """Assemble matrices for each domain independently.
 
@@ -1241,6 +1516,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             fes = HCurl(
                 self.mesh,
                 order=self.order,
+                **hcurl_flags(self.nedelec),
                 dirichlet=self.bc,
                 definedon=region,
                 complex=lossy,
@@ -1309,6 +1585,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._fes_global = HCurl(
             self.mesh,
             order=self.order,
+            **hcurl_flags(self.nedelec),
             complex=self._is_lossy(),
             dirichlet=self.bc
         )
@@ -1486,7 +1763,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     # ------------------------------------------------------------------
 
     def _compare_loaded_config(self, fmin, fmax, nsamples,
-                               order, nportmodes) -> List[str]:
+                               order, nportmodes, nedelec=None) -> List[str]:
         """Compare the requested solve against the loaded (saved) config.
 
         Returns a list of human-readable differences (frequency range, solver
@@ -1507,6 +1784,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Solver settings
         if order is not None and order != loaded.get('order'):
             diffs.append(f"order: {loaded.get('order')} -> {order}")
+        if nedelec is not None and nedelec != loaded.get('nedelec', 'second'):
+            diffs.append(f"nedelec: {loaded.get('nedelec', 'second')} -> {nedelec}")
         if nportmodes is not None and nportmodes != loaded.get('n_modes_per_port'):
             diffs.append(f"nportmodes: {loaded.get('n_modes_per_port')} -> {nportmodes}")
 
@@ -1541,7 +1820,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         return diffs
 
     def _compare_current_sweep(self, fmin, fmax, nsamples,
-                               order=None, nportmodes=None) -> List[str]:
+                               order=None, nportmodes=None, nedelec=None) -> List[str]:
         """Differences between a requested sweep and the one held in memory.
 
         Covers a second ``solve()`` in the same session (no saved config to
@@ -1559,6 +1838,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             diffs.append(f"nsamples: {len(f)} -> {nsamples}")
         if order is not None and order != self.order:
             diffs.append(f"order: {self.order} -> {order}")
+        if nedelec is not None and nedelec != self.nedelec:
+            diffs.append(f"nedelec: {self.nedelec} -> {nedelec}")
         spec = (self._nportmodes_spec if self._nportmodes_spec is not None
                 else self._n_modes_per_port)
         if nportmodes is not None and nportmodes != spec:
@@ -1617,6 +1898,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         Also re-initializes the port solver when the mesh exists but the
         solver state was cleared (e.g. after a reload).
         """
+        geo = self.geometry
+        if (self.mesh is None and geo is not None and geo.mesh is None
+                and getattr(geo, 'mesh_on_demand', False)):
+            # Geometries that are built without a mesh (the bodies of
+            # revolution) are meshed here with their own settings if
+            # generate_mesh() was never called.
+            pr.milestone(f"No mesh yet: meshing {type(geo).__name__} with maxh={geo.maxh} m "
+                         "(call generate_mesh() before solving to choose the mesh).")
+            geo.generate_mesh()
         if self.mesh is None and self.geometry and self.geometry.mesh:
             self.mesh = self.geometry.mesh
             # Sync back to the project for consistency and auto-save.
@@ -1635,11 +1925,18 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # materials may have been (re)assigned since the solver was built
             self._attach_port_media(self.port_solver)
 
-    def _apply_order_change(self, order: Optional[int]) -> None:
-        """Switch FE order: rebuild FE spaces, port solver and matrices."""
-        if order is None or order == self.order:
+    def _apply_order_change(self, order: Optional[int],
+                            nedelec: Optional[str] = None) -> None:
+        """Switch FE order and/or Nedelec kind: rebuild FE spaces, port solver
+        and matrices."""
+        new_order = order is not None and order != self.order
+        new_kind = nedelec is not None and nedelec != self.nedelec
+        if not (new_order or new_kind):
             return
-        self.order = order
+        if new_order:
+            self.order = order
+        if new_kind:
+            self.nedelec = nedelec
         if self.mesh is not None:
             # The requested mode counts survive an order change.
             spec, n_modes = self._nportmodes_spec, self._n_modes_per_port
@@ -1674,6 +1971,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         Supports passing arguments directly or via a 'config' dictionary.
         Individual keyword arguments override the config dictionary.
 
+        Each finished frequency sample is written to ``fds/checkpoint/``; an
+        interrupted sweep resumes when ``solve()`` is called again with the
+        same request (only the missing samples are computed).
+
         Parameters
         ----------
         fmin : float, optional
@@ -1685,7 +1986,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         config : dict, optional
             Dictionary containing solve parameters
         **kwargs :
-            Individual solve parameters (order, nportmodes, store_snapshots, etc.)
+            Individual solve parameters (order, nportmodes, store_snapshots, etc.).
+            ``nedelec='first'`` (default) or ``'second'`` selects the Nedelec
+            element kind: ``'first'`` has the same curls as ``'second'`` with
+            about a third fewer unknowns at order 2 (see
+            :mod:`cavsim3d.solvers.nedelec`).  A project saved without the
+            setting was computed with ``'second'`` and keeps it.
         """
         # 1. Merge config and kwargs
         cfg = (config or {}).copy()
@@ -1711,6 +2017,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # 3. Extract other options from merged cfg
         order = cfg.get('order')
+        nedelec = cfg.get('nedelec')
+        if nedelec is not None:
+            check_kind(nedelec)
         nportmodes = cfg.get('nportmodes')
         store_snapshots = cfg.get('store_snapshots', True)
         compute_s_params = cfg.get('compute_s_params', True)
@@ -1777,10 +2086,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if rerun is not True:
                 if self._loaded_config:
                     diffs = self._compare_loaded_config(fmin, fmax, nsamples,
-                                                        order, nportmodes)
+                                                        order, nportmodes, nedelec)
                 elif self._has_valid_results():
                     diffs = self._compare_current_sweep(fmin, fmax, nsamples,
-                                                        order, nportmodes)
+                                                        order, nportmodes, nedelec)
                 diffs += port_setting_diffs
 
             if rerun is False or (rerun is None and not diffs):
@@ -1803,8 +2112,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 if self._foms_cache:
                     self._foms_cache.clear_roms()
                 self._clear_results()
+            if rerun is True:
+                # a forced recompute also ignores samples of an interrupted sweep
+                from cavsim3d.solvers.sweep_checkpoint import clear_checkpoints
+                clear_checkpoints(self._checkpoint_root())
 
-            self._apply_order_change(order)
+            self._apply_order_change(order, nedelec)
 
             self.frequencies = np.linspace(fmin, fmax, nsamples) * 1e9
 
@@ -1881,6 +2194,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             })
 
             self._persist()
+            # the complete results are saved: the per-sample checkpoint is spent
+            # (a redirected one is cleared by its owner once it has staged them)
+            if getattr(self, '_checkpoint_dir', None) is None:
+                from cavsim3d.solvers.sweep_checkpoint import clear_checkpoints
+                clear_checkpoints(self._checkpoint_root())
 
             return self._build_results_dict(compute_s_params, per_domain, global_method)
         finally:
@@ -1975,9 +2293,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             n_free = len(free_idx)
             pr.debug(f"  DOFs: {fes.ndof} total, {n_free} free")
 
+            # Samples an interrupted solve of this same sweep already computed
+            ckpt, restored = self._open_sweep_checkpoint(domain, fes, n_free, B,
+                                                         store_snapshots)
+
             # Pre-allocate results
             Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-            snapshots_list = [] if store_snapshots else None
+            # snapshots: one column per (sample, excitation), filled in place
+            snaps = (np.empty((fes.ndof, n_freqs * n_excitations), dtype=x_dtype, order='F')
+                     if store_snapshots else None)
 
             total_iter_steps = 0
             freq_iters = []
@@ -1990,11 +2314,35 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # ============================================================
             # FREQUENCY LOOP
             # ============================================================
+            batch = max(1, n_freqs // 10)
+            t_batch, n_restored = time.time(), 0
+            x_prev = None          # previous sample's solutions: GMRES start vectors
             for kk, freq in enumerate(self.frequencies):
+                if kk % batch == 0:
+                    pr.debug(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
+
+                if kk in restored:
+                    r = restored[kk]
+                    Z_matrix[kk] = r['Z']
+                    freq_iters.extend(r['iters'].tolist())
+                    freq_residuals.extend(r['res'].tolist())
+                    if store_snapshots:
+                        snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = r['x']
+                    x_prev = r['x']
+                    n_restored += 1
+                    if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                        self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
+                                           freq_residuals, n_excitations, st, iter_opts,
+                                           restored=n_restored)
+                        t_batch, n_restored = time.time(), 0
+                    continue
+
+                t_freq_start = time.time()
                 omega = 2 * np.pi * freq
 
                 # Build system matrix: A(w) = K + jwC - w^2 (M - jD)
-                a_form = BilinearForm(fes)
+                sym = self._store_symmetric(st)
+                a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
                 for mm, eps_r, mu_r, sigma, tand in domain_materials:
                     a_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(mm)
                     a_form += -omega ** 2 * (eps0 * eps_r) * u * v * dx(mm)
@@ -2031,15 +2379,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                         freq_iters.append(0)
                         freq_residuals.append(0.0)
                     else:
-                        # Iterative solve with initial guess from previous excitation
-                        if col > 0:
-                            # Use previous solution as initial guess
-                            sol_vec.FV().NumPy()[:] = x_all[:, col - 1]
-                        else:
-                            sol_vec[:] = 0
-
+                        # start from the same excitation's solution at the
+                        # previous sample (fewer GMRES steps than a zero start)
                         sol_vec, iters, res = self._solve_system(
-                            fes, a_form, rhs_scaled, precond, iter_opts, sol_vec, free_idx
+                            fes, a_form, rhs_scaled, precond, iter_opts,
+                            None if x_prev is None else x_prev[:, col], free_idx
                         )
                         total_iter_steps += iters
                         freq_iters.append(iters)
@@ -2048,6 +2392,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     # Store solution
                     x_all[:, col] = sol_vec.FV().NumPy()
 
+                # release this sample's factorization / preconditioner before the
+                # next one is built (otherwise both are held at once)
+                inv_a = precond = None
+
                 # ============================================================
                 # Fast Z extraction: Z = 1j * B^H @ X
                 # ============================================================
@@ -2055,13 +2403,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
                 # Store snapshots if requested
                 if store_snapshots:
-                    for col in range(n_excitations):
-                        snapshots_list.append(x_all[:, col].copy())
+                    snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = x_all
+                x_prev = x_all
 
-                # Progress reporting
-                if (kk + 1) % max(1, n_freqs // 5) == 0 or kk == n_freqs - 1:
-                    elapsed = time.time() - t_domain_start
-                    pr.debug(f"    [{kk + 1}/{n_freqs}] {elapsed:.1f}s elapsed")
+                ckpt.write(kk, Z_matrix[kk], x_all if store_snapshots else None,
+                           freq_iters[-n_excitations:], freq_residuals[-n_excitations:],
+                           time.time() - t_freq_start)
+                if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                    self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
+                                       freq_residuals, n_excitations, st, iter_opts,
+                                       restored=n_restored)
+                    t_batch, n_restored = time.time(), 0
 
             # ============================================================
             # POST-PROCESS: Convert Z_matrix to dict format
@@ -2072,8 +2424,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     key = f"{pn + 1}({mode_n + 1}){pm + 1}({mode_m + 1})"
                     self._Z_per_domain[domain][key] = Z_matrix[:, row, col]
 
-            if store_snapshots and snapshots_list:
-                self.snapshots[domain] = np.array(snapshots_list).T
+            if store_snapshots and n_excitations:
+                self.snapshots[domain] = snaps
 
             t_elapsed = time.time() - t_domain_start
             msg = f"  Completed: {len(domain_ports)} ports, {n_freqs} frequencies in {t_elapsed:.2f}s"
@@ -2088,7 +2440,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 solver_type=st,
             )
 
-            self._store_residuals(domain, n_freqs, freq_iters, freq_residuals, st)
+            self._store_residuals(domain, n_freqs, freq_iters, freq_residuals, st, iter_opts)
 
     def _solve_global_coupled(
         self,
@@ -2180,9 +2532,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         n_free = len(free_idx)
         pr.debug(f"  DOFs: {fes.ndof} total, {n_free} free")
 
+        # Samples an interrupted solve of this same sweep already computed
+        ckpt, restored = self._open_sweep_checkpoint('global', fes, n_free, B,
+                                                     store_snapshots)
+
         # Pre-allocate results
         self._Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-        snapshots_list = [] if store_snapshots else None
+        # snapshots: one column per (sample, excitation), filled in place
+        snaps = (np.empty((fes.ndof, n_freqs * n_excitations), dtype=x_dtype, order='F')
+                 if store_snapshots else None)
 
         total_iter_steps = 0
         freq_iters = []
@@ -2196,16 +2554,37 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # ============================================================
         # FREQUENCY LOOP
         # ============================================================
+        batch = max(1, n_freqs // 10)
+        t_batch, n_restored = time.time(), 0
+        x_prev = None          # previous sample's solutions: GMRES start vectors
         for kk, freq in enumerate(self.frequencies):
-            if kk % max(1, n_freqs // 10) == 0:
+            if kk % batch == 0:
                 pr.debug(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
+
+            if kk in restored:
+                r = restored[kk]
+                self._Z_matrix[kk] = r['Z']
+                freq_iters.extend(r['iters'].tolist())
+                freq_residuals.extend(r['res'].tolist())
+                freq_solve_times.append(r['time'])
+                if store_snapshots:
+                    snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = r['x']
+                x_prev = r['x']
+                n_restored += 1
+                if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                    self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
+                                       freq_residuals, n_excitations, st, iter_opts,
+                                       restored=n_restored)
+                    t_batch, n_restored = time.time(), 0
+                continue
 
             t_freq_start = time.time()
             omega = 2 * np.pi * freq
 
             # Build system matrix A(w) = K + jwC - w^2 (M - jD) -- exactly the
             # K/M/C/D _global matrices that the ROM and eigen solvers use.
-            a_form = BilinearForm(fes)
+            sym = self._store_symmetric(st)
+            a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
             a_form += (1 / (mu0 * mu_r_cf)) * curl(u) * curl(v) * dx
             a_form += -omega ** 2 * (eps0 * eps_r_cf) * u * v * dx
             if sigma_cf is not None:
@@ -2235,13 +2614,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     freq_iters.append(0)
                     freq_residuals.append(0.0)
                 else:
-                    if col > 0:
-                        sol_vec.FV().NumPy()[:] = x_all[:, col - 1]
-                    else:
-                        sol_vec[:] = 0
-
+                    # start from the same excitation's solution at the previous
+                    # sample (fewer GMRES steps than a zero start)
                     sol_vec, iters, res = self._solve_system(
-                        fes, a_form, rhs_scaled, precond, iter_opts, sol_vec, free_idx
+                        fes, a_form, rhs_scaled, precond, iter_opts,
+                        None if x_prev is None else x_prev[:, col], free_idx
                     )
                     total_iter_steps += iters
                     freq_iters.append(iters)
@@ -2249,17 +2626,29 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
                 x_all[:, col] = sol_vec.FV().NumPy()
 
+            # release this sample's factorization / preconditioner before the
+            # next one is built (otherwise both are held at once)
+            inv_a = precond = None
+
             # Fast Z extraction
             self._Z_matrix[kk, :, :] = 1j * (B.T @ x_all)
 
             if store_snapshots:
-                for col in range(n_excitations):
-                    snapshots_list.append(x_all[:, col].copy())
+                snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = x_all
+            x_prev = x_all
 
             freq_solve_times.append(time.time() - t_freq_start)
+            ckpt.write(kk, self._Z_matrix[kk], x_all if store_snapshots else None,
+                       freq_iters[-n_excitations:], freq_residuals[-n_excitations:],
+                       freq_solve_times[-1])
+            if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
+                                   freq_residuals, n_excitations, st, iter_opts,
+                                   restored=n_restored)
+                t_batch, n_restored = time.time(), 0
 
-        if store_snapshots and snapshots_list:
-            self.snapshots["global"] = np.array(snapshots_list).T
+        if store_snapshots and n_excitations:
+            self.snapshots["global"] = snaps
 
         self._Z_global_coupled = self._Z_matrix.copy()
         # Expose per-frequency solve times (freq[Hz], seconds) for reporting.
@@ -2279,7 +2668,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             solver_type=st,
         )
 
-        self._store_residuals('global', n_freqs, freq_iters, freq_residuals, st)
+        self._store_residuals('global', n_freqs, freq_iters, freq_residuals, st, iter_opts)
 
     _PRECONDITIONERS = {
         'local': lambda a: preconditioners.Local(a),
@@ -2309,78 +2698,134 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 precond = a_form.mat.Inverse(fes.FreeDofs(), inverse=_DIRECT_SOLVER)
         return precond
 
-    def _solve_system(self, fes, a_form, f_vec, precond, opts: Dict, x0: Optional[np.ndarray] = None, free_idx=None):
-        """
-        Solve a_form * x = f_vec using direct or iterative method.
+    def _store_symmetric(self, solver_type: str) -> bool:
+        """Store and factorise the (complex) symmetric A(w) as symmetric?
 
-        Parameters
-        ----------
-        fes : NGSolve FESpace
-        a_form : BilinearForm  (NOT yet assembled for iterative path)
-        f_vec : BaseVector
-        solver_type : 'direct' or 'iterative'
-        opts : dict with iterative solver options
+        Measured with PARDISO on a 1.1M-unknown cavity: for second-kind
+        elements the symmetric factorisation takes about the same time with
+        half the memory; for first-kind elements it also halves the memory but
+        takes ~50 % longer, so those keep the full matrix.
+        """
+        return solver_type == 'direct' and self.nedelec == 'second'
+
+    @staticmethod
+    def _report_batch(first, last, t_start, freq_iters, freq_residuals,
+                      n_excitations, solver_type, opts, restored=0):
+        """Print the wall time of samples ``first``..``last`` (0-based).
+
+        Indented one tab deeper than the ``Frequency k/N`` line that opens the
+        batch.  For the iterative solver it adds the GMRES steps per solve,
+        the largest relative residual and how many solves reached ``maxsteps``
+        without converging.  ``restored`` samples came from the checkpoint of
+        an interrupted solve and are not timed.
+        """
+        n = last - first + 1 - restored
+        span = f"  \tsamples {first + 1}-{last + 1}: "
+        if n == 0:
+            pr.debug(span + "read from the checkpoint")
+            return
+        dt = time.time() - t_start
+        msg = span + f"{dt:.1f} s ({dt / n:.1f} s/sample)"
+        if restored:
+            msg += f", {restored} read from the checkpoint"
+        if solver_type == 'iterative':
+            its = np.asarray(freq_iters[first * n_excitations:(last + 1) * n_excitations])
+            res = np.asarray(freq_residuals[first * n_excitations:(last + 1) * n_excitations])
+            msg += (f", GMRES {its.mean():.0f} steps/solve (max {its.max()}), "
+                    f"residual <= {res.max():.1e}")
+            stalled = int(np.sum(its >= opts['maxsteps']))
+            if stalled:
+                msg += f", {stalled} solve(s) stopped at maxsteps={opts['maxsteps']}"
+        pr.debug(msg)
+
+    def _checkpoint_root(self) -> Optional[Path]:
+        """Folder of this solver's sweep checkpoints (None: no project).
+
+        ``<project>/fds/checkpoint`` -- unless ``_checkpoint_dir`` redirects it:
+        a netlist section solved in a scratch project keeps its samples in the
+        importing project, so an interrupted netlist solve resumes too.
+        """
+        if getattr(self, '_checkpoint_dir', None) is not None:
+            return Path(self._checkpoint_dir)
+        root = getattr(self, '_project_path', None)
+        return Path(root) / "fds" / "checkpoint" if root else None
+
+    def _open_sweep_checkpoint(self, key, fes, n_free, rhs, store_snapshots):
+        """The checkpoint of this sweep and the samples it already holds.
+
+        Samples without stored solutions do not count when snapshots are
+        wanted (they were written by a solve with ``store_snapshots=False``).
+        """
+        from cavsim3d.solvers.sweep_checkpoint import (SweepCheckpoint, rhs_signature,
+                                                       sweep_fingerprint)
+        folder = self._checkpoint_root()
+        if folder is None:
+            return SweepCheckpoint(None, key), {}
+        ckpt = SweepCheckpoint(
+            folder, key,
+            sweep_fingerprint(self.frequencies, fes.ndof, n_free, np.shape(rhs)[1],
+                              self._material_signature()),
+            rhs_signature(rhs))
+        restored = {k: r for k, r in ckpt.load().items()
+                    if 0 <= k < len(self.frequencies)
+                    and (r['x'] is not None or not store_snapshots)}
+        if restored:
+            pr.milestone(f"  Resuming an interrupted sweep ({key}): {len(restored)} of "
+                         f"{len(self.frequencies)} samples read from {ckpt.folder}")
+        return ckpt, restored
+
+    def _solve_system(self, fes, a_form, f_vec, precond, opts: Dict, x0=None,
+                      free_idx=None):
+        """Solve ``a_form.mat * x = f_vec`` with preconditioned GMRES.
+
+        ``opts['tol']`` is the absolute tolerance on the preconditioned
+        residual (NGSolve's ``atol``); ``opts['maxsteps']`` caps the Krylov
+        space.  ``x0`` (a numpy vector) is the start vector; zero if None.
 
         Returns
         -------
-        x : BaseVector  (solution)
-        iters : int     (0 for direct, GMRES steps for iterative)
-        residual : float  (relative residual ||Ax-b||/||b||, 0.0 for direct)
+        x : BaseVector
+            Solution.
+        iters : int
+            GMRES (Arnoldi) steps.
+        residual : float
+            True relative residual ||Ax - b|| / ||b|| on the free DOFs.
         """
-
-        # Count iterations via callback
-        iter_count = [0]
-        def _count_iter(sol_vec, it=3):
-            iter_count[0] += 1
-
-        # GMRes is a function: GMRes(A, b, pre=...) → solution vector
-        x = GridFunction(fes)
-
-        # initialise solution with previous solution
+        # The GMResSolver object counts its own steps: an iteration callback
+        # would make NGSolve rebuild the solution at every step.
+        solver = GMResSolver(
+            mat=a_form.mat,
+            # a Preconditioner exposes .mat; the 'direct' option already is one
+            pre=getattr(precond, 'mat', precond),
+            maxiter=opts['maxsteps'],
+            atol=opts['tol'],
+            printrates=opts['printrates'],
+        )
         sol = f_vec.CreateVector()
-        if x0 is not None:
-            sol.data = x0 # might be confusing but solution modifies the initial guess sol internally and returns it
-
+        if x0 is None:
+            sol[:] = 0
+        else:
+            sol.FV().NumPy()[:] = x0
         with TaskManager():
-            sol = GMRes(
-                A=a_form.mat,
-                b=f_vec,
-                x=sol,
-                # a Preconditioner exposes .mat; the 'direct' option already is one
-                pre=getattr(precond, 'mat', precond),
-                # freedofs=fes.FreeDofs(),  # only necessary f no preconditioner
-                maxsteps=opts['maxsteps'],
-                tol=opts['tol'],
-                printrates=opts['printrates'],
-                callback=_count_iter,
-            )
+            # initialize=False keeps the start vector (GMRes() would zero it)
+            sol = solver.Solve(rhs=f_vec, sol=sol, initialize=False)
             if opts['printrates']:
-                print('='*50)
+                print('=' * 50)
+            # the first residual check is the start vector, not a step
+            iters = max(solver.iterations - 1, 0)
 
-            x.vec.data = sol
-            iters = iter_count[0]
+            r = sol.CreateVector()
+            r.data = a_form.mat * sol - f_vec
 
-            # Compute residual on FREE DOFs only
-            r = x.vec.CreateVector()
-            r.data = a_form.mat * x.vec - f_vec
+        # Norms on the free DOFs only (Dirichlet rows are not solved for)
+        if free_idx is None:
+            fd = fes.FreeDofs()
+            free_idx = np.array([i for i in range(fes.ndof) if fd[i]], dtype=np.int64)
+        r_norm = np.linalg.norm(r.FV().NumPy()[free_idx])
+        b_norm = np.linalg.norm(f_vec.FV().NumPy()[free_idx])
+        rel_res = r_norm / b_norm if b_norm > 0 else r_norm
 
-            # Get numpy arrays
-            r_np = r.FV().NumPy()
-            f_np = f_vec.FV().NumPy()
-
-            # Compute norms on free DOFs only (Dirichlet rows are not solved for)
-            if free_idx is None:
-                fd = fes.FreeDofs()
-                free_idx = np.array([i for i in range(fes.ndof) if fd[i]], dtype=np.int64)
-            r_free = r_np[free_idx]
-            f_free = f_np[free_idx]
-            
-            r_norm_free = np.linalg.norm(r_free)
-            b_norm_free = np.linalg.norm(f_free)
-            
-            rel_res = r_norm_free / b_norm_free if b_norm_free > 0 else r_norm_free
-
-        return x.vec, iters, rel_res
+        return sol, iters, rel_res
 
     def _ensure_matrices_assembled(
         self,
@@ -2397,6 +2842,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         prev = getattr(self, '_assembled_signature', None)
         if prev is not None and sig is not None and sig != prev:
             self._global_matrices_assembled = False
+            self._per_domain_matrices_assembled = False
+
+        # A flag restored from config.json whose matrices were never saved (a
+        # solve interrupted before its results were written) -> assemble again
+        if self._global_matrices_assembled and self.B_global is None:
+            self._global_matrices_assembled = False
+        if self._per_domain_matrices_assembled and not self.B:
             self._per_domain_matrices_assembled = False
 
         # Check if port modes exist or if we need a different number of modes.
@@ -2520,6 +2972,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             "fmax": self.frequencies[-1] / 1e9 if self.frequencies is not None else None,
             "nsamples": len(self.frequencies) if self.frequencies is not None else None,
             "order": self.order,
+            "nedelec": self.nedelec,
             "bc": self.bc,
             "use_wave_impedance": self.use_wave_impedance,
             "is_compound": self.is_compound,
@@ -2536,6 +2989,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # only its maximum
             "nportmodes_spec": self._nportmodes_spec,
             "port_mode_order": self._port_mode_order,
+            "z_reference": getattr(self, '_z_reference', self.Z_REFERENCE_VERSION),
             "global_matrices_assembled": self._global_matrices_assembled,
             "per_domain_matrices_assembled": self._per_domain_matrices_assembled,
             "current_global_method": self._current_global_method,
@@ -2619,7 +3073,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             geometry=geometry,
             order=config.get("order", 3),
             bc=config.get("bc"),
-            use_wave_impedance=config.get("use_wave_impedance", True)
+            use_wave_impedance=config.get("use_wave_impedance", True),
+            nedelec=config.get("nedelec", "second"),
         )
         
         # Load matrices, snapshots, etc. from 'path'
@@ -2701,6 +3156,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                         self.frequencies = self._fom_cache.frequencies
                 self._Z_global_coupled = self._fom_cache._Z_matrix
                 self._S_global_coupled = self._fom_cache._S_matrix
+                # The reported global result IS the coupled one (as after a
+                # solve), so a reopened project's solve() returns S and Z too.
+                if self._Z_matrix is None:
+                    self._Z_matrix = self._Z_global_coupled
+                if self._S_matrix is None:
+                    self._S_matrix = self._S_global_coupled
 
                 # Nested ROM inside fom/rom
                 rom_path = fom_root_single / "rom"
@@ -2725,7 +3186,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     # Ensure we have fes_global
                     if self._fes_global is None:
                         from ngsolve import HCurl
-                        self._fes_global = HCurl(self.mesh, order=self.order, dirichlet=self.bc)
+                        self._fes_global = HCurl(self.mesh, order=self.order, dirichlet=self.bc,
+                                                 **hcurl_flags(self.nedelec))
 
                     # Load using the new method that reconstructs NGSolve objects
                     self.port_solver = PortEigenmodeSolver.load_from_file(
@@ -2741,6 +3203,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     # Set convenience references
                     self.port_modes = self.port_solver.port_modes
                     self.port_basis = self.port_solver.port_basis
+
+                    # The saved ROMs were loaded (step 1) before the port
+                    # modes existed: hand them the restored modes.
+                    roms = [getattr(self._fom_cache, '_rom_cache', None),
+                            getattr(getattr(self._foms_cache, '_roms_cache', None),
+                                    '_mor_ref', None)]
+                    for rom in roms:
+                        if rom is not None and getattr(rom, 'port_modes', None) is None:
+                            rom.port_modes = self.port_modes
             except Exception as e:
                 # NgException (vector size mismatch) or other pickle errors
                 warnings.warn(
@@ -2760,6 +3231,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 UserWarning,
                 stacklevel=2
             )
+
+        # Results saved under an older reference-impedance convention
+        self._z_reference = config.get("z_reference", 1)
+        if self._z_reference < self.Z_REFERENCE_VERSION and self.port_solver is not None:
+            self._upgrade_saved_reference()
 
         # 3. Load eigenmodes
         self.load_eigenmodes()
@@ -2798,6 +3274,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._Z_matrix = None
         self._S_matrix = None
         self._invalidate_cache()
+        self._z_reference = self.Z_REFERENCE_VERSION
         self._current_global_method = None
         self.snapshots = {}
         self._residuals = {}
@@ -2834,8 +3311,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         freq_iters: List[int],
         freq_residuals: List[float],
         solver_type: str,
+        opts: Optional[Dict] = None,
     ) -> None:
-        """Helper to store convergence info."""
+        """Store the per-sample GMRES steps and residuals of one solve.
+
+        ``opts`` (the iterative options) adds ``maxsteps`` and ``tol``, so a
+        plot can show which solves stopped at the step limit.
+        """
         if not hasattr(self, '_residuals'):
             self._residuals = {}
 
@@ -2855,6 +3337,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             'residuals_per_excitation': raw_res,
             'solver_type': solver_type,
         }
+        if solver_type == 'iterative' and opts:
+            self._residuals[key]['maxsteps'] = int(opts['maxsteps'])
+            self._residuals[key]['tol'] = float(opts['tol'])
 
     def _domain_port_mode_order(self, domain: str):
         """Ordered ``(local_port_idx, port_name, mode_idx)`` for a domain.
@@ -3934,17 +4419,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             cf_plot = mode_cf.imag
         elif component == 'all':
             print("Plotting Real part:")
-            Draw(mode_cf.real, self.mesh, **kwargs)
+            _display_webgui_fallback(Draw(mode_cf.real, self.mesh, **kwargs))
             print("\nPlotting Imaginary part:")
-            Draw(mode_cf.imag, self.mesh, **kwargs)
+            _display_webgui_fallback(Draw(mode_cf.imag, self.mesh, **kwargs))
             print("\nPlotting Magnitude:")
-            Draw(Norm(mode_cf), self.mesh, **kwargs)
+            _display_webgui_fallback(Draw(Norm(mode_cf), self.mesh, **kwargs))
             return
         else:
             cf_plot = mode_cf
 
-        Draw(cf_plot, self.mesh, **kwargs)
-
+        _display_webgui_fallback(Draw(cf_plot, self.mesh, **kwargs))
     def plot_field(
         self,
         freq_idx: int = 0,
@@ -4043,8 +4527,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if euler_angles:
             draw_kwargs['euler_angles'] = euler_angles
 
-        Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, **draw_kwargs)
-
+        _display_webgui_fallback(Draw(BoundaryFromVolumeCF(cf_plot), self.mesh, **draw_kwargs))
     def _get_snapshot_context(
         self,
         domain: Optional[str]

@@ -13,7 +13,7 @@
     +----------------------------------------------------------------------+
 
 Geometry modelling goes through cavsim3d primitives (RectangularWaveguide,
-CircularWaveguide=cylinder, Box, Sphere) and ``proj.fds.import_model`` — each
+CircularWaveguide=cylinder, Box, Sphere) and imported projects — each
 solid is a tree entry (Components) with name/material/face names set on the
 fly in its dialog.  Runs use the standard pipeline; the 3D field is
 reconstructed per section FROM THE COUPLED ROM.  Solids with repeat counts or
@@ -825,7 +825,8 @@ class TestBench(App):
         for s in self._solids:
             comp = s["geo"]
             if s["kind"] == "import":
-                comp = proj.fds.import_model(s["path"]) if proj is not None \
+                from cavsim3d.core.reuse import ImportedModel
+                comp = ImportedModel(s["path"], mode="copy") if proj is not None \
                     else s["path"]
             kw = dict(n=s["n"]) if s["n"] > 1 else {}
             if prev is None:

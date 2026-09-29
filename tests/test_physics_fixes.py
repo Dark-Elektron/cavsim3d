@@ -95,10 +95,37 @@ class TestLossyMaterials:
         rc = concat.solve(fmin=8.0, fmax=11.0, nsamples=5)
         assert np.max(np.abs(rc['S'][:, 1, 0] - S[:, 1, 0])) < 5e-3
 
+    def test_dielectric_loss_alone(self):
+        """tan(delta) without conductivity: only the D matrix exists."""
+        fds = _solve(_guide(materials={'*': {'eps_r': 1.5, 'tan_delta': 0.01}}), 8.0, 9.0, n=2)
+        assert fds.C_global is None and fds.D_global is not None
+        S = fds._S_matrix
+        assert np.all(np.abs(S[:, 0, 0]) ** 2 + np.abs(S[:, 1, 0]) ** 2 < 1)
+
     def test_negative_loss_is_rejected(self):
         geo = _guide(materials={'*': {'tan_delta': -0.1}})
         with pytest.raises(ValueError, match="must be >= 0"):
             _solve(geo, 8.0, 9.0, n=2)
+
+
+class TestFieldReconstruction:
+    @pytest.mark.parametrize("materials", [None, {'*': {'eps_r': 1.5, 'tan_delta': 0.01}}],
+                             ids=["lossless", "lossy"])
+    def test_rom_field_holds_the_reduced_solution(self, materials):
+        """The ROM field GridFunction is exactly the reconstructed solution:
+        real for a lossless model (ports driven on open circuits), complex,
+        with its phase, for a lossy one."""
+        fds = _solve(_guide(materials=materials), 8.0, 11.0, n=5)
+        rom = ModelOrderReduction(fds).reduce(tol=1e-10)
+        rom.solve(fmin=8.0, fmax=11.0, nsamples=5)
+        x = rom.reconstruct_field(freq_idx=2, excitation_port='port1')
+        E = rom._reconstruct_field_gf(2, 'port1')
+        assert E.space.is_complex == (materials is not None)
+        if materials is None:
+            assert not np.any(np.imag(x))
+        else:
+            assert np.abs(np.imag(x)).max() > 0.1 * np.abs(x).max()
+        assert np.allclose(E.vec.FV().NumPy(), x, rtol=0, atol=1e-12 * np.abs(x).max())
 
 
 class TestPortFrameAtJoins:
