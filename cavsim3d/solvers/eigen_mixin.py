@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Literal, A
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
-from scipy.sparse.linalg import eigsh
+from scipy.optimize import linear_sum_assignment
+from scipy.sparse.linalg import ArpackNoConvergence, eigs as nearest_eigs, eigsh
 from cavsim3d.core.persistence import H5Serializer
 from cavsim3d.core.constants import MIN_EIGENVALUE, SIGMA_COPPER
 from cavsim3d.solvers.figures_of_merit import (ModePiece, beam_line, field_on_line,
@@ -895,7 +896,7 @@ class EigenMixinBase:
             fmin: float = None,
             fmax: float = None,
             domain: str = None,
-            refine: int = 2,
+            refine: int = 10,
     ) -> Dict[str, Any]:
         """Loaded resonances: frequency, loaded Q and external Q per port.
 
@@ -917,8 +918,13 @@ class EigenMixinBase:
         magnitude; the loaded eigenproblem includes it.
 
         Only the external loading is included, no wall or dielectric losses.
-        The Z0 of a TE/TM mode depends on frequency: it is evaluated at each
-        resonance, refined *refine* times.
+
+        Each loaded resonance belongs to one mode of the closed problem, the
+        one its eigenvector overlaps most, and each closed mode has at most
+        one: a strongly damped mode whose best match is another mode's loaded
+        resonance is left out.  The Z0 of a TE/TM mode depends on frequency:
+        it is evaluated at the mode's own resonance, re-solved until the
+        frequency settles, at most *refine* times.
 
         Parameters
         ----------
@@ -927,7 +933,7 @@ class EigenMixinBase:
         domain : str, optional
             As :meth:`get_eigenmode`.
         refine : int
-            Re-solves with Z0 at the resonance (TE/TM ports only).
+            Most re-solves with Z0 at the resonance (TE/TM ports only).
 
         Returns
         -------
@@ -935,7 +941,8 @@ class EigenMixinBase:
             ``frequencies`` [Hz] and ``Q_L`` of the loaded resonances,
             ``Qext`` ({port: array}), ``Qext_mode`` ({'port(m)': array},
             1-based mode), and ``mode_index`` / ``f_closed``: the closed-problem
-            mode each one belongs to (for :meth:`get_eigenmode`, :meth:`get_rq`).
+            mode each one belongs to (for :meth:`get_eigenmode`, :meth:`get_rq`
+            and :meth:`get_figures_of_merit`), a different one for each.
         """
         domain = domain or self._default_eigen_domain()
         _M, K, free, n_dof = self._get_eigen_system_matrices(domain)
@@ -965,35 +972,106 @@ class EigenMixinBase:
                  else float(np.mean(band)) if band is not None and len(band) else 1e9)
         w0 = 2 * np.pi * f_ref
 
-        def loaded(f):
-            """Loaded eigenpairs with Z0 at *f*; w = s * w0 keeps L well scaled."""
+        def system(f):
+            """Linearised loaded problem with Z0 at *f*; w = s * w0 keeps it well scaled."""
             y0 = admittance(f)
             G = (B * y0) @ B.T
-            L = np.block([[np.zeros((r, r)), np.eye(r)], [A / w0 ** 2, 1j * G / w0]])
-            s, X = sl.eig(L)
-            keep = s.real > 0
-            return s[keep] * w0, X[:r, keep], y0
+            return np.block([[np.zeros((r, r)), np.eye(r)], [A / w0 ** 2, 1j * G / w0]]), y0
 
-        w_all, X_all, y_ref = loaded(f_ref)
+        def unit_pairs(s, X):
+            keep = s.real > 0
+            X = X[:r, keep]
+            return s[keep] * w0, X / np.linalg.norm(X, axis=0)
+
+        def loaded(f):
+            L, y0 = system(f)
+            return (*unit_pairs(*sl.eig(L)), y0)
+
+        def match(modes, w_all, X_all):
+            """One loaded eigenpair per closed mode, the one it overlaps most."""
+            overlap = np.abs(modes.conj().T @ X_all)
+            rows, picks = linear_sum_assignment(-overlap)
+            return w_all[picks], X_all[:, picks], overlap[rows, picks]
+
+        def rematch(f, modes, w, fit):
+            """:func:`match` with Z0 at *f*, starting from the current eigenvalues *w*.
+
+            A re-solve moves the eigenvalues only a little, so shift-invert at
+            each w finds the candidates; if a mode then matches clearly worse
+            than before, every eigenpair is computed."""
+            L, y0 = system(f)
+            shifts = []
+            for wi in w:
+                if all(abs(wi - s) > 1e-3 * abs(wi) for s in shifts):
+                    shifts.append(wi)
+            try:
+                if len(w) + 4 >= 2 * r - 2:
+                    raise ValueError("small system: solve it whole")
+                parts = [nearest_eigs(L, k=len(w) + 4, sigma=s / w0) for s in shifts]
+                w_all, X_all = unit_pairs(np.concatenate([s for s, _ in parts]),
+                                          np.hstack([X for _, X in parts]))
+                once = [j for j in range(len(w_all)) if not any(
+                    abs(np.vdot(X_all[:, i], X_all[:, j])) > 0.999 for i in range(j))]
+                if len(once) < len(w):
+                    raise ValueError("too few candidates: solve it whole")
+                result = match(modes, w_all[once], X_all[:, once])
+                if np.any(result[2] < 0.9 * fit):
+                    raise ValueError("a mode matches worse: solve it whole")
+            except (ValueError, ArpackNoConvergence):
+                result = match(modes, *unit_pairs(*sl.eig(L)))
+            return (*result, y0)
+
+        y_ref = admittance(f_ref)
         dispersive = not np.allclose(admittance(1.01 * f_ref), y_ref)
-        sel = np.flatnonzero((w_all.real >= 2 * np.pi * f_lo) & (w_all.real <= 2 * np.pi * f_hi))
+        same_everywhere = None if dispersive else loaded(f_ref)
 
         # the closed-problem modes (and the get_eigenmode() cache) to map onto
         eigs, V = self.get_eigenvectors(domain=domain, n_modes=n_dof, return_eigenvalues=True)
         f_closed = np.sqrt(np.maximum(np.real(eigs), 0.0)) / (2 * np.pi)
+        V = np.asarray(V)
 
-        rows = []
-        for k in sel:
-            w, x, y0 = w_all[k], X_all[:, k], y_ref
+        # Each loaded resonance grows from a closed-problem mode: the loaded problem
+        # is solved with Z0 near that mode's frequency, and the mode takes the
+        # eigenpair its eigenvector overlaps most, one each. Modes within 0.1 % of
+        # each other are matched together, so a degenerate pair keeps both members.
+        # The re-solves with Z0 at the new frequency follow those eigenpairs.
+        # Without dispersion one solve holds every loaded resonance.
+        margin = 1.0 + self.TRAINING_BAND_MARGIN
+        near = np.flatnonzero((f_closed >= f_lo / margin) & (f_closed <= f_hi * margin))
+        near = near[np.argsort(f_closed[near])]
+        if not dispersive:
+            groups = [near] if len(near) else []
+        else:
+            breaks = np.flatnonzero(np.diff(f_closed[near]) > 1e-3 * f_closed[near][1:]) + 1
+            groups = np.split(near, breaks) if len(near) else []
+
+        found = []                          # (w, x, y0, closed mode, overlap, group)
+        for g, group in enumerate(groups):
+            f = float(np.mean(f_closed[group]))
+            w_all, X_all, y0 = same_everywhere or loaded(f)
+            w, x, fit = match(V[:, group], w_all, X_all)
             for _ in range(refine if dispersive else 0):
-                w_new, X_new, y0 = loaded(w.real / (2 * np.pi))
-                j = int(np.argmin(np.abs(w_new - w)))
-                w, x = w_new[j], X_new[:, j]
+                f_new = float(np.mean(w.real)) / (2 * np.pi)
+                if abs(f_new - f) <= 1e-7 * f:
+                    break
+                f = f_new
+                w, x, fit, y0 = rematch(f, V[:, group], w, fit)
+            found += [(w[k], x[:, k], y0, int(i), fit[k], g) for k, i in enumerate(group)]
+
+        # a strongly damped mode can grow out of two groups: keep the closer match
+        found.sort(key=lambda item: -item[4])
+        rows, kept = [], []
+        for w, x, y0, mode, _, g in found:
+            if not f_lo <= w.real / (2 * np.pi) <= f_hi:
+                continue
+            if any(g2 != g and abs(w - w2) <= 1e-4 * abs(w) and abs(np.vdot(x2, x)) > 0.99
+                   for w2, x2, g2 in kept):
+                continue
+            kept.append((w, x, g))
             power = np.real(y0) * np.abs(B.T @ x) ** 2        # per port mode
             # evanescent port modes (imaginary Z0) take no power: Q_L = inf
             q_l = w.real / (2 * w.imag) if w.imag > 0 and power.sum() > 0 else np.inf
-            rows.append((w.real / (2 * np.pi), q_l, power,
-                         int(np.argmax(np.abs(V.conj().T @ x)))))
+            rows.append((w.real / (2 * np.pi), q_l, power, mode))
         rows.sort(key=lambda row: row[0])
 
         n = len(rows)

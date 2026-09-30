@@ -152,6 +152,13 @@ No version has been released yet. The entries compare with the code published on
   modules had been imported first, and crashed with pythonocc-core 8. netgen's
   OpenCASCADE is now loaded privately, so the two copies stay apart whatever the import
   order and version.
+- `get_external_q()` over a band that crosses a port mode's cutoff listed some loaded
+  resonances several times and left others out, and its `mode_index` could name one
+  closed-problem mode for several resonances: the loaded problem was first solved with
+  the port impedances of the band's middle. Each loaded resonance is now solved with the
+  impedances at its own frequency and belongs to a different closed-problem mode, and
+  the result no longer depends on the band. `refine` is now the most re-solves
+  (default 10); they stop once the frequency settles.
 - A reduced model reopened from disk failed in `get_resonant_frequencies()` and its
   other eigen methods, and a reduced model swept outside its band recorded that sweep as
   its training band, which the checks on joined models then used.

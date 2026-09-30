@@ -141,6 +141,22 @@ def test_external_q_of_a_joined_model(iris, tmp_path):
         assert q['Qext'][port][j] == pytest.approx(ref['Qext'][port][k], rel=0.02)
 
 
+def test_loaded_resonances_do_not_depend_on_the_band(tmp_path):
+    """Beam pipes wide enough that TE11 is cut off at the middle of the band but
+    carries a dipole pair above it away: every closed mode keeps its own loaded
+    resonance, found with Z0 at its own frequency, whatever the band."""
+    wide_pipes = [(-Lp, 0.0, 0.055), (0.0, L, R), (L, L + Lp, 0.055)]
+    _, rom = _solved(tmp_path, _Tubes(wide_pipes), 0.5, 2.0, nportmodes=2, nsamples=15)
+    whole = rom.get_external_q(fmin=0.5, fmax=2.0)
+    assert len(set(whole['mode_index'])) == len(whole['mode_index'])
+    assert np.count_nonzero(whole['Q_L'] < 10) == 2           # both polarisations
+    part = rom.get_external_q(fmin=1.6, fmax=2.0)
+    for f, q_l, i in zip(part['frequencies'], part['Q_L'], part['mode_index']):
+        k = list(whole['mode_index']).index(i)
+        assert whole['frequencies'][k] == pytest.approx(f, rel=1e-6)
+        assert whole['Q_L'][k] == pytest.approx(q_l, rel=1e-4)
+
+
 def test_rq_of_tm010_against_closed_form(pillbox):
     """Off the axis, outside the beam-pipe holes, the pillbox is exact."""
     proj, rom = pillbox
