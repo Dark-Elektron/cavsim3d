@@ -29,6 +29,35 @@ from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
 from OCC.Core.GeomAbs import GeomAbs_Plane
 
+
+def _check_occt_pairing() -> None:
+    """pythonocc's OpenCASCADE must be compatible with the one netgen loads.
+
+    netgen loads its own OpenCASCADE (the ``netgen-occt`` package) into the
+    same process, under the same library names.  With another major version
+    (pythonocc-core 8 next to netgen-occt 7.8) importing netgen fails on
+    Windows ("WinError 127") and reading a STEP file crashes on Linux; macOS
+    keeps the two apart.
+    """
+    import sys
+    from importlib import metadata
+    if sys.platform == "darwin":
+        return
+    try:
+        netgen_occt = metadata.version("netgen-occt")
+    except metadata.PackageNotFoundError:
+        return      # netgen built against this environment's own OpenCASCADE
+    import OCC
+    ours = str(getattr(OCC, "VERSION", ""))
+    if ours and ours.split(".")[0] != netgen_occt.split(".")[0]:
+        raise ImportError(
+            f"pythonocc-core {ours} cannot run next to the OpenCASCADE {netgen_occt} "
+            "that NGSolve's netgen loads. Install pythonocc-core 7.9: "
+            'conda install -c conda-forge "pythonocc-core=7.9"')
+
+
+_check_occt_pairing()
+
 # Netgen/NGSolve imports — must come after OCC imports
 from netgen.occ import OCCGeometry, Glue, X, Y, Z
 from netgen.webgui import Draw as NetgenDraw

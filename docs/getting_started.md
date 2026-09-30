@@ -10,7 +10,7 @@ You need [conda](https://docs.conda.io) (Anaconda or Miniconda) and git. In a te
 ```bash
 conda create -n cavsim3d python=3.11 -y
 conda activate cavsim3d
-conda install -c conda-forge -y pythonocc-core pythreejs ipywidgets jupyterlab
+conda install -c conda-forge -y "pythonocc-core=7.9" pythreejs ipywidgets jupyterlab
 git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
 pip install -e .
@@ -18,7 +18,9 @@ pip install -e .
 
 `pip install -e .` installs the code with its dependencies (NGSolve among them) in editable
 mode, so a `git pull` updates it. `pythonocc-core` (for CAD import) is only available from
-conda-forge, which is why it is installed first.
+conda-forge, which is why it is installed first. Keep it at version 7.9: NGSolve loads its own
+OpenCASCADE 7.8 into the same process, and pythonocc-core 8 (OpenCASCADE 8) cannot run next
+to it.
 
 ## Check the installation
 

@@ -28,12 +28,15 @@ Comprehensive tutorials and API documentation are available at:
 Create an environment, then install `cavsim3d` from source:
 
 ```bash
-conda create -n cavsim3d -c conda-forge python=3.11 pythonocc-core pythreejs
+conda create -n cavsim3d -c conda-forge python=3.11 "pythonocc-core=7.9" pythreejs
 conda activate cavsim3d
 git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
 pip install -e .
 ```
+
+Keep `pythonocc-core` at 7.9: NGSolve loads its own OpenCASCADE 7.8 into the same process,
+and pythonocc-core 8 (OpenCASCADE 8) cannot run next to it.
 
 `pip install -e ".[dev]"` adds the test and lint tools, `pip install -e ".[docs]"` the documentation tools.
 

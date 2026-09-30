@@ -24,9 +24,10 @@ from cavsim3d.geometry.assembly import Assembly
 from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
 from cavsim3d.rom.reduction import ModelOrderReduction
 
-NB = Path(__file__).parent.parent / "notebooks"
+NB = Path(__file__).parent.parent / "notebooks"      # local only: not in the repository
 TEM = NB / "cavsim3d_tem_port_test.stp"
-C3794 = NB / "c3794_4hc_1fpc_w_TEM.stp"
+C3794 = (Path(__file__).parent.parent / "docs" / "example_models" / "c3794"
+         / "c3794_4hc_1fpc_w_TEM.stp")
 
 skip_no_tem = pytest.mark.skipif(not TEM.exists(), reason="cavsim3d_tem_port_test.stp missing")
 skip_no_c3794 = pytest.mark.skipif(not C3794.exists(), reason="c3794_4hc_1fpc_w_TEM.stp missing")
@@ -182,6 +183,7 @@ class TestSplitSolverStructure:
 # Assembly: identical components + multiport structure (c3794, gated)
 # ===========================================================================
 
+@pytest.mark.slow
 @skip_no_c3794
 class TestAssemblyMultiport:
 

@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, experiment ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -56,8 +56,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # pythonocc-core has NO PyPI distribution, so it must come from
-          # conda-forge (it brings its own occt).
-          conda install -y -c conda-forge pythonocc-core pythreejs
+          # conda-forge (it brings its own occt). Keep it at 7.9: netgen loads
+          # its own OpenCASCADE 7.8 (netgen-occt) into the same process, and
+          # pythonocc-core 8 (OpenCASCADE 8) is not compatible with it --
+          # "WinError 127" on Windows, a segfault reading STEP on Linux.
+          conda install -y -c conda-forge "pythonocc-core=7.9" pythreejs
           # ngsolve is NOT packaged on conda-forge -- only the stale, abandoned
           # `ngsolve` channel (6.2.2201, 2022) has it, hence the earlier
           # PackagesNotFoundInChannelsError. Use the official PyPI wheels:
@@ -138,7 +141,7 @@ jobs:
         shell: bash -el {0}
         run: |
           python -m pip install --upgrade pip
-          conda install -y -c conda-forge pythonocc-core pythreejs
+          conda install -y -c conda-forge "pythonocc-core=7.9" pythreejs   # see the test job
           pip install -e . "mkl<2026" "intel-openmp<2026"
 
       - name: Run the living tutorial

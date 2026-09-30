@@ -27,6 +27,22 @@ def test_every_package_imports_first_in_a_fresh_interpreter(module):
     assert result.returncode == 0, result.stderr[-2000:]
 
 
+def test_an_opencascade_that_netgen_cannot_share_is_reported(monkeypatch):
+    # pythonocc-core 8 next to netgen's OpenCASCADE 7.8 fails in netgen's
+    # import (Windows) or crashes reading a STEP file (Linux): say why instead
+    from importlib import metadata
+
+    import OCC
+    from cavsim3d.geometry import importers
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(metadata, "version", lambda name: "7.8.1")
+    monkeypatch.setattr(OCC, "VERSION", "8.0.1", raising=False)
+    with pytest.raises(ImportError, match=r"pythonocc-core=7\.9"):
+        importers._check_occt_pairing()
+    monkeypatch.setattr(OCC, "VERSION", "7.9.3", raising=False)
+    importers._check_occt_pairing()                 # same major version: fine
+
+
 def test_the_project_class_is_exported_and_loaded_on_first_use():
     result = _python(
         "import sys, cavsim3d\n"

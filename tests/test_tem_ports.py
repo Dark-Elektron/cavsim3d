@@ -17,8 +17,9 @@ from cavsim3d.solvers.ports import (
 )
 from cavsim3d.core.constants import Z0
 
-NOTEBOOKS_DIR = Path(__file__).parent.parent / "notebooks"
-STEP_FILE = NOTEBOOKS_DIR / "c3794_4hc_1fpc_w_TEM.stp"
+# the copy the repository ships (notebooks/ is not in the repository)
+STEP_FILE = (Path(__file__).parent.parent / "docs" / "example_models" / "c3794"
+             / "c3794_4hc_1fpc_w_TEM.stp")
 
 
 def _file_available() -> bool:
@@ -330,6 +331,7 @@ class TestCoaxialModeCF:
 # Integration tests: end-to-end with STEP file
 # ============================================================
 
+@pytest.mark.slow
 class TestCoaxialPortIntegration:
     """Integration tests using c3794_4hc_1fpc_w_TEM.stp."""
 

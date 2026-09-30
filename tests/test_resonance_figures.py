@@ -187,8 +187,12 @@ def test_figures_of_merit_of_tm010_against_closed_form(pillbox):
 
     qr = rom.get_figures_of_merit(_nearest(rom, f010), offset=(x, 0.0), span=SPAN,
                                   active_length=L)
-    for key in ("freq [MHz]", "R/Q [Ohm]", "G [Ohm]", "Epk/Eacc []", "Bpk/Eacc [mT/MV/m]"):
+    for key in ("freq [MHz]", "R/Q [Ohm]", "G [Ohm]"):
         assert qr[key] == pytest.approx(q[key], rel=1e-3)
+    # peak surface fields are maxima over the mesh, more sensitive than the
+    # integrals above: 1e-6 apart with PARDISO, 1.3e-3 with sparsecholesky (macOS)
+    for key in ("Epk/Eacc []", "Bpk/Eacc [mT/MV/m]"):
+        assert qr[key] == pytest.approx(q[key], rel=5e-3)
 
 
 def test_transverse_kick_of_tm110(pillbox):
