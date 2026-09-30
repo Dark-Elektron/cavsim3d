@@ -58,17 +58,22 @@ def test_a_step_file_reads_after_the_solver_stack_is_loaded():
     assert result.returncode == 0, result.stderr[-2000:]
 
 
-def test_the_notebook_banner_shows_when_a_project_is_created_only(tmp_path, monkeypatch):
+def test_the_notebook_banner_shows_when_a_project_is_created_only(tmp_path, monkeypatch,
+                                                                  capsys):
     import IPython
     import IPython.display
     from cavsim3d.core.em_project import EMProject
     shown = []
     monkeypatch.setattr(IPython, "get_ipython", lambda: object())
-    monkeypatch.setattr(IPython.display, "display", lambda obj: shown.append(obj.data))
+    monkeypatch.setattr(IPython.display, "display",
+                        lambda obj: shown.append((obj.data, capsys.readouterr().out)))
     EMProject(name="banner", base_dir=tmp_path)            # created: banner
+    assert "Creating new project" in capsys.readouterr().out
     EMProject(name="banner", base_dir=tmp_path)            # reopened: none
     assert len(shown) == 1
-    assert "CAVSIM-3D" in shown[0] and "height: 18px" in shown[0]
+    html, printed_before = shown[0]
+    assert "CAVSIM-3D" in html and "height: 18px" in html
+    assert "Creating new project" not in printed_before    # the banner comes first
 
 
 def test_the_project_class_is_exported_and_loaded_on_first_use():

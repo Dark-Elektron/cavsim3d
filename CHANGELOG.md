@@ -98,8 +98,9 @@ No version has been released yet. The entries compare with the code published on
   project has one `mesh/` and one `geometry/` folder.
 - Port modes are identical on both faces of a join, and modes with equal cutoffs (TE20
   and TE01 when a = 2b) are numbered alike on every port.
-- The notebook banner (logo, version and project name) is smaller and appears only when
-  a project is created, not when one is reopened.
+- The notebook banner (logo, version and project name) is smaller, comes before the
+  "Creating new project" line, and appears only when a project is created, not when one
+  is reopened.
 - The documentation notebooks leave their 3D views commented out, which keeps the
   notebooks and the site small. Uncomment them to see the geometry when running a
   notebook.

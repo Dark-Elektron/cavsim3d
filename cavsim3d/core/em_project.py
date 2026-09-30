@@ -198,6 +198,9 @@ class EMProject:
             self._initial_load()
             say(f"Project '{self.name}' loaded.")
         else:
+            # In Jupyter, a new project opens with the banner (a reopened one has none)
+            if self._announce:
+                self._show_welcome_banner()
             say(f"Creating new project '{self.name}' at {self.project_path}")
             self.project_path.mkdir(parents=True, exist_ok=True)
             self.geometry_path.mkdir(parents=True, exist_ok=True)
@@ -206,9 +209,6 @@ class EMProject:
             # Automatic save on creation if geometry is provided
             if self.geometry:
                 self.save()
-            # In Jupyter, a new project shows the banner (a reopened one does not)
-            if self._announce:
-                self._show_welcome_banner()
 
     def _welcome_banner_html(self) -> Optional[str]:
         """The notebook banner: logo, name, version and project name."""
