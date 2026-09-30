@@ -47,6 +47,8 @@ No version has been released yet. The entries compare with the code published on
   fields, wall Q, G, Rsh, transverse kick, Q_diel), `get_rq(i)` and
   `get_cell_coupling(i_0, i_pi)`.
 - Loaded and external Q of the resonances: `rom.get_external_q(fmin, fmax)`.
+- `concat.port_map()` and `concat.print_port_map()`: which part (or copy) and which of
+  its own ports each external port of a joined model is.
 - `cavsim3d.analysis`: `network_matrix`, `port_mode_labels`, `keep_port_modes`,
   `plot_matrix`, `plot_entries` and `band_difference`, to compare S or Z with a reference.
 - `from cavsim3d import EMProject`.

@@ -1082,6 +1082,34 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def ports(self) -> List[str]:
         return list(self._external_port_mode_map.keys())
 
+    def port_map(self) -> List[Dict[str, Any]]:
+        """Where each external port of the joined model comes from.
+
+        The ports where parts join are gone; the others are numbered part by
+        part, in each part's own port order.
+
+        Returns
+        -------
+        list of dict
+            ``{'port', 'part', 'part_port', 'modes'}`` per external port, in
+            matrix order: its name here, the part it belongs to (a copy of a
+            repeated part is ``'<name>_<copy>'``), that part's own name for the
+            port, and the number of modes it carries.
+        """
+        rows: Dict[str, Dict[str, Any]] = {}
+        for name, (s, port, _mode) in self._external_port_mode_map.items():
+            here = name.split("(")[0]
+            row = rows.setdefault(here, {"port": here, "part": self.structures[s].domain,
+                                         "part_port": port, "modes": 0})
+            row["modes"] += 1
+        return list(rows.values())
+
+    def print_port_map(self) -> None:
+        """Print :meth:`port_map` as a table."""
+        print(f'{"port":8s}{"part":16s}{"its port":10s}modes')
+        for row in self.port_map():
+            print(f'{row["port"]:8s}{row["part"]:16s}{row["part_port"]:10s}{row["modes"]}')
+
     def _impedance_for(self, struct_idx: int, port: str, mode: int, freq: float) -> complex:
         """Port wave impedance, preferring the structure's OWN impedance
         function (attached by import/load — sections from different projects

@@ -44,6 +44,12 @@ instead of `S` and `Z` (`Z_per_domain`, `S_per_domain`, `domain_port_map`); for 
 Each has `frequencies` (Hz), `S_dict`, `Z_dict`, `plot_s()`, `plot_z()`, `compare_s()`,
 `compare_z()`. After reopening a project, each is loaded from disk on first access.
 
+A joined model has fewer ports than its parts: the ports where parts join are gone, and
+the others are numbered part by part, in each part's own port order.
+`concat.print_port_map()` prints which part (a copy of a repeated part is
+`<name>_<copy>`) and which of its own ports each one is; `concat.port_map()` returns the
+same as a list of dictionaries.
+
 ## Parameter labels
 
 `'<port>(<mode>)<port>(<mode>)'`, **excitation first, response second**, 1-based:

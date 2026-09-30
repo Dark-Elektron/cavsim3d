@@ -354,6 +354,9 @@ roms3 = proj3.fds.foms.reduce(tol=1e-9)     # ... again, tighter: reduced from t
 concat3 = roms3.concatenate()               # STAGE 3: netlist expanded + coupled
 print(f"   {len(concat3.structures)} coupled instances, "
       f"{concat3.n_external_ports} external ports")
+# The joined ports are gone; the rest are renumbered part by part.  Which part
+# (copy) and which of its own ports each external port is:
+concat3.print_port_map()
 
 res3 = concat3.solve(config=dict(fmin=1.8, fmax=2.4, nsamples=200))
 print(f"   |S21| at mid-band ~ {abs(res3['S'][100, 1, 0]):.3f} (matched guide -> ~1)")

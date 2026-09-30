@@ -99,6 +99,18 @@ def test_a_changed_geometry_is_solved_again(tmp_path, scratch_dir, count_section
     assert count_section_solves == ["sec", "sec"]
 
 
+def test_the_joined_model_says_where_each_port_comes_from(tmp_path, scratch_dir, capsys):
+    p = _chain(tmp_path)
+    p.fds.solve(config=CFG)
+    concat = p.fds.foms.reduce(tol=1e-6).concatenate()
+    # the joined ends are gone: the lower end of the first copy, the upper of the second
+    assert concat.port_map() == [
+        {"port": "port1", "part": "sec_1", "part_port": "port1", "modes": 1},
+        {"port": "port2", "part": "sec_2", "part_port": "port2", "modes": 1}]
+    concat.print_port_map()
+    assert "port2   sec_2           port2     1" in capsys.readouterr().out
+
+
 def test_reduce_again_and_reopen_every_stage(tmp_path, scratch_dir, monkeypatch):
     p = _chain(tmp_path)
     p.fds.solve(config=CFG)
