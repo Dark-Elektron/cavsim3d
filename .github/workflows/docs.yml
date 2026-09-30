@@ -1,8 +1,10 @@
 name: Deploy Documentation to GitHub Pages
 
+# One site holds both branches: master at the root (the published docs) and
+# experiment under /experiment/ (a preview). A push to either rebuilds both.
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, experiment]
   workflow_dispatch:
 
 permissions:
@@ -18,8 +20,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout master
         uses: actions/checkout@v4
+        with:
+          ref: master
+          path: master
+
+      - name: Checkout experiment
+        uses: actions/checkout@v4
+        # a run started by master still publishes master if experiment is gone
+        continue-on-error: ${{ github.ref_name != 'experiment' }}
+        with:
+          ref: experiment
+          path: experiment
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,14 +46,22 @@ jobs:
                       "mkdocstrings[python]" \
                       mkdocs-jupyter
 
-      - name: Build documentation
+      - name: Build master (published at the site root)
+        working-directory: master
+        run: mkdocs build --site-dir ../_site
+
+      - name: Build experiment (preview under /experiment/)
+        working-directory: experiment
+        continue-on-error: ${{ github.ref_name != 'experiment' }}
+        env:
+          SITE_URL: https://dark-elektron.github.io/cavsim3d/experiment/
         # --strict: a broken link or a missing page fails the build
-        run: mkdocs build --strict
+        run: mkdocs build --strict --site-dir ../_site/experiment
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site/
+          path: _site/
 
   deploy:
     environment:

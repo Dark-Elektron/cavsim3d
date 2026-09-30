@@ -1,6 +1,6 @@
 site_name: cavsim3d
 site_description: 3D Cavity Simulation and Model Order Reduction
-site_url: https://dark-elektron.github.io/cavsim3d/
+site_url: !ENV [SITE_URL, "https://dark-elektron.github.io/cavsim3d/"]
 repo_url: https://github.com/Dark-Elektron/cavsim3d
 repo_name: Dark-Elektron/cavsim3d
 
