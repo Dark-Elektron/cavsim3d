@@ -36,7 +36,7 @@ pip install -e .
 ```
 
 Keep `pythonocc-core` at 7.9: NGSolve loads its own OpenCASCADE 7.8 into the same process,
-and pythonocc-core 8 (OpenCASCADE 8) cannot run next to it.
+and on Windows pythonocc-core 8 (OpenCASCADE 8) cannot run next to it.
 
 `pip install -e ".[dev]"` adds the test and lint tools, `pip install -e ".[docs]"` the documentation tools.
 

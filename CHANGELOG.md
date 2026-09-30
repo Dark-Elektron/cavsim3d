@@ -141,11 +141,17 @@ No version has been released yet. The entries compare with the code published on
 - `reduce(max_rank=0)` crashed.
 - `export_touchstone()` crashed with a `pathlib.Path`.
 - `band_difference()` with default arguments returned `{}`.
-- pythonocc-core 8 (OpenCASCADE 8), the version conda-forge installs since 2026-09-23,
-  cannot run next to the OpenCASCADE 7.8 that NGSolve's netgen loads: importing ngsolve
-  failed on Windows ("WinError 127") and reading a STEP file crashed on Linux. The
-  install instructions and CI pin `pythonocc-core=7.9`, and a mismatched pair now raises
-  an `ImportError` that says which version to install.
+- On Windows, pythonocc-core 8 (OpenCASCADE 8), the version conda-forge installs since
+  2026-09-23, cannot run next to the OpenCASCADE 7.8 that NGSolve's netgen loads:
+  importing ngsolve failed ("WinError 127"). The install instructions and CI pin
+  `pythonocc-core=7.9`, and on Windows a mismatched pair now raises an `ImportError` that
+  says which version to install.
+- On Linux, pythonocc modules imported after netgen ran on netgen's OpenCASCADE instead
+  of their own. Reading a STEP file then failed (`KeyError: 'OpenCASCADE Error
+  [Standard_NoSuchObject] …'`, or "Wrong number or type of arguments") when the solver
+  modules had been imported first, and crashed with pythonocc-core 8. netgen's
+  OpenCASCADE is now loaded privately, so the two copies stay apart whatever the import
+  order and version.
 - A reduced model reopened from disk failed in `get_resonant_frequencies()` and its
   other eigen methods, and a reduced model swept outside its band recorded that sweep as
   its training band, which the checks on joined models then used.

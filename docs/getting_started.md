@@ -19,8 +19,8 @@ pip install -e .
 `pip install -e .` installs the code with its dependencies (NGSolve among them) in editable
 mode, so a `git pull` updates it. `pythonocc-core` (for CAD import) is only available from
 conda-forge, which is why it is installed first. Keep it at version 7.9: NGSolve loads its own
-OpenCASCADE 7.8 into the same process, and pythonocc-core 8 (OpenCASCADE 8) cannot run next
-to it.
+OpenCASCADE 7.8 into the same process, and on Windows pythonocc-core 8 (OpenCASCADE 8) cannot
+run next to it.
 
 ## Check the installation
 

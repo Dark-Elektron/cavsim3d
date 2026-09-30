@@ -8,6 +8,11 @@ __version__ = "0.1.0"
 
 __all__ = ["EMProject", "__version__"]
 
+from cavsim3d._netgen_occt import keep_netgen_occt_private
+
+keep_netgen_occt_private()
+del keep_netgen_occt_private
+
 
 def __getattr__(name):
     # Imported on first use, so ``import cavsim3d`` does not load the solver

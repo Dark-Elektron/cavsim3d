@@ -28,19 +28,34 @@ def test_every_package_imports_first_in_a_fresh_interpreter(module):
 
 
 def test_an_opencascade_that_netgen_cannot_share_is_reported(monkeypatch):
-    # pythonocc-core 8 next to netgen's OpenCASCADE 7.8 fails in netgen's
-    # import (Windows) or crashes reading a STEP file (Linux): say why instead
+    # on Windows, pythonocc-core 8 next to netgen's OpenCASCADE 7.8 fails in
+    # netgen's import ("WinError 127"): say why instead
     from importlib import metadata
 
     import OCC
     from cavsim3d.geometry import importers
-    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(metadata, "version", lambda name: "7.8.1")
     monkeypatch.setattr(OCC, "VERSION", "8.0.1", raising=False)
     with pytest.raises(ImportError, match=r"pythonocc-core=7\.9"):
         importers._check_occt_pairing()
     monkeypatch.setattr(OCC, "VERSION", "7.9.3", raising=False)
     importers._check_occt_pairing()                 # same major version: fine
+    monkeypatch.setattr(OCC, "VERSION", "8.0.1", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    importers._check_occt_pairing()                 # Linux keeps the two apart
+
+
+def test_a_step_file_reads_after_the_solver_stack_is_loaded():
+    # netgen loads its own OpenCASCADE; on Linux, pythonocc modules imported after
+    # it bound to that copy, and reading a STEP file failed (Standard_NoSuchObject)
+    step = ROOT / "docs" / "example_models" / "circular_waveguide.step"
+    result = _python(
+        "import cavsim3d.solvers.frequency_domain\n"
+        "from cavsim3d.geometry.importers import OCCImporter\n"
+        f"geo = OCCImporter(r'{step}', unit='mm', auto_build=False)\n"
+        "geo.build()\n")
+    assert result.returncode == 0, result.stderr[-2000:]
 
 
 def test_the_notebook_banner_shows_when_a_project_is_created_only(tmp_path, monkeypatch):

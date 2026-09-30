@@ -31,17 +31,17 @@ from OCC.Core.GeomAbs import GeomAbs_Plane
 
 
 def _check_occt_pairing() -> None:
-    """pythonocc's OpenCASCADE must be compatible with the one netgen loads.
+    """On Windows, pythonocc's OpenCASCADE must be compatible with netgen's.
 
     netgen loads its own OpenCASCADE (the ``netgen-occt`` package) into the
-    same process, under the same library names.  With another major version
-    (pythonocc-core 8 next to netgen-occt 7.8) importing netgen fails on
-    Windows ("WinError 127") and reading a STEP file crashes on Linux; macOS
-    keeps the two apart.
+    same process, under the same library names, and Windows binds netgen to
+    the copy pythonocc loaded first: with another major version (pythonocc-core
+    8 next to netgen-occt 7.8) importing netgen fails ("WinError 127").  Linux
+    (see ``cavsim3d._netgen_occt``) and macOS keep the two copies apart.
     """
     import sys
     from importlib import metadata
-    if sys.platform == "darwin":
+    if sys.platform != "win32":
         return
     try:
         netgen_occt = metadata.version("netgen-occt")
