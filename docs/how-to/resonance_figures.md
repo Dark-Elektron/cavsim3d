@@ -25,7 +25,8 @@ The result holds, for each loaded resonance:
 - `Qext`: the external Q of each port, all its modes together, and `Qext_mode` per port
   mode, keyed like `"port1(2)"`;
 - `mode_index` and `f_closed`: the resonance of the closed problem (magnetic walls at the
-  ports) it belongs to, for `get_eigenmode()` and `get_figures_of_merit()`.
+  ports) it belongs to, a different one for each, for `get_eigenmode()`, `get_rq()` and
+  `get_figures_of_merit()`.
 
 A port mode that is evanescent at the resonance takes no power: its `Qext` is `inf`.
 Wall and dielectric losses are not included here (they are in the unloaded Q below).

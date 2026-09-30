@@ -85,7 +85,9 @@ $$
 with $Q_L = \operatorname{Re}\omega / (2\operatorname{Im}\omega)$. The external Q of a port
 splits that damping by the power the port takes from the loaded mode. `get_external_q()`
 solves this problem on a reduced model; its resonance frequency and $Q_L$ are those of the
-peak and 3-dB width of the S-parameters.
+peak and 3-dB width of the S-parameters. The $Z_0$ of a TE or TM mode depends on
+frequency, so each resonance is solved with the $Z_0$ at its own frequency, re-solving
+until that frequency settles.
 
 The residues of the closed problem at a resonance give its external Q only when nothing else
 couples to the port. A feed line between the coupler and the port face, or a strongly
