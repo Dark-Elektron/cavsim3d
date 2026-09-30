@@ -90,6 +90,9 @@ nav:
   - Getting Started: getting_started.md
   - Tutorials:
       - tutorials/index.md
+      - Quick run:
+          - tutorials/quick_run/index.md
+          - "Results from a CST model": tutorials/quick_run/quick_run.ipynb
       - Basics:
           - tutorials/basics/index.md
           - "Your first simulation": tutorials/basics/first_simulation.ipynb

@@ -112,7 +112,7 @@ print(f_ghz)
 concat.plot_eigenmode(int(idx[0]))
 ```
 
-The [tutorials](https://dark-elektron.github.io/cavsim3d/tutorials/) cover every step in detail, from a first waveguide to repeated and imported parts.
+The [tutorials](https://dark-elektron.github.io/cavsim3d/tutorials/) cover every step in detail, from a first waveguide to repeated and imported parts. For results from your own CST model straight away, run the [Quick run](https://dark-elektron.github.io/cavsim3d/tutorials/quick_run/quick_run/) notebook with its STEP file.
 
 ## 📝 Citing
 If you use `cavsim3d` in your work, please cite it: GitHub's **Cite this repository** button (from [`CITATION.cff`](CITATION.cff)) gives the reference in BibTeX and APA. Changes between versions are listed in the [changelog](CHANGELOG.md).

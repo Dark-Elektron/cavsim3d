@@ -55,6 +55,9 @@ Jupyter widget extensions are missing: install `webgui-jupyter-widgets` and rest
 
 ## Where to go next
 
+- **Get results for your own model**: the [Quick run](tutorials/quick_run/quick_run.ipynb)
+  takes a STEP file exported from CST Studio Suite to S- and Z-parameters, resonances and
+  figures of merit, in one notebook.
 - **Learn the code step by step**: the [tutorials](tutorials/index.md), starting with
   [Your first simulation](tutorials/basics/first_simulation.ipynb). Each one builds a small
   model and checks it against the exact answer.

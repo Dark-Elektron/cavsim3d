@@ -11,6 +11,10 @@ full run takes a minute or two on a laptop.
 
 ## The sections
 
+**[Quick run](quick_run/index.md)**: one notebook from a STEP file exported from CST
+Studio Suite to S- and Z-parameters, resonances and figures of merit. Replace the example
+model with your own to get results quickly.
+
 **[Basics](basics/index.md)**: the first three lessons. A frequency sweep of a single
 part, a reduced-order model of it, and its resonances and fields. Start here.
 
