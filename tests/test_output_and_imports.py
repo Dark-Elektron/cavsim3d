@@ -43,6 +43,19 @@ def test_an_opencascade_that_netgen_cannot_share_is_reported(monkeypatch):
     importers._check_occt_pairing()                 # same major version: fine
 
 
+def test_the_notebook_banner_shows_when_a_project_is_created_only(tmp_path, monkeypatch):
+    import IPython
+    import IPython.display
+    from cavsim3d.core.em_project import EMProject
+    shown = []
+    monkeypatch.setattr(IPython, "get_ipython", lambda: object())
+    monkeypatch.setattr(IPython.display, "display", lambda obj: shown.append(obj.data))
+    EMProject(name="banner", base_dir=tmp_path)            # created: banner
+    EMProject(name="banner", base_dir=tmp_path)            # reopened: none
+    assert len(shown) == 1
+    assert "CAVSIM-3D" in shown[0] and "height: 18px" in shown[0]
+
+
 def test_the_project_class_is_exported_and_loaded_on_first_use():
     result = _python(
         "import sys, cavsim3d\n"

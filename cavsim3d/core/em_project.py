@@ -206,35 +206,40 @@ class EMProject:
             # Automatic save on creation if geometry is provided
             if self.geometry:
                 self.save()
+            # In Jupyter, a new project shows the banner (a reopened one does not)
+            if self._announce:
+                self._show_welcome_banner()
 
-        # Show welcome banner in Jupyter
-        if self._announce:
-            self._show_welcome_banner()
+    def _welcome_banner_html(self) -> Optional[str]:
+        """The notebook banner: logo, name, version and project name."""
+        import base64
+        from cavsim3d import __version__
+        # shipped with the package (assets/), so installed copies show it
+        logo_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+            "assets", "cavsim3d_logo_square.svg"
+        )
+        if not os.path.exists(logo_path):
+            return None
+        with open(logo_path, 'rb') as fh:
+            logo = base64.b64encode(fh.read()).decode()
+        return (
+            '<div style="display: flex; align-items: center; gap: 6px; margin: 2px 0;">'
+            f'<img src="data:image/svg+xml;base64,{logo}" style="height: 18px;">'
+            '<span style="font-size: 12px; font-weight: bold; color: #e66433;">CAVSIM-3D</span>'
+            f'<span style="font-size: 11px; color: #888;">v{__version__} &mdash; {self.name}</span>'
+            '</div>')
 
     def _show_welcome_banner(self):
-        """Display the cavsim3d logo in Jupyter notebooks."""
+        """Display the banner in Jupyter notebooks."""
         try:
             from IPython import get_ipython
             if get_ipython() is None:
                 return  # Not in IPython/Jupyter
-            import base64
-            from IPython.display import display, HTML
-            from cavsim3d import __version__
-            # shipped with the package (assets/), so installed copies show it
-            logo_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                "assets", "cavsim3d_logo_square.svg"
-            )
-            if os.path.exists(logo_path):
-                with open(logo_path, 'rb') as fh:
-                    logo = base64.b64encode(fh.read()).decode()
-                display(HTML(f"""
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <img src="data:image/svg+xml;base64,{logo}" style="height: 40px;">
-                    <span style="font-size: 16px; font-weight: bold; color: #e66433;">CAVSIM-3D</span>
-                    <span style="font-size: 13px; color: #888;">v{__version__} &mdash; {self.name}</span>
-                </div>
-                """))
+            html = self._welcome_banner_html()
+            if html:
+                from IPython.display import display, HTML
+                display(HTML(html))
         except Exception:
             pass  # The banner is cosmetic; never let it break project creation
 
