@@ -1,10 +1,8 @@
 """
-Utility and helper function tests.
-
-Merged from: test_helpers.py, test_solver_performance.py (fixed for pr.* logging)
+Utility tests.
 
 Validates:
-  - build_F, permutation_matrix_from_list, build_global_excitation, z2s
+  - Z -> S conversion (ParameterConverter.z_to_s)
   - ConcatenatedSystem solver threshold logic (direct vs iterative)
   - Iterative solver progress reporting
 """
@@ -14,48 +12,14 @@ import pytest
 import unittest.mock as mock
 
 from cavsim3d.solvers.concatenation import ConcatenatedSystem
+from cavsim3d.solvers.base import ParameterConverter
 from cavsim3d.rom.structures import ReducedStructure
 
-try:
-    from cavsim3d.helpers import build_F, permutation_matrix_from_list, build_global_excitation, z2s
-    _HAS_HELPERS = True
-except (ModuleNotFoundError, ImportError):
-    _HAS_HELPERS = False
 
-
-# ===========================================================================
-# Helper functions (skip if cavsim3d.helpers no longer exists)
-# ===========================================================================
-
-@pytest.mark.skipif(not _HAS_HELPERS, reason="cavsim3d.helpers module not available")
-class TestHelpers:
-    def test_build_F_shapes_and_values(self):
-        F = build_F(3, dtype=int)
-        assert F.shape == (6, 3)
-        for j in range(3):
-            assert F[2*j, j] == 1
-            assert F[2*j+1, j] == -1
-
-    def test_permutation_matrix_from_list(self):
-        perm = [2, 0, 1]
-        PT, P = permutation_matrix_from_list(perm)
-        old = np.array([10, 20, 30])
-        new = PT @ old
-        assert list(new) == [30, 10, 20]
-        assert np.all(P == PT.T)
-
-    def test_build_global_excitation_padding_and_stack(self):
-        a = np.array([1, 0])
-        b = np.array([[0, 1], [1, 0]])
-        I_global = build_global_excitation([a, b])
-        assert I_global.shape == (3, 2)
-        assert I_global[0, 0] == 1
-
-    def test_z2s_zero_for_z_equals_z0_identity(self):
-        Z0 = 50.0
-        Z = Z0 * np.eye(2)
-        S = z2s(Z, Z0)
-        assert np.allclose(S, np.zeros_like(S), atol=1e-12)
+def test_z_to_s_is_zero_when_z_equals_the_reference():
+    Z0 = 50.0
+    S = ParameterConverter.z_to_s(Z0 * np.eye(2), Z0)
+    assert np.allclose(S, np.zeros_like(S), atol=1e-12)
 
 
 # ===========================================================================

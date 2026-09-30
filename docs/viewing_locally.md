@@ -7,6 +7,10 @@ To view the documentation on your local host, follow these steps:
     ```bash
     conda activate cavsim3d
     ```
+    The first time, install the documentation tools from the repository root:
+    ```bash
+    pip install -e ".[docs]"
+    ```
 3.  **Run MkDocs Serve**:
     ```bash
     mkdocs serve

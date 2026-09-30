@@ -208,6 +208,8 @@ def plot_matrix(models: Dict[str, Model], freq=None, ports: Optional[Sequence[in
     -------
     fig, axs
     """
+    if not models:
+        raise ValueError("models is empty: give at least one {label: model}.")
     data = {name: _as_array(m, kind, freq) for name, m in models.items()}
     n_all = next(iter(data.values()))[1].shape[1]
     ports = list(range(n_all)) if ports is None else list(ports)
@@ -256,7 +258,11 @@ def plot_entries(models: Dict[str, Model], entries: Iterable[tuple], freq=None,
     -------
     fig, axs
     """
+    if not models:
+        raise ValueError("models is empty: give at least one {label: model}.")
     entries = [tuple(e) for e in entries]
+    if not entries:
+        raise ValueError("entries is empty: give at least one (row, column).")
     data = {name: _as_array(m, kind, freq) for name, m in models.items()}
     fig, axs = plt.subplots(1, len(entries), figsize=figsize or (5.3 * len(entries), 4.2),
                             squeeze=False)
@@ -296,8 +302,9 @@ def band_difference(model: Model, reference: Model, freq=None, edges: Sequence[f
         On the same frequency grid and port-mode order.
     freq : array, optional
         Frequencies in GHz of array models.
-    edges : list of float
+    edges : list of float, optional
         Band edges in GHz; band ``k`` is ``edges[k] <= f <= edges[k+1]``.
+        Default: one band over the whole frequency grid.
     ports : list of int, optional
         Matrix rows/columns included (default: all).
     kind : {'S', 'Z'}
@@ -316,5 +323,11 @@ def band_difference(model: Model, reference: Model, freq=None, edges: Sequence[f
         idx = np.asarray(ports)
         A, A_ref = A[:, idx][:, :, idx], A_ref[:, idx][:, :, idx]
     diff = np.abs(np.abs(A) - np.abs(A_ref))
-    return {f"{lo:.3f}-{hi:.3f}": float(diff[(f >= lo) & (f <= hi)].mean())
-            for lo, hi in zip(edges[:-1], edges[1:])}
+    edges = list(edges)
+    if len(edges) < 2:
+        edges = [float(np.min(f)), float(np.max(f))]
+    out = {}
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        inside = (f >= lo) & (f <= hi)
+        out[f"{lo:.3f}-{hi:.3f}"] = float(diff[inside].mean()) if inside.any() else np.nan
+    return out

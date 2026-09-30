@@ -1,11 +1,11 @@
 """Data structures for reduced-order models."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Any, Tuple, TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from ngsolve import HCurl, Mesh
+    pass
 
 
 @dataclass

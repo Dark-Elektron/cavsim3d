@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cavsim3d"
 dynamic = ["version"]
-description = "A set of python codes for 3D rf structure analysis."
+description = "3D finite-element simulation and model order reduction of RF structures, built on NGSolve."
 readme = "README.md"
 requires-python = ">=3.9,<3.14"
 license = "MIT"
@@ -37,10 +37,7 @@ dependencies = [
     "matplotlib",
     "numpy",
     "scipy",
-    "tqdm",
-    "termcolor",
     "h5py",
-    "gmsh",
     "ngsolve==6.2.2506",
     # ngsolve 6.2.2506 links libmkl_rt.so.2 (Linux) / mkl_rt.2.dll (Windows).
     # mkl >= 2026 renamed these to .so.3 / mkl_rt.3.dll, so ngsolve's ctypes
@@ -64,22 +61,44 @@ dependencies = [
 # Install it first with:  conda install -c conda-forge pythonocc-core
 
 [project.optional-dependencies]
-full = [
-    "ipython",
-    "ipywidgets",
-]
 dev = [
     "pytest",
     "pytest-cov",
+    "ruff",
+    "pre-commit",
+    "build",
+]
+docs = [
+    "mkdocs>=1.5,<2.0",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "mkdocs-jupyter",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Dark-Elektron/cavsim3d"
 Documentation = "https://dark-elektron.github.io/cavsim3d/"
 Repository = "https://github.com/Dark-Elektron/cavsim3d"
+Changelog = "https://github.com/Dark-Elektron/cavsim3d/blob/master/CHANGELOG.md"
 
 [tool.setuptools.dynamic]
 version = { attr = "cavsim3d.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["cavsim3d*"]
+
+[tool.setuptools.package-data]
+cavsim3d = ["assets/*.svg"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+extend-exclude = ["archive", "docs", "examples", "notebooks", "scripts", "testbench_runs"]
+
+[tool.ruff.lint]
+# Pyflakes (undefined names, unused imports/variables, ...) and syntax errors.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# re-exported names
+"**/__init__.py" = ["F401"]

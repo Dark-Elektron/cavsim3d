@@ -5,6 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request replaces a running check.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHONIOENCODING: utf-8
@@ -17,8 +23,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        # Pull requests run a quick lane (Linux and Windows, one Python, no
+        # slow tests); pushes to the default branch run the full matrix.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.11"]' || '["3.9", "3.10", "3.11", "3.12", "3.13"]') }}
 
     steps:
       - uses: actions/checkout@v5
@@ -31,6 +39,18 @@ jobs:
           activate-environment: cavsim3d
           miniforge-version: latest
 
+      - name: Locate the pip cache
+        id: pip-cache
+        shell: bash -el {0}
+        run: echo "dir=$(pip cache dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pip-cache.outputs.dir }}
+          key: pip-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-py${{ matrix.python-version }}-
+
       - name: Install dependencies
         shell: bash -el {0}
         run: |
@@ -42,12 +62,12 @@ jobs:
           # `ngsolve` channel (6.2.2201, 2022) has it, hence the earlier
           # PackagesNotFoundInChannelsError. Use the official PyPI wheels:
           # 6.2.2506 ships cp39-cp313 for linux/macOS/Windows and pulls in
-          # netgen-mesher, netgen-occt and the MKL runtime. setup.py pins
+          # netgen-mesher, netgen-occt and the MKL runtime. pyproject.toml pins
           # mkl<2026 because ngsolve links libmkl_rt.so.2 / mkl_rt.2.dll and
           # mkl 2026 renamed those to .so.3 / mkl_rt.3.dll.
           # NOTE: ngsolve >= 6.2.2606 requires Python >= 3.10; bumping the pin
-          # in setup.py means dropping 3.9 from the matrix below.
-          pip install -e .
+          # in pyproject.toml means dropping 3.9 from the matrix above.
+          pip install -e ".[dev]"
           # Install the MKL runtime EXPLICITLY (not just as ngsolve's transitive
           # dep). ngsolve/__init__.py preloads MKL via ctypes using
           # importlib.metadata.files('mkl') / files('intel_openmp') and silently
@@ -59,7 +79,6 @@ jobs:
           if [ "$RUNNER_OS" != "macOS" ]; then
             pip install "mkl<2026" "intel-openmp<2026"
           fi
-          pip install pytest pytest-cov
 
       - name: Verify ngsolve imports
         shell: bash -el {0}
@@ -79,6 +98,10 @@ jobs:
           print("ngsolve", ngsolve.__version__, "imported OK")
           PY
 
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        shell: bash -el {0}
+        run: ruff check .
 
       - name: Run tests
         shell: bash -el {0}
@@ -87,7 +110,7 @@ jobs:
           PYTHONUTF8: 1
         run: |
           set -o pipefail
-          pytest -v --tb=short 2>&1 | tee pytest-output.log
+          pytest -v --tb=short ${{ github.event_name == 'pull_request' && '-m "not slow"' || '' }} 2>&1 | tee pytest-output.log
 
       - name: Upload test log
         if: always()
@@ -95,3 +118,37 @@ jobs:
         with:
           name: pytest-log-${{ matrix.os }}-py${{ matrix.python-version }}
           path: pytest-output.log
+
+  examples:
+    # The living tutorial and the README walkthrough must keep running.
+    name: Tutorial and README walkthrough
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Conda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: '3.11'
+          channels: conda-forge
+          activate-environment: cavsim3d
+          miniforge-version: latest
+
+      - name: Install dependencies
+        shell: bash -el {0}
+        run: |
+          python -m pip install --upgrade pip
+          conda install -y -c conda-forge pythonocc-core pythreejs
+          pip install -e . "mkl<2026" "intel-openmp<2026"
+
+      - name: Run the living tutorial
+        shell: bash -el {0}
+        env:
+          MPLBACKEND: Agg
+        run: python tutorials/core_workflows.py
+
+      - name: Run the README walkthrough
+        shell: bash -el {0}
+        env:
+          MPLBACKEND: Agg
+        run: python .github/scripts/run_readme.py

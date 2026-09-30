@@ -36,9 +36,12 @@ path = proj.fds.export_touchstone("my_model", format="MA")      # writes my_mode
 ```
 
 - `format`: `"MA"` (magnitude, angle), `"DB"` (dB, angle) or `"RI"` (real, imaginary).
-- `z0=None` (default) writes S as solved, each port referred to its own impedance; the true
-  references are listed in the header comments, since Touchstone v1 has a single reference.
-- `z0=50.0` renormalises every port to 50 Ω, so the file's `R 50` is exact.
+- `z0=50.0` (default) renormalises every port to 50 Ω, so the file's `R 50` is exact and a
+  circuit simulator reads it correctly. Any positive `z0` works the same way.
+- `z0=None` writes S as solved, each port referred to its own impedance (the values
+  `fom.plot_s` shows). Touchstone v1 holds a single reference, so the option line then says
+  `R 50` only nominally: the true references are listed in the header comments, and the
+  call warns.
 
 ## Get the resonances
 

@@ -34,7 +34,8 @@ jobs:
                       mkdocs-jupyter
 
       - name: Build documentation
-        run: mkdocs build
+        # --strict: a broken link or a missing page fails the build
+        run: mkdocs build --strict
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

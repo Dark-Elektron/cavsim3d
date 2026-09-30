@@ -2,6 +2,7 @@
 import sys
 import os
 import hashlib
+from typing import Optional
 from IPython import get_ipython
 
 
@@ -16,48 +17,88 @@ def is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
+def _no_input_errors() -> tuple:
+    """Exceptions ``input()`` raises when nobody can answer.
+
+    EOFError: stdin is closed; OSError: stdin is captured (pytest);
+    StdinNotImplementedError: a kernel run without a frontend (nbconvert,
+    papermill, a docs build).
+    """
+    errors = [EOFError, OSError]
+    try:
+        from IPython.core.error import StdinNotImplementedError
+        errors.append(StdinNotImplementedError)
+    except ImportError:
+        pass
+    return tuple(errors)
+
+
+def _ask(prompt: str) -> Optional[str]:
+    """``input(prompt)``, or None when no answer is possible."""
+    if not is_interactive():
+        return None
+    try:
+        return input(prompt)
+    except _no_input_errors():
+        return None
+
+
 def get_user_confirmation(message: str, default: bool = True) -> bool:
     """
     Prompt the user for a yes/no confirmation.
-    
-    Works in both standard terminal and Jupyter environments.
-    
+
+    Works in both standard terminal and Jupyter environments.  When nobody
+    can answer (a script without a terminal, a notebook run by nbconvert or
+    papermill, closed stdin), the answer is no: a destructive action is never
+    taken on a default.
+
     Parameters
     ----------
     message : str
         The message to display to the user.
     default : bool
         The default value if the user just presses Enter.
-        
+
     Returns
     -------
     bool
         True if the user confirmed, False otherwise.
     """
-    # Check if we are in an interactive environment
-    # In Jupyter, sys.stdin.isatty() might be False but input() still works.
-    if not is_interactive():
-        # Nobody can answer: never take a destructive action on a default.
-        # Callers expose force=True for scripts that really mean it.
-        print(f"\n[WARNING] Non-interactive environment detected.")
-        print(f"[PROMPT] {message}")
-        print("[ACTION] Not confirmed -- nothing was changed. "
-              "Pass force=True to proceed without a prompt.")
-        return False
-
     suffix = " [Y/n]" if default else " [y/N]"
     while True:
-        try:
-            choice = input(f"\n{message}{suffix} ").lower().strip()
-            if not choice:
-                return default
-            if choice in ('y', 'yes'):
-                return True
-            if choice in ('n', 'no'):
-                return False
-            print("Please respond with 'y' or 'n'.")
-        except EOFError:
+        choice = _ask(f"\n{message}{suffix} ")
+        if choice is None:
+            # Callers expose force=True for scripts that really mean it.
+            print("\n[WARNING] No answer possible (non-interactive session).")
+            print(f"[PROMPT] {message}")
+            print("[ACTION] Not confirmed -- nothing was changed. "
+                  "Pass force=True to proceed without a prompt.")
+            return False
+        choice = choice.lower().strip()
+        if not choice:
             return default
+        if choice in ('y', 'yes'):
+            return True
+        if choice in ('n', 'no'):
+            return False
+        print("Please respond with 'y' or 'n'.")
+
+
+def ask_choice(message: str, choices, default: str) -> Optional[str]:
+    """Ask for one of ``choices``; Enter picks ``default``.
+
+    Returns None when nobody can answer, so the caller keeps things as they
+    are.
+    """
+    choices = [str(c) for c in choices]
+    while True:
+        choice = _ask(f"{message} [{'/'.join(choices)}]: ")
+        if choice is None:
+            return None
+        choice = choice.strip() or default
+        if choice in choices:
+            return choice
+        print(f"Please answer one of {choices}.")
 
 def strip_timestamps(obj):
     """Recursively remove 'timestamp' keys from dicts/lists."""

@@ -5,6 +5,7 @@ if TYPE_CHECKING:
     import matplotlib.pyplot as plt
     from ngsolve import Mesh
     from cavsim3d.geometry.base import BaseGeometry
+import re
 import time
 import warnings
 from datetime import datetime
@@ -27,6 +28,9 @@ from cavsim3d.solvers.base import BaseEMSolver, ParameterConverter
 from cavsim3d.solvers.ports import (
     PortEigenmodeSolver, group_port_faces, sorted_logical_ports, logical_port_name
 )
+from cavsim3d.utils.names import is_port_name, region_pattern
+from cavsim3d.solvers.options import (FOM_SOLVE_OPTIONS, check_solve_options,
+                                      validate_sweep)
 import cavsim3d.utils.printing as pr
 from cavsim3d.geometry.base import _display_webgui_fallback
 
@@ -331,9 +335,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 # sub-domain 'subdomain1' covers 'subdomain1/vacuum' and
                 # 'subdomain1/ceramic').  Build the region from the actual
                 # material list so the FES is non-empty for prefixed names.
-                mesh_mats = self._get_domain_mesh_materials(domain)
-                region = (self._mesh.Materials("|".join(mesh_mats))
-                          if mesh_mats else self._mesh.Materials(domain))
+                mesh_mats = self._get_domain_mesh_materials(domain) or [domain]
+                region = self._mesh.Materials(region_pattern(mesh_mats))
                 fes = HCurl(
                     self._mesh,
                     order=self.order,
@@ -357,9 +360,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             return
 
         boundaries = list(self.mesh.GetBoundaries())
-        ports = [b for b in boundaries if 'port' in b.lower()]
+        ports = [b for b in boundaries if is_port_name(b)]
         unnamed = [b for b in boundaries if b in ('', None)]
         unique_boundaries = sorted(set(b for b in boundaries if b))
+        not_ports = sorted({b for b in boundaries
+                            if b and 'port' in b.lower() and not is_port_name(b)})
+        if not_ports:
+            warnings.warn(
+                f"\n  Boundaries {not_ports} contain 'port' but are not ports: a "
+                f"port's name starts with 'port' (e.g. 'port1', or 'port1_air' for "
+                f"one face of a composite port).",
+                UserWarning,
+                stacklevel=2,
+            )
 
         if not ports:
             warnings.warn(
@@ -442,7 +455,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         """
         if self._netlist_foms is not None:
             return self._netlist_foms
-        if self._netlist_assembly() is not None:
+        asm = self._netlist_assembly()
+        if asm is not None:
+            # a reopened project: the sections it solved are on disk
+            if self._restore_netlist_foms(asm) is not None:
+                return self._netlist_foms
             raise RuntimeError(
                 "This geometry is an assembly netlist: call fds.solve(config=...) "
                 "first (it runs/loads each unique component's FOM), then "
@@ -450,6 +467,35 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if self._foms_cache is None:
             self._foms_cache = build_fom_collection(self)
         return self._foms_cache
+
+    def _restore_netlist_foms(self, asm):
+        """Rebuild the netlist FOM stage from the project's files, or None.
+
+        None when a part has no saved results (the netlist must be solved).
+        """
+        if not self._project_path:
+            return None
+        from cavsim3d.solvers import netlist_persistence as npz
+        from cavsim3d.solvers.results import NetlistFOMs
+        root = Path(self._project_path)
+        saved = npz.read_sections(root)
+        imports = npz.read_imports(root)
+        components: Dict[str, Dict] = {}
+        for key in asm._component_order:
+            base = asm._components[key].base_name
+            if base in components:
+                continue
+            if base in saved["sections"] and npz.has_staged_fom(root, base):
+                components[base] = dict(saved["sections"][base], kind="live")
+            elif base in imports:
+                rec = dict(imports[base], kind="imported")
+                if rec.get("mode") == "copy" and npz.has_local_copy(root, base):
+                    rec["local"] = True
+                components[base] = rec
+            else:
+                return None
+        self._netlist_foms = NetlistFOMs(asm, components, self, dict(saved["config"]))
+        return self._netlist_foms
 
     # ------------------------------------------------------------------
     # Assembly netlists (repeat-N sections, imported projects)
@@ -505,7 +551,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         — exactly like a multi-solid project.  A live section is computed ONCE
         (scratch project, then staged in); an imported one is staged straight
         from its already-run project.  On disk the two are indistinguishable;
-        nothing is nested as a sub-project and nothing is recomputed.
+        nothing is nested as a sub-project and nothing is recomputed: a live
+        section staged by an earlier solve with the same settings and the same
+        geometry is reused (``fds/sections.json`` records both).
         """
         if not self._project_path:
             raise RuntimeError(
@@ -519,8 +567,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         from cavsim3d.solvers import netlist_persistence as npz
         plan = self._netlist_plan(asm, cfg)
         previous = npz.read_imports(project_root)
+        saved = npz.read_sections(project_root)["sections"]
         components: Dict[str, Dict] = {}
         imports: Dict[str, Dict] = {}
+        live: Dict[str, Dict] = {}          # sections computed in this project
         for key in asm._component_order:
             entry = asm._components[key]
             base = entry.base_name
@@ -528,16 +578,24 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 continue
             comp = entry.geometry
             action = plan[base][1]
+            is_import = isinstance(comp, (str, Path)) or hasattr(comp, 'project_path')
+            if (action == 'reuse' and base in saved
+                    and (not is_import or saved[base].get('derived_from'))):
+                # staged by an earlier solve with the same settings: reuse it
+                components[base] = live[base] = dict(saved[base], kind="live")
+                continue
             if action == 'recompute':
                 # The imported part does not fit (or has no results): solve it
                 # here from its geometry.  Written into THIS project only.
                 from cavsim3d.geometry.base import BaseGeometry
                 src = Path(getattr(comp, 'project_path', comp))
-                geo = BaseGeometry.load_geometry(src)
+                geo = BaseGeometry.load_geometry(src, check_source=False)
                 if getattr(geo, 'mesh', None) is None:
                     geo.generate_mesh()
-                components[base] = self._run_section_fom(base, geo, cfg, project_root)
-                components[base]["derived_from"] = str(src)
+                rec = self._run_section_fom(base, geo, cfg, project_root)
+                rec.update(derived_from=str(src), signature=npz.project_signature(src),
+                           config=npz.section_config(cfg))
+                components[base] = live[base] = rec
                 continue
             if action == 'reduce':
                 src = Path(getattr(comp, 'project_path', comp))
@@ -573,9 +631,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                         components[base]["fingerprint"] = comp.fingerprint()
                 imports[base] = components[base]
             else:
-                components[base] = self._run_section_fom(
-                    base, comp, cfg, project_root)
+                rec = self._run_section_fom(base, comp, cfg, project_root)
+                rec.update(signature=npz.geometry_signature(comp),
+                           config=npz.section_config(cfg))
+                components[base] = live[base] = rec
         npz.write_imports(project_root, imports)
+        npz.write_sections(project_root, cfg, live)
 
         from cavsim3d.solvers.results import NetlistFOMs
         self._netlist_foms = NetlistFOMs(asm, components, self, dict(cfg))
@@ -600,7 +661,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         """
         from cavsim3d.utils.io_utils import is_interactive
         from cavsim3d.solvers import netlist_persistence as npz
-        previous = npz.read_imports(Path(self._project_path))
+        root = Path(self._project_path)
+        previous = npz.read_imports(root)
+        saved = npz.read_sections(root)["sections"]
         plan: Dict[str, Tuple[str, str, str]] = {}
         for key in asm._component_order:
             entry = asm._components[key]
@@ -609,8 +672,24 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 continue
             comp = entry.geometry
             if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
+                kind = f"imported ({getattr(comp, 'mode', 'copy')})"
+                src = Path(getattr(comp, 'project_path', comp))
+                rec = saved.get(base) or {}
+                same_src = (rec.get('derived_from')
+                            and Path(rec['derived_from']).resolve() == src.resolve())
+                # computed here earlier from the source's geometry (the source
+                # did not fit): reuse it while the source's geometry is the same
+                if same_src and self._staged_section_fits(
+                        base, rec, cfg, npz.project_signature(src)
+                        if src.exists() else rec.get('signature')):
+                    plan[base] = (kind, "reuse", "computed here from its geometry earlier")
+                    continue
                 action, reason = self._plan_imported_section(base, comp, cfg, previous)
-                plan[base] = (f"imported ({getattr(comp, 'mode', 'copy')})", action, reason)
+                plan[base] = (kind, action, reason)
+            elif self._staged_section_fits(base, saved.get(base), cfg,
+                                           npz.geometry_signature(comp)):
+                plan[base] = ("geometry", "reuse",
+                              "its full-order results from an earlier solve")
             else:
                 plan[base] = ("geometry", "compute",
                               f"full-order solve, {cfg.get('nsamples')} samples")
@@ -626,6 +705,21 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 "solve in this project. Pass rerun=True to run it (non-interactive "
                 "session).")
         return plan
+
+    def _staged_section_fits(self, base: str, record: Optional[Dict], cfg: Dict,
+                             signature: Optional[str]) -> bool:
+        """True if a live section staged earlier can be reused for ``cfg``.
+
+        Same geometry (``signature``), same full-order solve settings, its
+        files still in the project, and no ``rerun=True``.
+        """
+        from cavsim3d.solvers import netlist_persistence as npz
+        return bool(
+            record and cfg.get('rerun') is not True
+            and record.get('rom_template') is not None
+            and signature is not None and record.get('signature') == signature
+            and record.get('config') == npz.section_config(cfg)
+            and npz.has_staged_fom(Path(self._project_path), base))
 
     @staticmethod
     def _fit_problems(band, modes, cfg: Dict) -> List[str]:
@@ -752,32 +846,39 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     @staticmethod
     def _run_section_fom(base: str, comp, cfg: Dict, project_root: Path) -> Dict:
-        """Compute a LIVE section's FOM once in a throwaway scratch project and
-        stage its artifacts in.  The scratch is kept until the ROM stage reduces
-        it (so the FOM is never recomputed), then deleted."""
+        """Compute a LIVE section's FOM in a throwaway scratch project, stage its
+        files into this project and delete the scratch (also when the solve
+        fails).  Returns the section's record: what reducing it later needs
+        (see ``netlist_persistence.section_record``)."""
         import tempfile as _tf
         from cavsim3d.core.em_project import EMProject
         from cavsim3d.solvers import netlist_persistence as npz
         work = Path(_tf.mkdtemp(prefix="cavsim3d_section_"))
-        sub = EMProject(name=base, base_dir=str(work), overwrite=True)
-        sub.geometry = comp
-        # the section's samples live in THIS project, so an interrupted
-        # netlist solve resumes the section instead of starting it over
-        sub.fds._checkpoint_dir = Path(project_root) / "fds" / "checkpoint" / "sections" / base
-        sub.fds.solve(config=dict(cfg))
-        sub.save()
-        npz.stage_fom(work / base, base, project_root)
-        return {"kind": "live", "project": sub,
-                "scratch": str(work / base), "_work": str(work)}
+        try:
+            sub = EMProject(name=base, base_dir=str(work), overwrite=True,
+                            _announce=False)
+            sub.geometry = comp
+            # the section's samples live in THIS project, so an interrupted
+            # netlist solve resumes the section instead of starting it over
+            sub.fds._checkpoint_dir = (Path(project_root) / "fds" / "checkpoint"
+                                       / "sections" / base)
+            pr.milestone(f"Section '{base}': full-order solve")
+            sub.fds.solve(config=dict(cfg))
+            sub.save()
+            npz.stage_fom(work / base, base, project_root)
+            record = npz.section_record(sub.fds)
+        finally:
+            npz.remove_scratch(work)
+        record["kind"] = "live"
+        return record
 
     def _persist_netlist_project(self, cfg: Dict, project_root: Path) -> None:
         """Persist the module project like any other: fds/config.json,
         geometry/ (assembly netlist), project.json, timing.json."""
         import json as _json
+        from cavsim3d.solvers import netlist_persistence as npz
         with open(project_root / "fds" / "config.json", "w") as fh:
-            _json.dump({k: v for k, v in cfg.items()
-                        if isinstance(v, (int, float, str, bool, list, dict))},
-                       fh, indent=2)
+            _json.dump(npz._jsonable(cfg), fh, indent=2)
         if self._project_ref is not None:
             try:
                 self._project_ref.save()
@@ -907,7 +1008,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if bc_idx < 0 or bc_idx >= len(boundaries):
                 continue
             name = boundaries[bc_idx]
-            if not name or 'port' not in name:
+            if not is_port_name(name):
                 continue
             # An external port has one adjacent volume (the other side is 0);
             # an internal one has two -- take the larger permittivity.
@@ -1037,7 +1138,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if bc_idx < 0 or bc_idx >= len(boundaries):
                 continue
             name = boundaries[bc_idx]
-            if not name or 'port' not in name:
+            if not is_port_name(name):
                 continue
             lp = logical_port_name(name)  # collapse composite subfaces
             for vol_idx in (fd.domin, fd.domout):
@@ -1165,21 +1266,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 seen.add(m)
                 unique.append(m)
 
-        # Try to find domains matching the 'cell' naming convention (sorted numerically)
-        cell_domains = sorted(
-            [m for m in unique if 'cell' in m.lower()],
-            key=lambda x: int(''.join(filter(str.isdigit, x)) or 0)
-        )
-
-        if cell_domains:
-            return cell_domains
-
-        # If no 'cell' naming, include all unique non-default materials
-        # This covers STEP-label names like 'ceramic', 'beampipe', etc.
-        other_domains = [m for m in unique if m.lower() != 'default']
-
-        if other_domains:
-            return other_domains
+        # All named (non-default) materials are domains: STEP-label names like
+        # 'ceramic' or 'beampipe' as well as a split model's 'cell_1', 'cell_2'.
+        # Only when every one follows that cell_<N> convention are they put
+        # in numeric order (cell_2 before cell_10); a material is never dropped.
+        named = [m for m in unique if m.lower() != 'default']
+        cells = [re.fullmatch(r'cell_?(\d+)', m, re.IGNORECASE) for m in named]
+        if named and all(cells):
+            return [c.string for c in sorted(cells, key=lambda c: int(c.group(1)))]
+        if named:
+            return named
 
         # Fallback to the first available material (likely 'default' or a single custom name)
         return [unique[0]]
@@ -1212,8 +1308,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         return sorted_logical_ports(self._port_face_region)
 
     def _region(self, port: str) -> str:
-        """Resolve a logical port to a mesh-region string (identity if simple)."""
-        return getattr(self, '_port_face_region', {}).get(port, port)
+        """NGSolve region pattern of a logical port: its faces, escaped."""
+        raw = getattr(self, '_port_face_region', {}).get(port, port)
+        return region_pattern(raw.split('|'))
 
     def _build_domain_port_map(self) -> Dict[str, List[str]]:
         """Map each domain to the ports that touch it.
@@ -1400,19 +1497,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         The complex permittivity is eps0*eps_r*(1 - j tan_delta) - j sigma/w
         (e^{+jwt}); both loss terms must be >= 0 (passive material).
         """
+        from cavsim3d.geometry.base import MATERIAL_DEFAULTS, validate_material_properties
         mat = self._get_domain_material(name)
-
-        def num(key, default):
-            v = mat.get(key, default) if hasattr(mat, 'get') else default
-            return float(v) if isinstance(v, (int, float, np.number)) else default
-
-        eps_r, mu_r = num('eps_r', 1.0), num('mu_r', 1.0)
-        sigma, tand = num('sigma', 0.0), num('tan_delta', 0.0)
-        if sigma < 0 or tand < 0:
-            raise ValueError(
-                f"Material '{name}': sigma ({sigma}) and tan_delta ({tand}) must "
-                f"be >= 0 -- a negative value describes a source, not a loss.")
-        return eps_r, mu_r, sigma, tand
+        if not hasattr(mat, 'get'):
+            raise ValueError(f"Material '{name}': expected a dict of properties, got {mat!r}.")
+        props = {k: mat.get(k, default) for k, default in MATERIAL_DEFAULTS.items()}
+        validate_material_properties(name, props)
+        return (float(props['eps_r']), float(props['mu_r']),
+                float(props['sigma']), float(props['tan_delta']))
 
     def _material_signature(self):
         """Hashable fingerprint of everything material-related in the system."""
@@ -1509,7 +1601,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             mesh_mats = self._get_domain_mesh_materials(domain)
 
             # Build definedon region (union of all mesh materials in this domain)
-            region = self.mesh.Materials("|".join(mesh_mats))
+            region = self.mesh.Materials(region_pattern(mesh_mats))
 
             # Create FES for this domain (complex when anything is lossy)
             lossy = self._is_lossy()
@@ -1536,13 +1628,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 if eps_r != 1.0 or mu_r != 1.0 or sigma or tand:
                     pr.debug(f"  {mm}: eps_r={eps_r}, mu_r={mu_r}, "
                              f"sigma={sigma}, tan_delta={tand}")
-                k_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(mm)
-                m_form += eps0 * eps_r * u * v * dx(mm)
+                k_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(region_pattern([mm]))
+                m_form += eps0 * eps_r * u * v * dx(region_pattern([mm]))
                 if sigma:
-                    c_form += sigma * u * v * dx(mm)
+                    c_form += sigma * u * v * dx(region_pattern([mm]))
                     has_c = True
                 if tand:
-                    d_form += eps0 * eps_r * tand * u * v * dx(mm)
+                    d_form += eps0 * eps_r * tand * u * v * dx(region_pattern([mm]))
                     has_d = True
 
             with TaskManager():
@@ -1645,7 +1737,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 continue
 
             # Boundary mass matrix for this port
-            m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(self._region(port)))
+            m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(self._region(port)),
+                                      check_unused=False)
             with TaskManager():
                 m_bnd_form.Assemble()
 
@@ -1685,7 +1778,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if port not in self.port_basis:
                 continue
 
-            m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(self._region(port)))
+            m_bnd_form = BilinearForm(InnerProduct(u.Trace(), v.Trace()) * ds(self._region(port)),
+                                      check_unused=False)
             with TaskManager():
                 m_bnd_form.Assemble()
 
@@ -1738,7 +1832,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             return solver_type
         ndof = fes.ndof if fes is not None else 0
         chosen = 'iterative' if ndof > self.AUTO_DOF_THRESHOLD else 'direct'
-        print(f"  Auto solver: {ndof} DOFs → '{chosen}' "
+        pr.echo(f"  Auto solver: {ndof} DOFs → '{chosen}' "
             f"(threshold: {self.AUTO_DOF_THRESHOLD})")
         return chosen
 
@@ -1946,16 +2040,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self.port_solver = self._new_port_solver()
 
     @staticmethod
-    def _validate_sweep(fmin, fmax, nsamples) -> None:
-        """Reject frequency sweeps the solver cannot handle."""
-        if fmin <= 0:
-            raise ValueError(
-                f"fmin must be > 0 GHz (got {fmin}). At f = 0 the curl-curl "
-                f"system is singular (every gradient field is a solution).")
-        if fmax < fmin:
-            raise ValueError(f"fmax ({fmax}) must be >= fmin ({fmin}).")
-        if int(nsamples) < 1:
-            raise ValueError(f"nsamples must be >= 1 (got {nsamples}).")
+    def _validate_sweep(fmin, fmax, nsamples) -> int:
+        """Reject frequency sweeps the solver cannot handle; ``nsamples`` as int."""
+        return validate_sweep(fmin, fmax, nsamples)
 
     def solve(
             self,
@@ -1996,6 +2083,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # 1. Merge config and kwargs
         cfg = (config or {}).copy()
         cfg.update(kwargs)
+        check_solve_options(cfg, FOM_SOLVE_OPTIONS, where="fds.solve()")
 
         # 2. Extract core parameters with defaults
         fmin = fmin if fmin is not None else cfg.get('fmin')
@@ -2005,7 +2093,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # Validate mandatory frequency range
         if fmin is None or fmax is None:
             raise ValueError("fmin and fmax must be provided (either directly or via config).")
-        self._validate_sweep(fmin, fmax, nsamples)
+        nsamples = self._validate_sweep(fmin, fmax, nsamples)
 
         # Assembly NETLIST: per-component FOM stage (each unique component is
         # run once or loaded from its saved project; imported components are
@@ -2031,7 +2119,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # recompute automatically when anything that affects them changed;
         # True = always recompute; False = keep stored results regardless.
         rerun = cfg.get('rerun', None)
-        verbose = cfg.get('verbose', False)
+        # None: keep the console verbosity as set (pr.set_verbosity)
+        verbose = cfg.get('verbose')
 
         # Quasi-TEM port options (microstrip / inhomogeneous cross-sections).
         # Consumed by _build_qtem_solve_kwargs during matrix assembly.  Ports
@@ -2069,9 +2158,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._qtem_conductor_bbnd = cfg.get('qtem_conductor_bbnd')
         self._qtem_voltage_path = cfg.get('qtem_voltage_path')
 
-        # Set verbosity level
-        pr.set_verbosity(verbose)
-
         # Start file logging if project path exists
         _file_handler = None
         if getattr(self, '_project_path', None):
@@ -2080,6 +2166,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             self._log_path = str(log_dir / "solve.log")
             _file_handler = pr.start_file_log(self._log_path)
 
+        # Verbosity for this solve only
+        _prev_verbosity = pr.push_verbosity(verbose)
         try:
             # --- Config comparison + rerun policy ---
             diffs = []
@@ -2202,6 +2290,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
             return self._build_results_dict(compute_s_params, per_domain, global_method)
         finally:
+            pr.pop_verbosity(_prev_verbosity)
             if _file_handler:
                 pr.stop_file_log(_file_handler)
 
@@ -2344,12 +2433,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 sym = self._store_symmetric(st)
                 a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
                 for mm, eps_r, mu_r, sigma, tand in domain_materials:
-                    a_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(mm)
-                    a_form += -omega ** 2 * (eps0 * eps_r) * u * v * dx(mm)
+                    a_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(region_pattern([mm]))
+                    a_form += -omega ** 2 * (eps0 * eps_r) * u * v * dx(region_pattern([mm]))
                     if sigma:
-                        a_form += 1j * omega * sigma * u * v * dx(mm)
+                        a_form += 1j * omega * sigma * u * v * dx(region_pattern([mm]))
                     if tand:
-                        a_form += 1j * omega ** 2 * (eps0 * eps_r * tand) * u * v * dx(mm)
+                        a_form += 1j * omega ** 2 * (eps0 * eps_r * tand) * u * v * dx(region_pattern([mm]))
 
                 # Prepare solver
                 if st == 'direct':
@@ -2728,9 +2817,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         msg = span + f"{dt:.1f} s ({dt / n:.1f} s/sample)"
         if restored:
             msg += f", {restored} read from the checkpoint"
-        if solver_type == 'iterative':
-            its = np.asarray(freq_iters[first * n_excitations:(last + 1) * n_excitations])
-            res = np.asarray(freq_residuals[first * n_excitations:(last + 1) * n_excitations])
+        its = np.asarray(freq_iters[first * n_excitations:(last + 1) * n_excitations])
+        res = np.asarray(freq_residuals[first * n_excitations:(last + 1) * n_excitations])
+        if solver_type == 'iterative' and its.size:
             msg += (f", GMRES {its.mean():.0f} steps/solve (max {its.max()}), "
                     f"residual <= {res.max():.1e}")
             stalled = int(np.sum(its >= opts['maxsteps']))
@@ -2872,7 +2961,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 needs_recompute = True
                 self.port_modes = None
 
-        if self.port_modes is None:
+        # no modes yet, or a port without modes (a port solver saved before
+        # its modes were computed): solve the port modes and assemble
+        if not self.port_modes or not all(self.port_modes.values()):
             self.assemble_matrices(
                 nportmodes=nportmodes or current_spec or 1,
                 assemble_global=needs_global,
@@ -2919,9 +3010,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         base_dir : str or Path, optional
             Base directory for simulations.
         """
-        import h5py
-        from cavsim3d.core.persistence import ProjectManager, H5Serializer
-        import pickle as _pkl
+        from cavsim3d.core.persistence import ProjectManager
         from datetime import datetime
         import json
 
@@ -2932,12 +3021,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             fds_path = Path(path) if path else (Path(self._project_path) / "fds"
                                                 if self._project_path else None)
             if fds_path is not None:
+                from cavsim3d.solvers import netlist_persistence as npz
                 fds_path.mkdir(parents=True, exist_ok=True)
                 cfg = getattr(self._netlist_foms, '_config', {}) or {}
                 with open(fds_path / "config.json", "w") as f:
-                    json.dump({k: v for k, v in cfg.items()
-                               if isinstance(v, (int, float, str, bool, list, dict))},
-                              f, indent=2)
+                    json.dump(npz._jsonable(cfg), f, indent=2)
             return fds_path
 
         if path:
@@ -2997,6 +3085,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 self._Z_global_coupled is not None
                 or self._Z_per_domain
                 or self._fom_cache is not None
+                or self._resonant_mode_cache
             ),
             "solver_history": self._solver_history,
             "geometry_history": getattr(self.geometry, '_history', []),
@@ -3005,13 +3094,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         ProjectManager.save_json(fds_path, config, filename="config.json")
 
-        # 2. Port modes - save via PortEigenmodeSolver (includes all port data)
-        if hasattr(self, 'port_solver') and self.port_solver is not None:
-            port_dir = fds_path / "port_modes"
-            port_dir.mkdir(parents=True, exist_ok=True)
-
+        # 2. Port modes - save via PortEigenmodeSolver (includes all port data).
+        # A port solver whose modes are not computed yet is not saved (it would
+        # be read back as ports without modes); a stale file is removed.
+        port_file = fds_path / "port_modes" / "port_modes.pkl"
+        ps = getattr(self, 'port_solver', None)
+        if ps is not None and ps.port_modes and all(ps.port_modes.values()):
+            port_file.parent.mkdir(parents=True, exist_ok=True)
             # Use the new save method that extracts raw numpy data
-            self.port_solver.save_to_file(port_dir / "port_modes.pkl")
+            ps.save_to_file(port_file)
+        elif port_file.exists():
+            port_file.unlink()
 
         # 3. FOMs & ROMs (Hierarchical Persistence)
         if self._fom_cache is not None or self._Z_global_coupled is not None:
@@ -3054,9 +3147,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             The geometry associated with this solver. If None, we expect 
             the mesh to be available in the parent directory or provided via geometry.
         """
-        import pickle as _pkl
-        import h5py
-        from cavsim3d.core.persistence import H5Serializer
         import json
         from pathlib import Path
 
@@ -3090,9 +3180,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     def _load_internal(self, path: Path, config: dict):
         """Internal helper to load solver state from a directory."""
-        import pickle as _pkl
         import h5py
-        from cavsim3d.core.persistence import H5Serializer, ProjectManager
+        from cavsim3d.core.persistence import H5Serializer
         self._loaded_config = config
 
         # Restore state flags and topology
@@ -3411,7 +3500,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             {domain: S_array} where S_array is
             (n_freqs, n_port_modes_d, n_port_modes_d).
         """
-        n_freqs = len(self.frequencies)
         domain_S = {}
 
         for domain in self.domains:
@@ -4149,7 +4237,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     print(f"    B: {self.B[domain].shape}")
 
         if self._global_matrices_assembled:
-            print(f"\n  global:")
+            print("\n  global:")
             print(f"    M: {self.M_global.shape}, nnz: {self.M_global.nnz}")
             print(f"    K: {self.K_global.shape}, nnz: {self.K_global.nnz}")
             print(f"    B: {self.B_global.shape}")
@@ -4279,8 +4367,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         names = [r['port'] for r in rows]
         n_int = sum(1 for r in rows if r.get('role', '').startswith('internal'))
-        print(f'\nnportmodes accepts:')
-        print(f'  int   nportmodes=1')
+        print('\nnportmodes accepts:')
+        print('  int   nportmodes=1')
         print(f'  list  nportmodes={[1] * len(names)}   '
               f'(one entry per port, this order)')
         ex = ', '.join(f"'{n}': 1" for n in names[:2])
@@ -4369,7 +4457,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 print(f"  Z-parameters computed: {n_params} entries")
 
         if self._fes_global is not None:
-            print(f"\nGlobal (coupled):")
+            print("\nGlobal (coupled):")
             print(f"  FES ndof: {self._fes_global.ndof}")
             print(f"  M_global shape: {self.M_global.shape}")
             print(f"  External ports: {self._external_ports}")
@@ -4973,30 +5061,32 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     def export_touchstone(
         self,
-        filename: str,
+        filename: Union[str, Path],
         source: Literal['global', 'coupled'] = 'global',
         format: Literal['MA', 'DB', 'RI'] = 'MA',
-        z0: Optional[float] = None
+        z0: Optional[float] = 50.0
     ) -> str:
         """
         Export S-parameters to a Touchstone v1 (``.sNp``) file.
 
         Parameters
         ----------
-        filename : str
+        filename : str or Path
             Output filename (``.sNp`` is appended if missing)
         source : {'global', 'coupled'}
             Which results to export
         format : {'MA', 'DB', 'RI'}
             Data format (Magnitude-Angle, dB-Angle, Real-Imaginary)
-        z0 : float, optional
-            ``None`` (default): write S exactly as solved, i.e. each port
-            referenced to its own port impedance (modal wave impedance for
-            TE/TM, line impedance for TEM) -- the values ``fom.plot_s`` shows.
-            Touchstone v1 has a single reference only, so the option line says
-            ``R 50`` and the true references are listed in the header comments.
-            A number: renormalise every port to that real reference (via Z),
-            so the file's ``R <z0>`` is exact.
+        z0 : float or None
+            Reference impedance in ohm (default 50).  Every port is
+            renormalised to it (via Z), so the file's ``R <z0>`` option line
+            is exact and any circuit simulator reads the data correctly.
+            ``None``: write S exactly as solved, each port referenced to its
+            own impedance (modal wave impedance for TE/TM, line impedance for
+            TEM) -- the values ``fom.plot_s`` shows.  Touchstone has no way
+            to state those (frequency-dependent) references: the option line
+            then says ``R 50`` only nominally, the true references are listed
+            in the header comments, and a warning says so.
 
         Returns
         -------
@@ -5016,12 +5106,22 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         if z0 is not None:
             if Z is None:
                 raise ValueError("Renormalising to z0 needs the Z-parameters.")
-            S = ParameterConverter.z_to_s(Z, float(z0))
+            z0 = float(z0)
+            if not (np.isfinite(z0) and z0 > 0):
+                raise ValueError(f"z0 must be a positive impedance in ohm, got {z0!r}")
+            S = ParameterConverter.z_to_s(Z, z0)
+        else:
+            warnings.warn(
+                "export_touchstone(z0=None) writes S referenced to each port's own "
+                "impedance, but the file's option line says R 50: a tool reading the "
+                "file takes the data as 50-ohm S-parameters. Pass z0=50 (the default) "
+                "for a file that is exact as written.", UserWarning, stacklevel=2)
 
         n_ports = S.shape[1]
         n_freqs = len(self.frequencies)
 
         # Construct filename with proper extension
+        filename = str(filename)
         if not filename.endswith(f'.s{n_ports}p'):
             filename = f"{filename}.s{n_ports}p"
 
@@ -5045,6 +5145,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                                 f"{self.frequencies[0] / 1e9:.6g} GHz\n")
                 except Exception:
                     pass
+            else:
+                f.write(f"! Every port-mode renormalised to {z0:g} ohm\n")
             f.write(f"# GHz S {format} R {50.0 if z0 is None else float(z0)}\n")
 
             for k in range(n_freqs):
@@ -5069,6 +5171,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     def reset(self) -> None:
         """Reset solver state, clearing all results but keeping geometry."""
         self._clear_results()
+        self._netlist_foms = None
         self.frequencies = None
         self._invalidate_cache()
         print("Solver state reset. Matrices retained.")
@@ -5077,24 +5180,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         """Full reset including matrices."""
         self.reset()
 
-        # Clear matrices
-        self._fes = {}
-        self.M = {}
-        self.K = {}
-        self.B = {}
-
-        self._fes_global = None
-        self.M_global = None
-        self.K_global = None
-        self.B_global = None
-
-        self._global_matrices_assembled = False
-        self._per_domain_matrices_assembled = False
-
-        # Clear port modes
-        self.port_modes = None
-        self.port_basis = None
-        self._n_modes_per_port = None
+        # FE spaces, K/M/B and the loss matrices C/D, assembly flags, port
+        # solver and port modes (rebuilt by the next solve)
+        self._reset_discretisation()
 
         print("Full solver reset. All data cleared.")
 

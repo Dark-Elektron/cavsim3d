@@ -1,6 +1,6 @@
 """PlotMixin — base class providing plot_s / plot_z / plot_eigenvalues for all result objects."""
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 

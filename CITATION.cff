@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "cavsim3d: 3D finite-element simulation and model order reduction of RF structures"
+abstract: >-
+  A Python library for 3D electromagnetic simulation of RF structures (cavities,
+  waveguides, multi-part assemblies) with the NGSolve finite element engine, and
+  for model order reduction by proper orthogonal decomposition: sections are
+  solved and reduced on their own and joined through their port modes.
+authors:
+  - family-names: Udongwo
+    given-names: Sosoho-Abasi
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/Dark-Elektron/cavsim3d"
+url: "https://dark-elektron.github.io/cavsim3d/"
+keywords:
+  - electromagnetics
+  - finite element method
+  - RF cavity
+  - model order reduction
+  - waveguide

@@ -20,17 +20,24 @@ from cavsim3d.geometry.importers import OCCImporter, STEPImporter
 # ============================================================
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
+MODELS_DIR = Path(__file__).parent.parent / "docs" / "example_models"
 
-STEP_FILE_CWG = EXAMPLES_DIR / "cwg" / "circular_waveguide.step"
+STEP_FILE_CWG = MODELS_DIR / "circular_waveguide.step"
 STEP_FILE_RWG = EXAMPLES_DIR / "rwg_step" / "rectangular_waveguide.step"
-STEP_FILE_PILLBOX = EXAMPLES_DIR / "pillbox" / "pillbox.step"
+STEP_FILE_PILLBOX = MODELS_DIR / "pillbox.step"
 IGES_FILE_TESLA = EXAMPLES_DIR / "tesla_step" / "tesla1cell.iges"
-STEP_FILE_SPLIT = EXAMPLES_DIR / "rwg_step_split" / "rectangular_waveguide.step"
+STEP_FILE_SPLIT = STEP_FILE_RWG              # the splitting tests cut the same guide
 
 
 def _file_available(path: Path) -> bool:
     """Check if a test geometry file exists."""
     return path.exists()
+
+
+def test_the_model_files_are_in_the_repository():
+    # the tests below skip without their file: a moved model must fail here
+    for path in (STEP_FILE_CWG, STEP_FILE_RWG, STEP_FILE_PILLBOX, IGES_FILE_TESLA):
+        assert path.exists(), path
 
 
 # ============================================================

@@ -32,7 +32,6 @@ import numpy as np
 
 from ngapp.app import App
 from ngapp.components import (
-    Col,
     Div,
     Heading,
     Label,

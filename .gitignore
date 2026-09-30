@@ -41,4 +41,8 @@ my_first_sim/
 
 # Notebook backups
 *.ipynb.bak
-claude*
+/CLAUDE.md
+/archive
+
+# CAD translator logs (written next to exported STEP/IGES files)
+*.hlg

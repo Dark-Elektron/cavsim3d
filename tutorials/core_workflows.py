@@ -7,32 +7,10 @@ THIS FILE IS THE ALWAYS-CURRENT REFERENCE FOR HOW THE CORE PIECES CONNECT.
 It MUST be updated whenever core functionality changes or a new core feature
 is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
-Last updated: 2026-09-28 (R/Q of eigenmodes -- end of section 1d; loaded and
-external Q of resonances -- section 1e; a coaxial port's TE/TM modes are referred to
-their own wave impedance, the TEM mode to the line impedance; a single-part
-ROM resolves ports with different mode counts.  Before that: bodies of
-revolution: the cavsim2d models --
-EllipticalCavity, RFGun, Pillbox, ... -- as primitives, revolved about Z --
-section 1d.  Before that: port modes with equal cutoffs, e.g. TE20/TE01 when
-a = 2b, are numbered alike on every port -- section 5; a reopened project's
-solve() returns its stored S and Z.  Before that (2026-09-26): solve setting
-nedelec='first' for first-kind
-Nedelec elements -- next to FOM_CFG.  Before that: an interrupted solve() resumes from the samples
-already written to fds/checkpoint/ -- section 1.  Before that: a project
-holds a LIST OF PARTS -- import_geometry /
-create_primitive / import_project / add, same name replaces, n= repeats, chained
-along proj.main_axis (Z unless set, printed at meshing); mesh strategy glued vs
-coupled; joins use the ports that face each other; import_project(mode=
-'reference' | 'copy') + localize(); solve() prints a plan and computes what an
-imported part lacks INTO THIS project -- sections 2-4a, 5).  Before that
-(2026-09-24): lossy materials via geo.set_materials, numeric port
-modes — section 1c; solve(rerun=None) recomputes
-automatically when the request changed; FOM eigenfrequencies — section 1;
-port modes identical on both faces of a join; multi-solid projects refused as
-a single imported section — section 5).  Earlier: canonical folder layout: fom(s)/rom(s)/concat hold
-ONLY matrices/eigenmodes/s/z/snapshots + nested stage folders; ONE mesh/ and
-geometry/ per project; imported sections copied + renamed, indistinguishable
-from computed ones; quasi-TEM/microstrip inhomogeneous ports — section 4b.
+Last updated: 2026-09-29 (a reduced model lists the resonances near its
+training band -- section 1e; a chain's sections are reused by a second solve
+and reduced again from their staged files; reopening restores every stage --
+section 3).  What changed: CHANGELOG.md.
 =============================================================================
 
 Operation philosophy
@@ -96,12 +74,16 @@ from pathlib import Path
 
 import numpy as np
 
-from cavsim3d.core.em_project import EMProject
+from cavsim3d.core.em_project import EMProject   # also: from cavsim3d import EMProject
 from cavsim3d.geometry.primitives import RectangularWaveguide
 
 WORK = Path(tempfile.mkdtemp(prefix="cavsim3d_tutorial_"))
 A, B_, L, MAXH = 0.1, 0.05, 0.06667, 0.06
 FOM_CFG = dict(fmin=1.8, fmax=2.4, nsamples=4, nportmodes=1, order=2)
+#   A name solve() does not know raises TypeError with the closest option
+#   (n_port_modes=2 -> "did you mean 'nportmodes'?"): a typo never runs with
+#   the defaults.  A config written for the full-order solve may be reused for
+#   rom.solve() / concat.solve(): its full-order options are ignored there.
 #   nedelec='first' (the default solve setting) builds every H(curl) space from
 #   first-kind Nedelec elements: the same curls as 'second' with ~1/3 fewer
 #   unknowns at order 2 (the count CST uses); saved with the project, a change
@@ -298,6 +280,14 @@ print(f"   |S21| 3-dB width: Q_L = {f0 / (band[-1] - band[0]):.0f}")
 # The unloaded Q (copper walls) of the same mode, from its closed-problem index:
 fm_q = rom_q.get_figures_of_merit(int(q["mode_index"][k]))
 print(f"   unloaded Q = {fm_q['Q []']:.0f}, G = {fm_q['G [Ohm]']:.0f} Ohm")
+# A ROM is trusted near its training band only (far from it the projection has
+# spurious eigenvalues): get_resonant_frequencies() lists the modes within 10 %
+# of the band's edges, 1.71-2.53 GHz here, and the mode indices of
+# get_eigenmode / get_rq / get_figures_of_merit count that list.  fmin=0 (and
+# fmax=) list others.
+f_in = rom_q.get_resonant_frequencies()
+f_all = rom_q.get_resonant_frequencies(fmin=0)
+print(f"   ROM resonances: {len(f_in)} near the training band, {len(f_all)} with fmin=0")
 # get_external_q(), get_rq() and get_figures_of_merit() work the same way on a
 # joined model (roms.concatenate()): its coupled eigenproblem, with the parts
 # of a coupled chain laid end to end along the beam axis.
@@ -352,13 +342,28 @@ proj3.fds.solve(config=FOM_CFG)             # STAGE 1: FOM per UNIQUE section
 #      <project>/geometry/components/<section>.step
 #   No per-section folders, and NEVER a nested sub-project (one fds/project).
 
-roms3 = proj3.fds.foms.reduce(tol=1e-9)     # STAGE 2: ROM per unique component
+#   Each section is solved in a throwaway scratch project, staged in, and the
+#   scratch deleted at once.  fds/sections.json records the settings and the
+#   geometry each section was solved for, and its port data.  So:
+proj3.fds.solve(config=FOM_CFG)             # same request: the plan says 'reuse'
+
+roms3 = proj3.fds.foms.reduce(tol=1e-6)     # STAGE 2: ROM per unique component
+roms3 = proj3.fds.foms.reduce(tol=1e-9)     # ... again, tighter: reduced from the
+#                                             staged full-order files (a section
+#                                             reduced with the same tol is reused)
 concat3 = roms3.concatenate()               # STAGE 3: netlist expanded + coupled
 print(f"   {len(concat3.structures)} coupled instances, "
       f"{concat3.n_external_ports} external ports")
 
 res3 = concat3.solve(config=dict(fmin=1.8, fmax=2.4, nsamples=200))
 print(f"   |S21| at mid-band ~ {abs(res3['S'][100, 1, 0]):.3f} (matched guide -> ~1)")
+
+# A new session restores every stage from the project, the joined model's sweep
+# included -- nothing is solved again:
+proj3_later = EMProject(name="chain_module", base_dir=str(WORK))
+restored = proj3_later.fds.foms.roms.concat
+print(f"   reopened: {proj3_later.fds.foms}, joined model with its "
+      f"{len(restored.frequencies)}-point sweep")
 
 rom_of_concat = concat3.reduce(tol=1e-10)   # STAGE 4 (optional): concat.rom
 print(f"   further-reduced coupled system: {type(rom_of_concat).__name__}")

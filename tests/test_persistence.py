@@ -15,9 +15,7 @@ Validates:
 """
 
 import json
-import os
 import pickle
-import shutil
 import unittest.mock as mock
 import warnings
 from pathlib import Path
@@ -500,7 +498,9 @@ class TestGeometryLinking:
         with open(geo_dir / 'history.json', 'w') as f:
             json.dump({'source_link': geo._source_link, 'source_hash': geo._source_hash}, f)
 
-        with mock.patch('builtins.input', return_value='1'):
+        # someone answers '1' in an interactive session
+        with mock.patch('cavsim3d.utils.io_utils.is_interactive', return_value=True), \
+                mock.patch('builtins.input', return_value='1'):
             geo._check_source_link(project_dir)
         # Option '1' breaks the link — history.json should record link_broken=True
         with open(geo_dir / 'history.json') as f:
@@ -537,7 +537,7 @@ class TestRerunProtection:
         fds.frequencies = np.linspace(1e9, 2e9, 5)
         fds._ports = ['P1', 'P2']
         fds._n_ports = 2
-        with mock.patch.object(fds, '_build_results_dict', return_value={}) as mock_build:
+        with mock.patch.object(fds, '_build_results_dict', return_value={}):
             with mock.patch('cavsim3d.utils.printing.milestone') as mock_milestone:
                 fds.solve(1, 2, 5)
                 # Should log a cached-results message via pr.milestone

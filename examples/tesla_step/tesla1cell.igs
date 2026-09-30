@@ -1,7 +1,7 @@
 3D InterOp IGES (v. 2026 1.0.0), Spatial Corp. Copyright (c) 1999-2020. S      1
 1H,,1H;,6HNoname,14Htesla1cell.igs,13HSpatial Corp.,20H3D InterOp ACIS/IG      1
 GES,32,38, 6,308,15,6HNoname,1.000,6,1HM,1,1.000,15H20260323.153126,    G      2
-1.0e-09,0.00,5HSoske,6HNoname,11,0,15H20260323.153126;                  G      3
+1.0e-09,0.00,6HNoname,6HNoname,11,0,15H20260323.153126;                 G      3
      314       1       0       0       0       0       0       000010001D      1
      314       0       0       1       0       0       0               0D      2
      110       2       0       0       0       0       0       000010001D      3

@@ -14,20 +14,22 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 import numpy as np
+import scipy.linalg as sla
 import scipy.sparse as sp
 from scipy.special import jv, yv, jvp, yvp, jn_zeros, jnp_zeros
 import numpy.polynomial.chebyshev as cheb
 
 from pyngcore import BitArray
 from ngsolve import (
-    HCurl, BilinearForm, GridFunction, BND, Cross, Integrate, InnerProduct,
+    HCurl, BilinearForm, GridFunction, BND, Integrate, InnerProduct,
     TaskManager, Preconditioner, solvers, IdentityMatrix, curl, ds,
     CoefficientFunction, specialcf, x, y, z, sin, cos, sqrt, pi,
-    H1, grad, dx as dx_vol, ArnoldiSolver
+    H1, grad, ArnoldiSolver
 )
 
-from cavsim3d.core.constants import c0, mu0, eps0, Z0
+from cavsim3d.core.constants import c0, mu0, Z0
 from cavsim3d.solvers.nedelec import check_kind, hcurl_flags
+from cavsim3d.utils.names import is_port_name, region_pattern
 import cavsim3d.utils.printing as pr
 
 # PARDISO ships with MKL, which the macOS ngsolve wheels do not link, so a
@@ -54,6 +56,61 @@ SHIFT_OFFSET = 1.15
 _trapezoid = getattr(np, "trapezoid", None)
 if _trapezoid is None:  # NumPy < 2.0
     _trapezoid = np.trapz
+
+
+# Port faces with at most this many free DOFs are solved with a dense
+# eigensolver: exact, and fast at this size.  PINVIT, used above it, iterates a
+# random block of vectors that degenerates when the block is not small against
+# the space (NaN from a converged residual, or a spurious zero mode).
+_DENSE_PORT_DOFS = 600
+
+
+def _free_dofs(fes, region) -> np.ndarray:
+    """Indices of the free (non-Dirichlet) DOFs of ``fes`` on the mesh ``region``."""
+    dofs = BitArray(fes.FreeDofs())
+    dofs &= fes.GetDofs(region)
+    return np.flatnonzero(np.asarray(dofs, dtype=bool))
+
+
+def _dense_block(mat, rows, cols=None) -> np.ndarray:
+    """``mat[rows, cols]`` of an NGSolve sparse matrix as a dense array."""
+    r, c, v = mat.COO()
+    full = sp.csr_matrix((np.asarray(v), (np.asarray(r), np.asarray(c))),
+                         shape=(mat.height, mat.width))
+    return full[rows][:, rows if cols is None else cols].toarray()
+
+
+def _as_vectors(mat, dofs, columns) -> list:
+    """The columns of a dense array as NGSolve vectors, zero outside ``dofs``."""
+    out = []
+    for col in np.asarray(columns).T:
+        vec = mat.CreateColVector()
+        vec.FV().NumPy()[:] = 0.0
+        vec.FV().NumPy()[dofs] = col
+        out.append(vec)
+    return out
+
+
+def _te_eigenpairs_dense(a, m, G, te_dofs, h1_dofs, nmodes):
+    """Lowest TE eigenpairs of a small port face, and its harmonic fields.
+
+    The curl-curl problem is solved in full.  Its null space holds the
+    gradients of the free H1 functions and, on a face bounded by several
+    conductors, the harmonic (TEM) fields: the null vectors M-orthogonal to
+    every gradient.  Those are returned first, with eigenvalue 0.
+    """
+    A, M = _dense_block(a, te_dofs), _dense_block(m, te_dofs)
+    ev, V = sla.eigh(A, M)
+    null = ev < 1e-9 * max(float(np.abs(ev).max()), 1e-300)
+    N = V[:, null]
+    harmonic = N
+    if N.shape[1] and len(h1_dofs):
+        _, s, vh = np.linalg.svd(_dense_block(G, te_dofs, h1_dofs).T @ (M @ N))
+        rank = int(np.sum(s > 1e-8 * s.max())) if s.size and s.max() > 0 else 0
+        harmonic = N @ vh[rank:].T
+    te = np.flatnonzero(~null)[:nmodes]
+    evals = [0.0] * harmonic.shape[1] + [float(e) for e in ev[te]]
+    return evals, _as_vectors(a, te_dofs, np.hstack([harmonic, V[:, te]]))
 
 
 def modal_wave_impedance(mode_type: str, kc: float, freq: float,
@@ -203,12 +260,20 @@ def group_port_faces(boundary_names) -> Dict[str, str]:
     """
     groups: Dict[str, List[str]] = {}
     for b in boundary_names:
-        if not b or 'port' not in b.lower():
+        if not is_port_name(b):
             continue
         lp = logical_port_name(b)
         groups.setdefault(lp, [])
         if b not in groups[lp]:
             groups[lp].append(b)
+    by_case: Dict[str, List[str]] = {}
+    for lp in groups:
+        by_case.setdefault(lp.lower(), []).append(lp)
+    clashes = [sorted(v) for v in by_case.values() if len(v) > 1]
+    if clashes:
+        raise ValueError(
+            f"Port names that differ only in case: {clashes}. Each would be a "
+            f"separate port; rename the faces so every port has one spelling.")
     return {lp: '|'.join(sorted(faces)) for lp, faces in groups.items()}
 
 
@@ -340,8 +405,8 @@ class PortEigenmodeSolver:
         self.port_line_impedance: Dict[str, Dict[int, complex]] = {}
 
     def _region(self, port: str) -> str:
-        """Resolve a logical port to a mesh-region string (identity if simple)."""
-        return self.port_face_region.get(port, port)
+        """NGSolve region pattern of a logical port: its faces, escaped."""
+        return region_pattern(self.port_face_region.get(port, port).split('|'))
 
     # =========================================================================
     # Geometry Detection (unchanged)
@@ -881,7 +946,6 @@ class PortEigenmodeSolver:
         R = geometry.radius
         center = geometry.center
         normal = geometry.normal
-        t1, t2 = geometry.t1, geometry.t2
         m, n = mode.indices
 
         if mode.type == 'TE':
@@ -973,7 +1037,6 @@ class PortEigenmodeSolver:
         a_inner = geometry.inner_radius
         b_outer = geometry.radius
         center = geometry.center
-        normal = geometry.normal
         t1, t2 = geometry.t1, geometry.t2
         m_idx, n_idx = mode.indices
 
@@ -1225,7 +1288,8 @@ class PortEigenmodeSolver:
         self.port_mass_forms.clear()
 
         for port in ports:
-            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(self._region(port)))
+            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(self._region(port)),
+                                  check_unused=False)
             with TaskManager():
                 m_form.Assemble()
             M_bnd = sp.csr_matrix(m_form.mat.CSR())
@@ -1287,7 +1351,6 @@ class PortEigenmodeSolver:
 
         port_region = self.mesh.Boundaries(port)
         sigma = self.port_orientation_factors[port]
-        t1, t2 = geometry.t1, geometry.t2
 
         if geometry.type == PortGeometryType.RECTANGULAR:
             analytic_modes = self._generate_rectangular_modes(geometry, nmodes)
@@ -1374,7 +1437,6 @@ class PortEigenmodeSolver:
 
         geometry = self.port_geometries[port]
         t1, t2 = geometry.t1, geometry.t2
-        normal = geometry.normal
         sigma = self.port_orientation_factors[port]
 
         # Now returns mode types directly
@@ -1426,6 +1488,12 @@ class PortEigenmodeSolver:
                     f"{pol_str}{degen_str}")
 
                 mode_idx += 1
+        if mode_idx < nmodes:
+            raise ValueError(
+                f"Port '{port}': its mesh resolves {mode_idx} numeric port mode(s), "
+                f"{nmodes} requested. Refine the mesh at the port (smaller maxh), "
+                f"raise the element order, or use mode_source='analytic' for a "
+                f"rectangular, circular or coaxial cross-section.")
         print()
 
     # =========================================================================
@@ -1470,14 +1538,16 @@ class PortEigenmodeSolver:
         (Et, p), (Ft, q) = fes.TnT()
 
         k0 = float(k0_ref)
-        a = BilinearForm(fes)
+        # check_unused=False: the DOFs off the port face are never assembled
+        # (see freedofs below); NGSolve would report each as unused.
+        a = BilinearForm(fes, check_unused=False)
         a += (curl(Et).Trace() * curl(Ft).Trace()
               - k0**2 * eps_r_bnd * Et.Trace() * Ft.Trace()) * ds(region)
         a += -grad(p).Trace() * Ft.Trace() * ds(region)
         a += (grad(p).Trace() * grad(q).Trace()
               - k0**2 * eps_r_bnd * p.Trace() * q.Trace()) * ds(region)
 
-        m = BilinearForm(fes)
+        m = BilinearForm(fes, check_unused=False)
         m += -Et.Trace() * Ft.Trace() * ds(region)
         m += Et.Trace() * grad(q).Trace() * ds(region)
 
@@ -1881,7 +1951,8 @@ class PortEigenmodeSolver:
         u_full, v_full = fes_full.TnT()
 
         for port in ports:
-            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(solver._region(port)))
+            m_form = BilinearForm(InnerProduct(u_full.Trace(), v_full.Trace()) * ds(solver._region(port)),
+                                  check_unused=False)
             with TaskManager():
                 m_form.Assemble()
             M_bnd = sp.csr_matrix(m_form.mat.CSR())
@@ -1901,7 +1972,6 @@ class PortEigenmodeSolver:
             solver.port_basis[port] = {}
 
             port_modes_data = data['port_modes_vectors'].get(port, {})
-            port_basis_data = data['port_basis'].get(port, {})
 
             for mode_str, vec_data in port_modes_data.items():
                 mode = int(mode_str)
@@ -1914,7 +1984,7 @@ class PortEigenmodeSolver:
                 if len(vec_array) == mode_gf.vec.size:
                     mode_gf.vec.FV().NumPy()[:] = vec_array
                 else:
-                    print(f"Warning: Vector size mismatch for {port} mode {mode}. "
+                    pr.warning(f"Vector size mismatch for {port} mode {mode}. "
                           f"Expected {mode_gf.vec.size}, got {len(vec_array)}. "
                           f"Mode will need to be recomputed.")
                     # Set to zero - mode needs recomputation
@@ -1940,7 +2010,7 @@ class PortEigenmodeSolver:
         data = self.to_save_dict()
         with open(filepath, 'wb') as f:
             pickle.dump(data, f)
-        print(f"Saved port modes to {filepath}")
+        pr.debug(f"Saved port modes to {filepath}")
 
     @classmethod
     def load_from_file(
@@ -2051,10 +2121,22 @@ class PortEigenmodeSolver:
             proj = IdentityMatrix(fes_te.ndof) - G @ invh1 @ GT @ m.mat
             projpre = proj @ pre.mat
 
-            evals, evecs = solvers.PINVIT(
-                a.mat, m.mat, pre=projpre,
-                num=nmodes, maxit=50, printrates=False
-            )
+            te_dofs = _free_dofs(fes_te, port_region)
+            h1_dofs = _free_dofs(fes_h1, port_region)
+            if len(te_dofs) <= _DENSE_PORT_DOFS:
+                evals, evecs = _te_eigenpairs_dense(a.mat, m.mat, G, te_dofs,
+                                                    h1_dofs, nmodes)
+            else:
+                # PINVIT iterates a block of 2*num vectors inside the space
+                # left once the gradients are projected out: keep the block
+                # well inside it.
+                num = min(nmodes, (len(te_dofs) - len(h1_dofs)) // 4)
+                if num < 1:
+                    return [], [], []
+                evals, evecs = solvers.PINVIT(
+                    a.mat, m.mat, pre=projpre,
+                    num=num, maxit=50, printrates=False
+                )
 
         # kc^2 of any TE mode is of order (pi/L)^2 for a cross-section of size
         # L ~ sqrt(area); a harmonic (TEM) field sits at round-off above zero.
@@ -2066,6 +2148,7 @@ class PortEigenmodeSolver:
         mode_data = []  # List of (kc, GridFunction)
         tem_modes = []
 
+        div_free = GridFunction(fes_te)
         for i, ev in enumerate(evals):
             mode = GridFunction(fes_te)
             mode.vec.data = evecs[i]
@@ -2073,6 +2156,13 @@ class PortEigenmodeSolver:
                 InnerProduct(mode, mode), self.mesh, BND, definedon=port_region
             )))
             if norm_sq <= 1e-15:
+                continue
+            # A mode (TEM included) is divergence-free.  When the block nearly
+            # fills the space, a Ritz vector can be round-off that is almost a
+            # pure gradient, with ev ~ 0: it is not a TEM field.  Drop it.
+            div_free.vec.data = proj * mode.vec
+            if float(np.real(Integrate(InnerProduct(div_free, div_free), self.mesh, BND,
+                                       definedon=port_region))) < 0.25 * norm_sq:
                 continue
             mode.vec.data /= np.sqrt(norm_sq)
             if abs(ev) <= tem_tol:
@@ -2111,7 +2201,6 @@ class PortEigenmodeSolver:
         """
 
         port_region = self.mesh.Boundaries(port)
-        geometry = self.port_geometries[port]
 
         # H1 space on port surface with Dirichlet BC on waveguide walls
         fes_h1 = H1(
@@ -2120,9 +2209,8 @@ class PortEigenmodeSolver:
             definedon=self.mesh.Boundaries(port)
         )
 
-        # Check if we have any free DOFs (if all are constrained, no TM modes)
-        n_free = sum(1 for i in range(fes_h1.ndof) if fes_h1.FreeDofs()[i])
-        if n_free < 2:
+        tm_dofs = _free_dofs(fes_h1, port_region)
+        if len(tm_dofs) == 0:          # every DOF constrained: no TM modes
             return [], []
 
         u, v = fes_h1.TnT()
@@ -2142,11 +2230,16 @@ class PortEigenmodeSolver:
             apre.Assemble()
 
             # No gradient projection needed - Dirichlet BC handles constant mode
-            evals, evecs = solvers.PINVIT(
-                a.mat, m.mat, pre=pre.mat,
-                num=min(nmodes, n_free - 1),
-                maxit=50, printrates=False
-            )
+            if len(tm_dofs) <= _DENSE_PORT_DOFS:
+                ev, V = sla.eigh(_dense_block(a.mat, tm_dofs),
+                                 _dense_block(m.mat, tm_dofs))
+                evals = ev[:nmodes]
+                evecs = _as_vectors(a.mat, tm_dofs, V[:, :nmodes])
+            else:
+                evals, evecs = solvers.PINVIT(
+                    a.mat, m.mat, pre=pre.mat,
+                    num=min(nmodes, len(tm_dofs) // 4), maxit=50, printrates=False
+                )
 
         # HCurl space for storing the transverse E field
         fes_hcurl = HCurl(
@@ -2567,7 +2660,7 @@ class PortEigenmodeSolver:
         print(f"Mode source:          {self.mode_source.upper()}")
         print(f"Polynomial order:     {self.order}")
         print(f"Dirichlet BC label:   {self.bc}")
-        print(f"Polarization angle:   {np.degrees(self.polarization_angle):.1f}°")
+        pr.echo(f"Polarization angle:   {np.degrees(self.polarization_angle):.1f}°")
         print(f"Ensure inward power:  {self.ensure_inward_power}")
         print(f"Global up direction:  {self.global_up}")
         print(f"Propagation axis:     {self.propagation_axis}")
@@ -2606,7 +2699,7 @@ class PortEigenmodeSolver:
                 print(f"    Radius:         R = {geom.radius:.6f}")
 
             print(f"    Area:           {geom.area:.6e}")
-            print(f"    Orientation σ:  {self.port_orientation_factors.get(port, 0):+.0f}")
+            pr.echo(f"    Orientation σ:  {self.port_orientation_factors.get(port, 0):+.0f}")
             print(f"    Normal:         {self.port_normals.get(port, np.array([np.nan]*3))}")
 
             n_modes_port = self.get_num_modes(port)

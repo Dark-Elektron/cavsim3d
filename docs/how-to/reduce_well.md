@@ -15,8 +15,10 @@ rom.solve(fmin=1.0, fmax=1.8, nsamples=2000)
 ```
 
 A ROM does not know anything outside the band it was trained on: its results there, and
-its resonances there, can be wrong without warning. When reduced parts trained on different
-bands are joined, disjoint bands raise an error and sweeping outside the common band warns.
+its resonances there, can be wrong without warning. Its resonance list therefore stops
+10 % beyond the band's edges (`get_resonant_frequencies(fmin=..., fmax=...)` lists others).
+When reduced parts trained on different bands are joined, disjoint bands raise an error and
+sweeping outside the common band warns.
 
 ## Choose the tolerance
 

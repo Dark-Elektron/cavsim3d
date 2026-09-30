@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import re
-import glob
 from cavsim3d.utils.plot_mixin import PlotMixin
 from scipy.interpolate import interp1d
 

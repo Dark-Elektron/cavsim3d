@@ -906,8 +906,9 @@ class BaseEMSolver(ABC):
         if self_data is None or ref_data is None:
             raise ValueError("Both solvers must have computed results.")
 
-        # Interpolate if frequency grids differ
-        if not np.allclose(self.frequencies, reference.frequencies):
+        # Interpolate if frequency grids differ (in length or in values)
+        f_self, f_ref = np.asarray(self.frequencies), np.asarray(reference.frequencies)
+        if f_self.shape != f_ref.shape or not np.allclose(f_self, f_ref):
             from scipy.interpolate import interp1d
             # Interpolate self to reference frequencies
             interp_real = interp1d(self.frequencies, np.real(self_data), axis=0,

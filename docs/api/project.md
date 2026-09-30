@@ -36,7 +36,6 @@ The `EMProject` class is the central entry point for managing simulations, geome
         - mesh
         - fds
         - order
-        - n_port_modes
         - geo
       show_root_heading: false
       show_category_heading: false

@@ -5,14 +5,22 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 import numpy as np
 import json
-import shutil
 
 from netgen.occ import Rectangle, X, Y, Z, Cylinder, Axes
-from ngsolve import Mesh
-from netgen.occ import OCCGeometry
 
 from .base import BaseGeometry
 from .component_registry import ComputeMethod
+
+
+def _length_arg(value, alias, name: str, alias_name: str) -> float:
+    """The guide length given as ``name`` or as its alias (``L`` / ``length``)."""
+    if value is not None and alias is not None:
+        raise TypeError(f"give the length as {name}= or {alias_name}=, not both")
+    if value is None:
+        value = alias
+    if value is None:
+        raise TypeError(f"missing the length: {name}= (or {alias_name}=), in metres")
+    return value
 
 
 def _replay_after_init(obj: BaseGeometry, history: List[dict]) -> BaseGeometry:
@@ -39,7 +47,7 @@ class RectangularWaveguide(BaseGeometry):
     b : float, optional
         Height (y-dimension) [m]. Default is a/2.
     L : float
-        Length (z-dimension) [m]
+        Length (z-dimension) [m]; ``length=`` is accepted too
     maxh : float
         Maximum mesh element size
     compute_method : str or ComputeMethod
@@ -54,12 +62,15 @@ class RectangularWaveguide(BaseGeometry):
     def __init__(
             self,
             a: float,
-            L: float,
+            L: Optional[float] = None,
             b: Optional[float] = None,
             maxh: float = 0.05,
-            compute_method: str = 'numeric'
+            compute_method: str = 'numeric',
+            *,
+            length: Optional[float] = None,
     ):
         super().__init__()
+        L = _length_arg(L, length, 'L', 'length')
         self.a = a
         self.b = b if b is not None else a / 2
         self.L = L
@@ -199,16 +210,31 @@ class RectangularWaveguide(BaseGeometry):
             json.dump(meta, f, indent=2, default=str)
 
 class CircularWaveguide(BaseGeometry):
-    """Circular waveguide with optional analytical solution."""
+    """Circular waveguide with optional analytical solution.
+
+    Parameters
+    ----------
+    radius : float
+        Radius [m]
+    length : float
+        Length along z [m]; ``L=`` is accepted too
+    maxh : float
+        Maximum mesh element size [m]
+    compute_method : str or ComputeMethod
+        'numeric', 'analytical', or 'semi_analytical'
+    """
 
     def __init__(
             self,
             radius: float,
-            length: float,
+            length: Optional[float] = None,
             maxh: float = 0.05,
-            compute_method: str = 'numeric'
+            compute_method: str = 'numeric',
+            *,
+            L: Optional[float] = None,
     ):
         super().__init__()
+        length = _length_arg(length, L, 'length', 'L')
         self.radius = radius
         self.length = length
         self.maxh = maxh

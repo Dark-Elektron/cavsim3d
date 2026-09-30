@@ -35,7 +35,8 @@ closed one, is explained in [Ports and port modes](../explanation/ports.md#loade
 
 ## All figures of merit of one mode
 
-`get_figures_of_merit()` takes the index of an eigenmode in the spectrum listed last:
+`get_figures_of_merit()` takes the index of an eigenmode in the list
+`get_resonant_frequencies()` returns (for a reduced model, the modes near its training band):
 
 ```python
 f_res = rom.get_resonant_frequencies()

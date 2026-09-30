@@ -11,6 +11,7 @@ import numpy as np
 
 from ..base import BaseGeometry
 from .profile import Profile, revolve
+from cavsim3d.utils.names import is_port_name
 
 #: Length units a model's dimensions may be given in, as metres per unit.
 UNITS = {'m': 1.0, 'cm': 1e-2, 'mm': 1e-3, 'um': 1e-6}
@@ -158,7 +159,7 @@ class AxisymmetricGeometry(BaseGeometry):
     def ports(self) -> List[str]:
         """Port names, from the mesh if there is one, else from the solid."""
         if self.mesh is None:
-            return sorted({f.name for f in self.geo.faces if f.name and 'port' in f.name})
+            return sorted({f.name for f in self.geo.faces if is_port_name(f.name)})
         return super().ports
 
     @property

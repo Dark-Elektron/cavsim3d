@@ -6,7 +6,6 @@ line -> equator arc), an optional flat top, and a *backward half* (equator arc
 multicell cavities, asymmetric end cells, one-sided beam pipes and the
 flat-top parameterisation. Ported from cavsim2d. Coordinates are in metres.
 """
-import numpy as np
 
 from .profile import Profile
 from .tangency import wall_tangent

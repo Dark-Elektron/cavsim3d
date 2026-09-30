@@ -8,16 +8,20 @@ proj.fds.solve(fmin=1.0, fmax=3.0, nsamples=30, order=2, nportmodes=[2, 1])
 proj.fds.solve(config=dict(fmin=1.0, fmax=3.0, nsamples=30, order=2))
 ```
 
+A name that is not an option raises `TypeError` and suggests the closest one
+(`n_port_modes=2` → "did you mean 'nportmodes'?"). The reduced and joined models accept a
+config written for the full-order solve: its full-order options have no effect there.
+
 ## Full-order solve: `proj.fds.solve()`
 
 ### Sweep
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `fmin`, `fmax` | float | required | band, in GHz |
-| `nsamples` | int | 100 | number of equally spaced frequencies, `fmin` and `fmax` included |
+| `fmin`, `fmax` | float | required | band, in GHz; finite, `0 < fmin <= fmax` |
+| `nsamples` | int | 100 | number of equally spaced frequencies, `fmin` and `fmax` included (a whole number >= 1) |
 | `rerun` | None, bool | `None` | `None`: reuse stored results for the same request, recompute when it changed. `True`: always recompute (also ignores an interrupted sweep's samples). `False`: keep stored results whatever the request |
-| `verbose` | bool | `False` | per-sample progress in the output |
+| `verbose` | None, bool | `None` | `True`: per-sample progress in the output, for this solve. `None`: the console setting of `cavsim3d.utils.printing.set_verbosity` |
 
 ### Discretisation
 
@@ -61,7 +65,7 @@ proj.fds.solve(config=dict(fmin=1.0, fmax=3.0, nsamples=30, order=2))
 | `fmin`, `fmax`, `nsamples` | | as above | band in GHz and number of samples |
 | `rerun` | None, bool | `None` | as above |
 | `solver_type` | str | `"auto"` | dense solver choice for the small reduced system |
-| `verbose` | bool | `False` | progress output |
+| `verbose` | None, bool | `None` | as above |
 | `compute_s_params` | bool | `True` | (joined models) compute S from Z |
 
 ## Return value

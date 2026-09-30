@@ -55,8 +55,9 @@ S-parameters need a reference impedance for each mode:
 - **Quasi-TEM modes** are referred to their power-voltage line impedance.
 
 When results are exported to a Touchstone file, which allows a single reference only, the
-code writes S as solved and lists the true references in the header, or renormalises every
-port to a given real impedance.
+code renormalises every port to one real impedance (50 Ω unless given), so the file is exact
+as written; on request it writes S as solved instead and lists the true references in the
+header.
 
 ## Port faces in the resonance calculation
 

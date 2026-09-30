@@ -8,7 +8,6 @@ from typing import (
     Any, TYPE_CHECKING
 )
 from enum import Enum, auto
-import numpy as np
 import json
 import shutil
 from pathlib import Path
@@ -22,9 +21,10 @@ from .base import BaseGeometry, _display_webgui_fallback
 if TYPE_CHECKING:
     from cavsim3d.core.reuse import ImportedModel
 from .component_registry import (
-    TaggableMixin, ComponentTag, ComputeMethod,
-    get_global_cache
+    ComponentTag
 )
+import cavsim3d.utils.printing as pr
+from cavsim3d.utils.names import is_port_name
 
 
 def _is_netlist_ref(geometry) -> bool:
@@ -248,6 +248,7 @@ class Assembly(BaseGeometry):
         align_port: Optional[str] = None,
         n: int = 1,
         flip: bool = False,
+        attach_port: Optional[str] = None,
         **metadata
     ) -> 'Assembly':
         """
@@ -269,17 +270,21 @@ class Assembly(BaseGeometry):
             Explicit position (x, y, z)
         rotation : tuple, optional
             Rotation angles in degrees (rx, ry, rz)
-        after : str, optional
-            Place after this component along main axis (can use base name)
-        before : str, optional
+        after : str or (str, float), optional
+            Place after this component along main axis (can use base name);
+            ``(name, gap)`` leaves a gap in metres between the two
+        before : str or (str, float), optional
             Place before this component along main axis (can use base name)
         align_port : str, optional
-            Port to use for alignment
+            Port of THIS component that joins the neighbour
         n : int
             Number of consecutive repetitions of this component (default 1).
             The component is computed ONCE and referenced n times.
         flip : bool
             Turn the component end-for-end along the main axis.
+        attach_port : str, optional
+            Port of the ``after`` / ``before`` component it joins (default
+            ``port2`` after, ``port1`` before)
         **metadata
             Additional metadata
 
@@ -349,21 +354,25 @@ class Assembly(BaseGeometry):
         
         self._components[key] = entry
         
-        # Handle ordering - resolve component and optional gap
+        # Handle ordering - resolve component and optional gap.  A saved
+        # (name, gap) comes back from history.json as a list.
         gap = 0.0
-        if isinstance(after, tuple):
+        if isinstance(after, (tuple, list)):
             ref_after, gap = after
         else:
             ref_after = after
             
-        if isinstance(before, tuple):
+        if isinstance(before, (tuple, list)):
             ref_before, gap = before
         else:
             ref_before = before
 
         resolved_after = self._resolve_component_ref(ref_after) if ref_after else None
         resolved_before = self._resolve_component_ref(ref_before) if ref_before else None
-        
+        explicit = align_port is not None or attach_port is not None
+        if attach_port is not None and resolved_after is None and resolved_before is None:
+            raise ValueError("attach_port needs after= or before= (the part it joins)")
+
         if resolved_after is not None:
             idx = self._component_order.index(resolved_after) + 1
             self._component_order.insert(idx, key)
@@ -371,10 +380,10 @@ class Assembly(BaseGeometry):
             self._connections.append(Connection(
                 from_key=resolved_after,
                 to_key=key,
-                from_port='port2',
+                from_port=attach_port or 'port2',
                 to_port=align_port or 'port1',
-                gap=gap,
-                explicit=align_port is not None,
+                gap=float(gap),
+                explicit=explicit,
             ))
             
         elif resolved_before is not None:
@@ -385,9 +394,9 @@ class Assembly(BaseGeometry):
                 from_key=key,
                 to_key=resolved_before,
                 from_port=align_port or 'port2',
-                to_port='port1',
-                gap=gap,  # distance from.port2 -> to.port1, as for 'after'
-                explicit=align_port is not None,
+                to_port=attach_port or 'port1',
+                gap=float(gap),  # distance from.port2 -> to.port1, as for 'after'
+                explicit=explicit,
             ))
         else:
             self._component_order.append(key)
@@ -406,9 +415,10 @@ class Assembly(BaseGeometry):
             after=after,
             before=before,
             align_port=align_port,
+            attach_port=attach_port,
             **metadata
         )
-        
+
         return self
     
     def _rename_first_instance(self, base_name: str) -> None:
@@ -504,28 +514,16 @@ class Assembly(BaseGeometry):
         gap: float = 0.0,
         **metadata
     ) -> 'Assembly':
-        """Add component connected via ports to existing component."""
-        resolved_to = self._resolve_component_ref(to_component)
-        
-        self.add(name, geometry, rotation=rotation, **metadata)
-        
-        # Get the key that was just added (might be suffixed)
-        new_key = self._component_order[-1]
-        
-        self._record(
-            'connect',
-            name=name,
-            geometry_type=type(geometry).__name__,
-            geometry_history=geometry.get_history(),
-            to_component=to_component,
-            from_port=from_port,
-            to_port=to_port,
-            rotation=rotation,
-            gap=gap,
-            **metadata
-        )
-        
-        return self
+        """Add ``geometry`` right after ``to_component``, joined port to port.
+
+        The new component's ``from_port`` meets ``to_component``'s
+        ``to_port``, ``gap`` metres apart.  Same as
+        ``add(name, geometry, after=(to_component, gap), align_port=from_port,
+        attach_port=to_port)``.
+        """
+        return self.add(name, geometry, rotation=rotation,
+                        after=(self._resolve_component_ref(to_component), gap),
+                        align_port=from_port, attach_port=to_port, **metadata)
     
     def replace(
         self,
@@ -854,7 +852,6 @@ class Assembly(BaseGeometry):
         # Refresh physical bounds for better precision if possible
         if (not isinstance(entry.geometry, Assembly)
                 and getattr(entry.geometry, 'geo', None) is not None):
-            axis = self.main_axis
             z_min, z_max = entry.geometry.get_physical_bounds('Z')
             x_min, x_max = entry.geometry.get_physical_bounds('X')
             y_min, y_max = entry.geometry.get_physical_bounds('Y')
@@ -1229,7 +1226,7 @@ class Assembly(BaseGeometry):
             self._domain_materials[best_key].append(mat_name)
 
         # Print domain material mapping
-        print(f"\nAssembly domain-material mapping:")
+        print("\nAssembly domain-material mapping:")
         for key, mats in self._domain_materials.items():
             print(f"  {key}: {mats}")
 
@@ -1352,7 +1349,7 @@ class Assembly(BaseGeometry):
 
         try:
             for face in self.geo.faces:
-                if face.name and 'port' in face.name:
+                if is_port_name(face.name):
                     fbb = face.bounding_box
                     center = tuple((fbb[0][j] + fbb[1][j]) / 2 for j in range(3))
                     port_faces.append((center, face))
@@ -1404,7 +1401,6 @@ class Assembly(BaseGeometry):
             port_name = f'port{port_num}'
             
             is_external = len(group['faces']) == 1
-            is_interface = len(group['faces']) > 1
             
             for face in group['faces']:
                 face.name = port_name
@@ -1427,7 +1423,7 @@ class Assembly(BaseGeometry):
         n_external = sum(1 for p in self._port_info.values() if p['type'] == 'external')
         n_interface = sum(1 for p in self._port_info.values() if p['type'] == 'interface')
         
-        print(f"Port naming complete:")
+        print("Port naming complete:")
         print(f"  Total ports: {len(self._port_info)}")
         print(f"  External ports: {n_external}")
         print(f"  Interface ports: {n_interface}")
@@ -1455,7 +1451,7 @@ class Assembly(BaseGeometry):
             return
 
         def _preserve(name: str) -> bool:
-            return bool(name) and ('port' in name or name == 'interface')
+            return is_port_name(name) or name == 'interface'
 
         try:
             solids = list(self.geo.solids)
@@ -1626,9 +1622,9 @@ class Assembly(BaseGeometry):
             components = info.get('connected_components', [])
             comp_str = ", ".join(f"{k}.{p}" for k, p in components) if components else "?"
             
-            print(f"  {port_name:8s} │ {self.main_axis}={pos:+.6f} │ "
+            pr.echo(f"  {port_name:8s} │ {self.main_axis}={pos:+.6f} │ "
                   f"{port_type:10s} │ {n_faces} face(s) {type_marker}")
-            print(f"           │ Components: {comp_str}")
+            pr.echo(f"           │ Components: {comp_str}")
         
         print("=" * 70)
         
@@ -1662,13 +1658,13 @@ class Assembly(BaseGeometry):
             else:
                 comp_parts.append(f"[{key}]")
         
-        print("  Ports:      " + " ─── ".join(port_parts))
-        print("  Components: " + " ─── ".join(comp_parts))
+        pr.echo("  Ports:      " + " ─── ".join(port_parts))
+        pr.echo("  Components: " + " ─── ".join(comp_parts))
         
         # Show identical component groups
         identical = self.get_identical_components()
         if identical:
-            print(f"\n  Identical components (compute once, reuse):")
+            print("\n  Identical components (compute once, reuse):")
             for base_name, keys in identical.items():
                 print(f"    {base_name}: {', '.join(keys)}")
         print()
@@ -1734,7 +1730,7 @@ class Assembly(BaseGeometry):
         # Show identical groups
         identical = self.get_identical_components()
         if identical:
-            print(f"\nIdentical components:")
+            print("\nIdentical components:")
             for base_name, keys in identical.items():
                 print(f"  {base_name}: {len(keys)} instances -> compute once")
 
@@ -1897,18 +1893,18 @@ class Assembly(BaseGeometry):
         print(f"Built:                  {info['is_built']}")
         print(f"Has mesh:               {info['has_mesh']}")
         
-        print(f"\nPorts:")
+        print("\nPorts:")
         print(f"  Total:                {info['n_ports']}")
         print(f"  External:             {info['n_external_ports']}")
         print(f"  Interfaces:           {info['n_interface_ports']}")
         
         if info['bounds']:
             pmin, pmax = info['bounds']
-            print(f"\nBounding Box:")
+            print("\nBounding Box:")
             print(f"  Min: ({pmin[0]:.4f}, {pmin[1]:.4f}, {pmin[2]:.4f})")
             print(f"  Max: ({pmax[0]:.4f}, {pmax[1]:.4f}, {pmax[2]:.4f})")
         
-        print(f"\nComponents:")
+        print("\nComponents:")
         for i, key in enumerate(self._component_order):
             entry = self._components[key]
             geo_type = type(entry.geometry).__name__
@@ -1921,7 +1917,7 @@ class Assembly(BaseGeometry):
         
         # Identical component groups
         if info['identical_groups']:
-            print(f"\nIdentical Component Groups (solver optimization):")
+            print("\nIdentical Component Groups (solver optimization):")
             for base_name, keys in info['identical_groups'].items():
                 print(f"  '{base_name}': {len(keys)} instances")
                 print(f"    Keys: {', '.join(keys)}")
@@ -2048,7 +2044,6 @@ class Assembly(BaseGeometry):
 
             if e.get('op') == 'add' or e.get('op') == 'connect':
                 name = e.get('name', '')
-                geo_type = e.get('geometry_type', '')
                 sub_history = e.get('geometry_history', [])
 
                 # Find the component key for this name
@@ -2151,9 +2146,18 @@ class Assembly(BaseGeometry):
             return sub_cls._rebuild_from_history(
                 sub_history, project_path, source_file=sub_source)
 
+        prev = None
         for entry in history:
             op = entry['op']
             params = {k: v for k, v in entry.items() if k not in ['op', 'timestamp']}
+            # connect() used to record an 'add' of the part AND a 'connect':
+            # the 'add' right before already placed it, so the pair is one part.
+            legacy_connect = (op == 'connect' and prev is not None
+                              and prev.get('op') == 'add'
+                              and prev.get('name') == params.get('name'))
+            prev = entry
+            if legacy_connect:
+                continue
 
             if op == '__init__':
                 obj = cls(main_axis=params.get('main_axis'))

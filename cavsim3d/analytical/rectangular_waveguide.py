@@ -2,10 +2,11 @@
 
 import numpy as np
 from typing import Dict, Union, List, Tuple, Optional
-from cavsim3d.core.constants import c0, mu0, eps0, Z0
+from cavsim3d.core.constants import c0, mu0, Z0
 import itertools
 from cavsim3d.utils.plot_mixin import PlotMixin
 from collections import defaultdict
+import cavsim3d.utils.printing as pr
 
 
 
@@ -466,7 +467,7 @@ class RWGAnalytical(PlotMixin):
         print("Rectangular Waveguide Port Eigenmodes")
         print(f"Cross-section: a = {self.a*1e3:.2f} mm, b = {self.b*1e3:.2f} mm")
         print("=" * 80)
-        print(f"{'Rank':<6} {'Mode':<10} {'Type':<6} {'(m,n)':<10} "
+        pr.echo(f"{'Rank':<6} {'Mode':<10} {'Type':<6} {'(m,n)':<10} "
               f"{'fc [GHz]':<12} {'kc [rad/m]':<14} {'λc [mm]':<12}")
         print("-" * 80)
 

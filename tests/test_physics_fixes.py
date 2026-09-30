@@ -103,9 +103,9 @@ class TestLossyMaterials:
         assert np.all(np.abs(S[:, 0, 0]) ** 2 + np.abs(S[:, 1, 0]) ** 2 < 1)
 
     def test_negative_loss_is_rejected(self):
-        geo = _guide(materials={'*': {'tan_delta': -0.1}})
+        # rejected when the material is assigned, before any solve
         with pytest.raises(ValueError, match="must be >= 0"):
-            _solve(geo, 8.0, 9.0, n=2)
+            _solve(_guide(materials={'*': {'tan_delta': -0.1}}), 8.0, 9.0, n=2)
 
 
 class TestFieldReconstruction:
@@ -178,6 +178,37 @@ class TestNumericPortModes:
         types = [ps.port_mode_types['port1'][m] for m in range(2)]
         assert types == ['TEM', 'TE']
 
+    @staticmethod
+    def _coarse_guide_mesh():
+        # 100 x 50 mm guide at maxh 0.06: a port face of a few triangles
+        from netgen.occ import Box, Pnt, Z, OCCGeometry
+        from ngsolve import Mesh
+        box = Box(Pnt(0, 0, 0), Pnt(0.1, 0.05, 0.0667))
+        for f in box.faces:
+            f.name = 'default'
+        box.faces.Min(Z).name = 'port1'
+        box.faces.Max(Z).name = 'port2'
+        return Mesh(OCCGeometry(box).GenerateMesh(maxh=0.06))
+
+    def test_coarse_port_face(self):
+        # the eigensolver used to ask for more modes than the face holds and
+        # failed in scipy's eigh ("leading minor ... not positive definite")
+        from cavsim3d.solvers.ports import PortEigenmodeSolver
+        ps = PortEigenmodeSolver(self._coarse_guide_mesh(), order=2, bc='default',
+                                 mode_source='numeric')
+        ps.solve(nmodes=2)
+        assert ps.port_mode_types['port1'][0] == 'TE'
+        assert np.isclose(ps.port_cutoff_kc['port1'][0], np.pi / 0.1, rtol=0.05)   # TE10
+        assert len(ps.port_modes['port2']) == 2
+
+    def test_too_few_modes_on_the_port_face_is_an_error(self):
+        # order 1 on this face: 3 TE + 3 TM degrees of freedom, so 6 modes at most
+        from cavsim3d.solvers.ports import PortEigenmodeSolver
+        ps = PortEigenmodeSolver(self._coarse_guide_mesh(), order=1, bc='default',
+                                 mode_source='numeric')
+        with pytest.raises(ValueError, match="resolves .* numeric port mode"):
+            ps.solve(nmodes=8)
+
 
 class TestRerunPolicy:
     def test_changed_band_recomputes_and_same_band_reuses(self):
@@ -196,14 +227,25 @@ class TestRerunPolicy:
 
 
 class TestExportAndErrors:
+    def test_rom_error_against_a_fom_on_another_grid(self):
+        # a ROM swept on a finer grid than its FOM used to fail in np.allclose
+        fds = _solve(_guide(), 8.0, 9.0, n=3, store_snapshots=True)
+        rom = fds.fom.reduce(tol=1e-10)
+        rom.solve(fmin=8.0, fmax=9.0, nsamples=7, solver_type='direct')
+        errors = rom.compute_error(fds)
+        assert all(np.isfinite(e) for e in errors.values())
+        assert errors['1(1)2(1)'] < 1e-3                      # S21 of the guide
+
     def test_touchstone_two_port_column_order(self, tmp_path):
         fds = _solve(_guide(), 8.0, 9.0, n=2)
         S = fds._S_matrix
-        fn = fds.export_touchstone(str(tmp_path / "rwg"))
+        # z0=None writes S as solved (and warns that R 50 is only nominal)
+        with pytest.warns(UserWarning, match="R 50"):
+            fn = fds.export_touchstone(str(tmp_path / "rwg"), z0=None)
         vals = np.array(open(fn).read().splitlines()[-1].split()[1:], float).reshape(-1, 2)
         expect = np.abs([S[-1, 0, 0], S[-1, 1, 0], S[-1, 0, 1], S[-1, 1, 1]])
         assert np.allclose(vals[:, 0], expect)
-        fn50 = fds.export_touchstone(str(tmp_path / "rwg50"), z0=50.0)
+        fn50 = fds.export_touchstone(str(tmp_path / "rwg50"))     # default: 50 ohm
         assert "# GHz S MA R 50.0" in open(fn50).read()
 
     def test_compute_error_covers_every_entry(self):

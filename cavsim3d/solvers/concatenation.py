@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Structure concatenation for multi-cell analysis.
 
@@ -11,6 +10,7 @@ Key concepts:
 - The result is ONE structure with external ports only
 - Field visualization shows the entire structure, not individual pieces
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Optional, Callable, Union, Any, Literal
 import time
@@ -32,6 +32,9 @@ from cavsim3d.solvers.base import BaseEMSolver
 from cavsim3d.utils.plot_mixin import PlotMixin
 from cavsim3d.rom.structures import ReducedStructure
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
+from cavsim3d.utils.names import region_pattern
+from cavsim3d.solvers.options import (FOM_SOLVE_OPTIONS, REDUCED_SOLVE_OPTIONS,
+                                      check_solve_options, validate_sweep)
 import h5py
 import json
 from pathlib import Path
@@ -82,7 +85,9 @@ def _n_propagating(geom: dict, fmax_hz: float, eps: float = 1.0,
             te = jnp_zeros(m, 20) / R          # TE_mn (excludes the trivial zero)
             tm = jn_zeros(m, 20) / R           # TM_mn
             n_m = int(np.sum(te < k) + np.sum(tm < k))
-            if n_m == 0:
+            if n_m == 0 and m > 0:
+                # From m = 1 on, the lowest cutoff of each order rises with m.
+                # m = 0 is passed over: its lowest (TM01) is above TE11's.
                 break
             count += n_m * (1 if m == 0 else 2)
         return count
@@ -990,8 +995,20 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         from cavsim3d.solvers.frequency_domain import FrequencyDomainSolver
         eigenvalues, eigenvectors = np.linalg.eigh(self.A_coupled)
-        res = FrequencyDomainSolver._filter_eigenvalues(eigenvalues, eigenvectors, **kwargs)
-        
+        opts = dict(kwargs)
+        n_modes = opts.pop('n_modes', None)
+        eigs, vecs = FrequencyDomainSolver._filter_eigenvalues(eigenvalues, eigenvectors, **opts)
+        # by default only the modes near the training band (an explicit
+        # min_eigenvalue replaces that window)
+        window = (self._training_window() if opts.get('filter_static', True)
+                  and opts.get('min_eigenvalue') is None else None)
+        if window is not None:
+            keep = (np.real(eigs) >= window[0]) & (np.real(eigs) <= window[1])
+            eigs, vecs = eigs[keep], vecs[:, keep]
+        if n_modes is not None:
+            eigs, vecs = eigs[:n_modes], vecs[:, :n_modes]
+        res = (eigs, vecs)
+
         # Update cache
         self._resonant_mode_cache[cache_key] = res
         return res
@@ -1288,6 +1305,43 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         return cs
 
+    def load_results(self, path: Union[str, Path]) -> bool:
+        """Attach the sweep (Z, S, frequencies, snapshots) saved in ``path``.
+
+        Only results that fit this coupled system are taken (as many external
+        port modes, snapshots of its size).  Returns True if attached.
+        """
+        path = Path(path)
+        z_file = path / "z" / "z.h5"
+        snap_file = path / "snapshots" / "snapshots.h5"
+        if not (z_file.exists() and snap_file.exists()):
+            return False
+        with h5py.File(z_file, "r") as f:
+            Z = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+        S = None
+        if (path / "s" / "s.h5").exists():
+            with h5py.File(path / "s" / "s.h5", "r") as f:
+                S = H5Serializer.load_dataset(f["data"]) if "data" in f else None
+        with h5py.File(snap_file, "r") as f:
+            freqs = (H5Serializer.load_dataset(f["frequencies"])
+                     if "frequencies" in f else None)
+            snaps = (H5Serializer.load_dataset(f["coupled_snapshots"])
+                     if "coupled_snapshots" in f else None)
+        n_ext = self._n_external
+        if (Z is None or freqs is None or np.ndim(Z) != 3 or Z.shape[1] != n_ext
+                or Z.shape[0] != len(freqs)):
+            return False
+        if S is not None and np.shape(S) != np.shape(Z):
+            S = None
+        if snaps is not None and (np.ndim(snaps) != 3 or snaps.shape[0] != len(freqs)
+                                  or snaps.shape[1] != self.A_coupled.shape[0]):
+            snaps = None
+        self._Z_matrix, self._S_matrix = Z, S
+        self.frequencies = freqs
+        self._snapshots = snaps
+        self._invalidate_cache()
+        return True
+
     # =========================================================================
     # Frequency Domain Solution
     # =========================================================================
@@ -1303,9 +1357,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """
         Solve the unified coupled system over a frequency range.
         """
-        # 1. Merge config and kwargs
+        # 1. Merge config and kwargs (a full-order config may be reused: its
+        # full-order options are accepted and have no effect here)
         cfg = (config or {}).copy()
         cfg.update(kwargs)
+        check_solve_options(cfg, REDUCED_SOLVE_OPTIONS, also_accepted=FOM_SOLVE_OPTIONS,
+                            where="concat.solve()")
 
         # 2. Extract core parameters with defaults
         fmin = fmin if fmin is not None else cfg.get('fmin')
@@ -1314,13 +1371,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         if fmin is None or fmax is None:
             raise ValueError("fmin and fmax must be provided (either directly or via config).")
+        nsamples = validate_sweep(fmin, fmax, nsamples)
 
         # 3. Extract other options from merged cfg
         compute_s_params = cfg.get('compute_s_params', True)
         solver_type = cfg.get('solver_type', 'auto')
-        verbose = cfg.get('verbose', False)
-
-        pr.set_verbosity(verbose)
+        verbose = cfg.get('verbose')     # None: keep the console verbosity
+        _prev_verbosity = pr.push_verbosity(verbose)
 
         # Start file logging
         _file_handler = None
@@ -1457,6 +1514,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
                 if self._solver_ref._project_ref:
                     self._solver_ref._project_ref.save()
+            elif getattr(self, '_save_dir', None) is not None:
+                # a netlist's joined model has no solver: it saves itself
+                self.save(self._save_dir)
 
             return {
                 "frequencies": self.frequencies,
@@ -1466,6 +1526,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 "S_dict": self.S_dict if compute_s_params else None,
             }
         finally:
+            pr.pop_verbosity(_prev_verbosity)
             if _file_handler:
                 pr.stop_file_log(_file_handler)
 
@@ -1626,7 +1687,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
             # Create a fresh per-domain FES on the current mesh
             domain_mats = _get_domain_mats(struct.domain)
-            region = self.mesh.Materials("|".join(domain_mats))
+            region = self.mesh.Materials(region_pattern(domain_mats))
             # complex: GridFunction(real_fes, complex=True) is a REAL vector,
             # which silently dropped the imaginary part of the coefficients
             fes_local = HCurl(self.mesh, order=order, dirichlet=bc, complex=True,
@@ -2133,9 +2194,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         Returns ``(coefficient_function, compound_mesh, label)`` ready for
         ``netgen.webgui.Draw``.
         """
-        from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF, HCurl
-        from cavsim3d.utils.mesh_replication import (
-            Placement, replicate_mesh, block_dof_maps, assemble_compound_field)
 
         vecs = self._section_coefficient_vectors(freq_idx, excitation_port)
         omega = 2 * np.pi * self.frequencies[freq_idx]
@@ -2291,10 +2349,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
 
         The indices returned are exactly the ``mode_idx`` accepted by
         :meth:`reconstruct_chain_eigenmode`, so a mode found here can be
-        reconstructed directly.
+        reconstructed directly.  Without a band, the training band widened
+        by 10 % at each edge (see :meth:`get_resonant_frequencies`).
         """
         if self.A_coupled is None:
             raise ValueError("System not coupled.")
+        band = self._eigen_training_band()
+        if fmin_ghz is None and fmax_ghz is None and band:
+            m = self.TRAINING_BAND_MARGIN
+            fmin_ghz, fmax_ghz = (1 - m) * band[0], (1 + m) * band[1]
         evals, _ = np.linalg.eigh(self.A_coupled)
         evals = evals[evals > 1e-6]                 # same filter as the reconstruction
         f = np.sqrt(evals) / (2 * np.pi) / 1e9
@@ -2604,7 +2667,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             x_full_local = struct.reconstruct(x_reduced)
 
             domain_mats = _get_domain_mats(struct.domain)
-            region = self.mesh.Materials("|".join(domain_mats))
+            region = self.mesh.Materials(region_pattern(domain_mats))
             fes_local = HCurl(self.mesh, order=order, dirichlet=bc, complex=True,
                               definedon=region, **hcurl_flags(kind_of(self.fes)))
 
@@ -2850,9 +2913,19 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         self,
         n_modes: int = None,
         fmin: float = None,
-        filter_static: bool = True
+        filter_static: bool = True,
+        fmax: float = None
     ) -> np.ndarray:
-        """Get resonant frequencies of the unified structure."""
+        """Resonant frequencies [Hz] of the unified structure, ascending.
+
+        By default only the modes within 10 % of the training band's edges
+        (where the joined parts' bands overlap) are listed: far from it the
+        reduced models leave spurious modes.  The mode indices of
+        :meth:`get_eigenmode`, :meth:`get_rq` and :meth:`get_figures_of_merit`
+        count the same list.  *fmin*/*fmax* [GHz] give another band
+        (``fmin=0``: every mode above the static ones).
+        """
+        explicit = fmin is not None or fmax is not None
         if fmin is not None:
             min_eigenvalue = (2 * np.pi * fmin * 1e9) ** 2
             filter_static = True
@@ -2863,8 +2936,13 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             filter_static=filter_static,
             min_eigenvalue=min_eigenvalue
         )
+        window = self._training_window() if filter_static and not explicit else None
+        if window is not None:
+            eigs = eigs[(eigs >= window[0]) & (eigs <= window[1])]
         eigs_pos = eigs[eigs > 0]
         freqs = np.sqrt(eigs_pos) / (2 * np.pi)
+        if fmax is not None:
+            freqs = freqs[freqs <= fmax * 1e9]
 
         if n_modes is not None:
             freqs = freqs[:n_modes]
@@ -2968,7 +3046,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 pr.info(f"  structure[{sA}].{pA} <-> structure[{sB}].{pB}")
 
         dims = self.get_coupled_dimensions()
-        pr.debug(f"\nUnified system dimensions:")
+        pr.debug("\nUnified system dimensions:")
         pr.debug(f"  Total uncoupled DOFs: {dims['total_uncoupled_dofs']}")
         pr.debug(f"  Coupled DOFs: {dims['coupled_dofs']}")
         pr.debug(f"  External port-modes: {dims['n_external_port_modes']}")
@@ -2999,7 +3077,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 pr.debug(f"  FES: {self.fes.ndof} DOFs")
 
         if self.frequencies is not None:
-            print(f"\nSolution:")
+            print("\nSolution:")
             print(f"  Range: {self.frequencies[0] / 1e9:.4f} - {self.frequencies[-1] / 1e9:.4f} GHz")
             print(f"  Samples: {len(self.frequencies)}")
 
@@ -3116,23 +3194,23 @@ class ReducedConcatenatedSystem(ConcatenatedSystem):
         pr.info(f"Reduced Concatenated System (Level {self._reduction_level})")
         pr.info("=" * 60)
 
-        pr.debug(f"\nReduction:")
+        pr.debug("\nReduction:")
         pr.debug(f"  Parent coupled DOFs: {self._parent_coupled_dofs}")
         pr.debug(f"  This level DOFs: {self.coupled_dofs}")
         if self._parent_coupled_dofs and self._parent_coupled_dofs > 0:
             compression = (1 - self.coupled_dofs / self._parent_coupled_dofs) * 100
             pr.debug(f"  Compression: {compression:.1f}%")
 
-        pr.debug(f"\nSingular values (top 5):")
+        pr.debug("\nSingular values (top 5):")
         for i, sv in enumerate(self._singular_values[:5]):
-            print(f"  σ_{i} = {sv:.4e}")
+            pr.echo(f"  σ_{i} = {sv:.4e}")
         if len(self._singular_values) > 5:
             print(f"  ... ({len(self._singular_values)} total)")
 
         print(f"\nField reconstruction: {'Ready' if self.can_reconstruct() else 'Not available'}")
 
         if self.frequencies is not None:
-            print(f"\nSolution:")
+            print("\nSolution:")
             print(f"  Range: {self.frequencies[0] / 1e9:.4f} - {self.frequencies[-1] / 1e9:.4f} GHz")
             print(f"  Samples: {len(self.frequencies)}")
 
@@ -3165,6 +3243,8 @@ def reduce_concatenated_system(
     ReducedConcatenatedSystem
         Further-reduced unified system
     """
+    from cavsim3d.rom.reduction import check_reduce_args
+    check_reduce_args(tol, max_rank)
     if concat.A_coupled is None:
         raise ValueError("System must be coupled first")
     if concat._snapshots is None:

@@ -3,7 +3,8 @@
 </p>
 <h1 align="center">cavsim3d</h1>
 
-[![License: LGPL](https://img.shields.io/badge/License-LGPL-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://github.com/Dark-Elektron/cavsim3d/actions/workflows/tests.yml/badge.svg)](https://github.com/Dark-Elektron/cavsim3d/actions/workflows/tests.yml)
 [![Documentation Status](https://img.shields.io/badge/docs-GitHub%20Pages-brightgreen)](https://dark-elektron.github.io/cavsim3d/)
 
 `cavsim3d` is a Python library for **3D Electromagnetic Simulation** and **Model Order Reduction (MOR)** of RF structures. Built on the [NGSolve](https://ngsolve.org) finite element engine, it provides a streamlined workflow for analyzing complex cavity systems, waveguides, and multi-component assemblies.
@@ -22,16 +23,25 @@ Comprehensive tutorials and API documentation are available at:
 ### Prerequisites
 
 - Python 3.9-3.13
-- Conda environment
+- Conda (for `pythonocc-core`, which is published on conda-forge only; `pythreejs` serves its notebook viewer)
 
-To install `cavsim3d` from source, clone the repository and install it using `pip` in editable or normal mode:
+Create an environment, then install `cavsim3d` from source:
 
 ```bash
+conda create -n cavsim3d -c conda-forge python=3.11 pythonocc-core pythreejs
+conda activate cavsim3d
 git clone https://github.com/Dark-Elektron/cavsim3d
 cd cavsim3d
-pip install --upgrade pip
-conda install -y -c conda-forge pythonocc-core pythreejs ipywidgets --no-update-deps
 pip install -e .
+```
+
+`pip install -e ".[dev]"` adds the test and lint tools, `pip install -e ".[docs]"` the documentation tools.
+
+### Running the tests
+
+```bash
+python -m pytest tests/ -q                 # full suite, about 10 minutes
+python -m pytest tests/ -q -m "not slow"   # without the heavy 3D solves
 ```
 
 ## 🛠️ Walkthrough: Circular Waveguide ROM Concatenation
@@ -100,6 +110,9 @@ concat.plot_eigenmode(int(idx[0]))
 ```
 
 The [tutorials](https://dark-elektron.github.io/cavsim3d/tutorials/) cover every step in detail, from a first waveguide to repeated and imported parts.
+
+## 📝 Citing
+If you use `cavsim3d` in your work, please cite it: GitHub's **Cite this repository** button (from [`CITATION.cff`](CITATION.cff)) gives the reference in BibTeX and APA. Changes between versions are listed in the [changelog](CHANGELOG.md).
 
 ## 📚 References
 [1] T. Flisgen, J. Heller, T. Galek, L. Shi, N. Joshi, N. Baboi, R. M. Jones und U. van Rienen, *Eigenmode compendium of the third harmonic module of the European X-ray Free Electron Laser*, Phys. Rev. Accel. Beams 20, 042002, 2017, doi: [https://doi.org/10.1103/PhysRevAccelBeams.20.042002](https://doi.org/10.1103/PhysRevAccelBeams.20.042002)

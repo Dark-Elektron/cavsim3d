@@ -1,15 +1,5 @@
-matplotlib
-numpy
-scipy
-ipython
-ngsolve
-mkl<2026; platform_system != "Darwin"
-gmsh
-ipywidgets
-ipympl
-webgui-jupyter-widgets
-h5py
-tqdm
-termcolor
-pytest
-pytest-cov
+# The dependencies are declared in pyproject.toml; this installs cavsim3d from
+# this checkout together with its development tools (tests, linting, build).
+# pythonocc-core is conda-forge only, install it first:
+#   conda install -c conda-forge pythonocc-core
+-e .[dev]

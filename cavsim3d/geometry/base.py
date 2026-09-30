@@ -10,12 +10,45 @@ from datetime import datetime
 from ngsolve import Mesh, BND, Integrate, specialcf
 from netgen.occ import OCCGeometry, X, Y, Z
 from ngsolve.webgui import Draw
-from netgen.occ import Glue
 
 from .component_registry import (
-    TaggableMixin, ComponentTag, ComputeMethod, 
+    TaggableMixin, ComputeMethod, 
     get_global_cache, CachedSolution
 )
+import cavsim3d.utils.printing as pr
+from cavsim3d.utils.names import is_port_name
+
+
+MATERIAL_DEFAULTS = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+
+
+def validate_material_properties(material: str, props: dict) -> None:
+    """Check one material's property values; raise ValueError if unusable.
+
+    Every value must be a real, finite number; ``eps_r`` and ``mu_r`` must be
+    > 0, ``sigma`` [S/m] and ``tan_delta`` >= 0 (a negative loss describes a
+    source).  Unknown keys are left to the caller.
+    """
+    for prop, value in props.items():
+        if prop not in MATERIAL_DEFAULTS:
+            continue
+        if (isinstance(value, bool)
+                or not isinstance(value, (int, float, np.integer, np.floating))):
+            hint = ""
+            if isinstance(value, (complex, np.complexfloating)):
+                hint = (" Give a lossy dielectric as eps_r (the real part) and "
+                        "tan_delta: eps = eps0 eps_r (1 - j tan_delta).")
+            raise ValueError(f"Material {material!r}: {prop} must be a real number, "
+                             f"got {value!r}.{hint}")
+        v = float(value)
+        if not np.isfinite(v):
+            raise ValueError(f"Material {material!r}: {prop} must be finite, got {v}.")
+        if prop in ('eps_r', 'mu_r') and v <= 0:
+            raise ValueError(f"Material {material!r}: {prop} must be > 0, got {v}.")
+        if prop in ('sigma', 'tan_delta') and v < 0:
+            raise ValueError(
+                f"Material {material!r}: {prop} must be >= 0, got {v} -- a negative "
+                f"value describes a source, not a loss.")
 
 
 #: Largest standalone scene (bytes) embedded as a static fallback; a larger one
@@ -269,7 +302,7 @@ class BaseGeometry(ABC, TaggableMixin):
 
     # === Materials ===
 
-    MATERIAL_DEFAULTS = {"eps_r": 1.0, "mu_r": 1.0, "sigma": 0.0, "tan_delta": 0.0}
+    MATERIAL_DEFAULTS = MATERIAL_DEFAULTS
 
     def set_materials(self, material_config: Dict[str, dict]) -> 'BaseGeometry':
         """Assign material properties to mesh materials (``'*'`` wildcards allowed).
@@ -294,6 +327,7 @@ class BaseGeometry(ABC, TaggableMixin):
             if unknown:
                 raise ValueError(f"Material {key!r}: unknown properties {sorted(unknown)}; "
                                  f"use {sorted(self.MATERIAL_DEFAULTS)}.")
+            validate_material_properties(key, d)
             cfg[key] = d
         self._materials = cfg
         self._record('set_materials', material_config=material_config)
@@ -440,7 +474,8 @@ class BaseGeometry(ABC, TaggableMixin):
     def ports(self) -> List[str]:
         """Get list of port boundary names."""
         if self._ports is None:
-            self._ports = [b for b in self.mesh.GetBoundaries() if "port" in b]
+            self._ports = list(dict.fromkeys(
+                b for b in self.mesh.GetBoundaries() if is_port_name(b)))
         return self._ports
 
     @property
@@ -553,7 +588,7 @@ class BaseGeometry(ABC, TaggableMixin):
         print(f"Supports analytical:    {self.supports_analytical}")
         print(f"Boundary condition:     {self.bc}")
         
-        print(f"\nComponent Tag:")
+        print("\nComponent Tag:")
         print(f"  Full:                 {self.tag}")
         print(f"  Geometry hash:        {self.tag.geometry_hash[:16]}...")
         if self.custom_tag:
@@ -636,12 +671,16 @@ class BaseGeometry(ABC, TaggableMixin):
             json.dump(meta, f, indent=2, default=str)
 
     @classmethod
-    def load_geometry(cls, project_path: Path) -> 'BaseGeometry':
+    def load_geometry(cls, project_path: Path, check_source: bool = True) -> 'BaseGeometry':
         """
         Load geometry from a saved project by replaying the operation history.
 
         Reads ``project_path/geometry/history.json``, dispatches to the
         correct subclass, and reconstructs the geometry.
+
+        ``check_source=False`` skips comparing the saved copy of a CAD file
+        with its original (and so never asks, nor writes to the project):
+        used when another project is read as an imported part.
         """
         geo_dir = Path(project_path) / 'geometry'
         history_file = geo_dir / 'history.json'
@@ -685,8 +724,15 @@ class BaseGeometry(ABC, TaggableMixin):
         geo._source_hash = source_hash
         geo._history = history
 
-        # Check if source has changed since save
-        geo._check_source_link(project_path)
+        # Check if source has changed since save; if the saved copy was
+        # replaced by the changed file, build the geometry from the new copy.
+        if check_source and geo._check_source_link(project_path):
+            geo = subclass._rebuild_from_history(history, project_path, source_file)
+            geo._source_link = source_link
+            geo._source_hash = (geo._file_hash(source_file)
+                                if source_file is not None and source_file.exists()
+                                else None)
+            geo._history = history
 
         return geo
 
@@ -695,10 +741,10 @@ class BaseGeometry(ABC, TaggableMixin):
         """Find a BaseGeometry subclass by name (searches all subclasses)."""
         # Lazy import to ensure all standard subclasses are registered if not already
         try:
-            from . import primitives
-            from . import axisymmetric
-            from . import importers
-            from . import assembly
+            from . import primitives  # noqa: F401  (registers the subclasses)
+            from . import axisymmetric  # noqa: F401
+            from . import importers  # noqa: F401
+            from . import assembly  # noqa: F401
         except (ImportError, ValueError):
             pass
 
@@ -733,27 +779,38 @@ class BaseGeometry(ABC, TaggableMixin):
             f"{cls.__name__} does not support history-based reconstruction."
         )
 
-    def _check_source_link(self, project_path: Path) -> None:
+    def _check_source_link(self, project_path: Path) -> bool:
         """
         Compare the project's geometry copy against the linked source.
-        
+
         Interactive behaviour:
         - Source missing  → prompt to break link or keep it
         - Source changed → prompt to update (copy new), keep local, or break link
         - link_broken flag → skip all checks
+
+        When nobody can answer (a script, a notebook run by nbconvert), the
+        local copy is used and nothing is written.
+
+        Returns
+        -------
+        bool
+            True if the local copy was replaced by the changed source file
+            (the geometry must then be rebuilt from it).
         """
+        from cavsim3d.utils.io_utils import ask_choice
+
         if self._source_link is None:
-            return  # No link — standalone project
+            return False  # No link — standalone project
 
         geo_dir = Path(project_path) / 'geometry'
         history_file = geo_dir / 'history.json'
-        
+
         # Check if link was already broken
         if history_file.exists():
             with open(history_file, 'r') as f:
                 meta = json.load(f)
             if meta.get('link_broken', False):
-                return  # Link was broken — skip all checks
+                return False  # Link was broken — skip all checks
 
         source_path = Path(self._source_link)
 
@@ -764,68 +821,59 @@ class BaseGeometry(ABC, TaggableMixin):
             print("  Options:")
             print("    [1] Break link (stop checking in the future)")
             print("    [2] Keep link (ask again next time)")
-            
-            try:
-                from cavsim3d.utils.io_utils import get_user_confirmation
-                choice = input("  Choice [1/2]: ").strip()
-                if choice == '1':
-                    self._source_link = None
-                    self._source_hash = None
-                    # Write link_broken flag
-                    if history_file.exists():
-                        with open(history_file, 'r') as f:
-                            meta = json.load(f)
-                        meta['link_broken'] = True
-                        meta['source_link'] = None
-                        with open(history_file, 'w') as f:
-                            json.dump(meta, f, indent=2, default=str)
-                    print("  Link broken. Using local copy only.")
-                else:
-                    print("  Link preserved. Will check again next time.")
-            except Exception:
-                pass  # Non-interactive environment — just use local copy
-            return
+            choice = ask_choice("  Choice", ("1", "2"), default="2")
+            if choice == '1':
+                self._break_source_link(history_file)
+                print("  Link broken. Using local copy only.")
+            else:
+                print("  Link preserved. Will check again next time.")
+            return False
 
         # Source exists — check for changes
         try:
             current_hash = self._file_hash(source_path)
-            if self._source_hash is not None and current_hash != self._source_hash:
-                print(f"\n⚠ Linked source geometry has been modified: {source_path}")
-                print("  The original CAD file has changed since the project was saved.")
-                print("  Options:")
-                print("    [1] Update (replace local copy with new file — invalidates results)")
-                print("    [2] Keep local (ignore changes, use saved copy)")
-                print("    [3] Break link (stop checking in the future)")
-                
-                try:
-                    choice = input("  Choice [1/2/3]: ").strip()
-                    if choice == '1':
-                        # Copy new source into project
-                        source_filename = f'source_model{source_path.suffix}'
-                        dest = geo_dir / source_filename
-                        shutil.copy2(str(source_path), str(dest))
-                        self._source_hash = self._file_hash(dest)
-                        self._update_link_in_history(geo_dir)
-                        # Invalidate results
-                        self._delete_project_results(project_path)
-                        print("  Updated to new geometry. Results invalidated.")
-                    elif choice == '3':
-                        self._source_link = None
-                        self._source_hash = None
-                        if history_file.exists():
-                            with open(history_file, 'r') as f:
-                                meta = json.load(f)
-                            meta['link_broken'] = True
-                            meta['source_link'] = None
-                            with open(history_file, 'w') as f:
-                                json.dump(meta, f, indent=2, default=str)
-                        print("  Link broken. Using local copy only.")
-                    else:
-                        print("  Keeping local copy. Original changes ignored.")
-                except Exception:
-                    pass  # Non-interactive — just use local copy
         except Exception as e:
             warnings.warn(f"Could not verify source geometry hash: {e}")
+            return False
+        if self._source_hash is None or current_hash == self._source_hash:
+            return False
+
+        pr.echo(f"\n⚠ Linked source geometry has been modified: {source_path}")
+        print("  The original CAD file has changed since the project was saved.")
+        print("  Options:")
+        pr.echo("    [1] Update (replace local copy with new file — invalidates results)")
+        print("    [2] Keep local (ignore changes, use saved copy)")
+        print("    [3] Break link (stop checking in the future)")
+        choice = ask_choice("  Choice", ("1", "2", "3"), default="2")
+        if choice == '1':
+            # Copy new source into project
+            source_filename = f'source_model{source_path.suffix}'
+            dest = geo_dir / source_filename
+            shutil.copy2(str(source_path), str(dest))
+            self._source_hash = self._file_hash(dest)
+            self._update_link_in_history(geo_dir)
+            # The mesh and results belong to the old geometry
+            self._delete_project_results(project_path)
+            print("  Updated to new geometry. Mesh and results invalidated.")
+            return True
+        if choice == '3':
+            self._break_source_link(history_file)
+            print("  Link broken. Using local copy only.")
+        else:
+            print("  Keeping local copy. Original changes ignored.")
+        return False
+
+    def _break_source_link(self, history_file: Path) -> None:
+        """Stop comparing with the original CAD file (recorded in history.json)."""
+        self._source_link = None
+        self._source_hash = None
+        if history_file.exists():
+            with open(history_file, 'r') as f:
+                meta = json.load(f)
+            meta['link_broken'] = True
+            meta['source_link'] = None
+            with open(history_file, 'w') as f:
+                json.dump(meta, f, indent=2, default=str)
 
 
     def _update_link_in_history(self, geo_dir: Path) -> None:
@@ -841,9 +889,9 @@ class BaseGeometry(ABC, TaggableMixin):
 
     @staticmethod
     def _delete_project_results(project_path: Path) -> None:
-        """Delete all simulation results from a project directory."""
+        """Delete the mesh and all simulation results from a project directory."""
         result_paths = [
-            'matrices.h5', 'snapshots.h5', 'fds',
+            'matrices.h5', 'snapshots.h5', 'fds', 'mesh',
             'fom', 'foms', 'roms', 'port_modes', 'eigenmode'
         ]
         for name in result_paths:

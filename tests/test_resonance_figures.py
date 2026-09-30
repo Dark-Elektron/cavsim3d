@@ -317,6 +317,21 @@ class _FakeMesh:
         self.curved = order
 
 
+def test_rom_lists_the_modes_near_its_training_band(iris):
+    # far from its band a ROM has spurious modes: by default it lists those
+    # within 10 % of the band's edges, and get_eigenmode(i) counts that list
+    proj, rom = iris
+    f = rom.get_resonant_frequencies() / 1e9
+    assert len(f) and f.min() >= 0.9 * 1.8 and f.max() <= 1.1 * 2.6
+    wide = rom.get_resonant_frequencies(fmin=0) / 1e9
+    assert len(wide) > len(f) and np.all(np.isin(np.round(f, 9), np.round(wide, 9)))
+    for i in range(len(f)):
+        assert rom.get_eigenmode(i)[0] / 1e9 == pytest.approx(f[i], rel=1e-9)
+    # the band is saved with the model, so a reopened project lists the same
+    again = EMProject(name="p", base_dir=str(proj.base_dir)).fds.fom.rom
+    assert np.allclose(again.get_resonant_frequencies() / 1e9, f)
+
+
 def test_curving_falls_back_to_a_lower_order():
     mesh = _FakeMesh(works_up_to=2)
     with pytest.warns(UserWarning, match="order 3 failed.*order 2"):

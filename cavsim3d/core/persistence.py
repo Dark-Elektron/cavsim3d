@@ -5,11 +5,9 @@ Handles HDF5 serialization and project management.
 
 from __future__ import annotations
 import json
-import os
 import shutil
-import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, Type, TypeVar
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union, TypeVar
 import h5py
 import numpy as np
 import scipy.sparse as sp
@@ -17,10 +15,10 @@ import pickle
 # Import OCC modules as early as possible to avoid DLL conflicts with NGSolve on Windows
 # Some OCC modules share DLLs that NGSolve also bundles (e.g. TKSTEP, TKIGES)
 try:
-    import OCC.Core.STEPControl
-    import OCC.Core.IGESControl
-    import OCC.Core.BRepAlgoAPI
-    import OCC.Core.BOPAlgo
+    import OCC.Core.STEPControl  # noqa: F401  (load order, see above)
+    import OCC.Core.IGESControl  # noqa: F401
+    import OCC.Core.BRepAlgoAPI  # noqa: F401
+    import OCC.Core.BOPAlgo  # noqa: F401
 except ImportError:
     pass
 
@@ -29,6 +27,9 @@ try:
     import ngsolve as ngs
 except ImportError:
     ngs = None
+
+if TYPE_CHECKING:
+    import ngsolve
 
 T = TypeVar('T')
 

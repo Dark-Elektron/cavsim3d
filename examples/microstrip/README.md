@@ -40,7 +40,8 @@ The CST reference is also **lossy** (FR-4 tan-δ, copper) while cavsim3d here is
 
 ## CST reference data
 
-The comparison scripts look for the CST exports in
-`C:\Users\Soske\Documents\CEM2\cst\microstrip_line\Export` (adjust
-`cst_compare.default_cst_dir` for your machine). Missing CST data is handled
-gracefully — the cavsim3d curves still plot.
+The comparison scripts look for the CST exports in the folder named by the
+environment variable `CAVSIM3D_CST_MICROSTRIP`, or else in
+`cst_exports/microstrip_line/Export` next to the scripts (the CST data are not
+part of the repository). Missing CST data is handled gracefully — the cavsim3d
+curves still plot.

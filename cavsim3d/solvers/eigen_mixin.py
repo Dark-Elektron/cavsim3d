@@ -8,7 +8,7 @@ Provides shared functionality for eigenmode analysis across different solver typ
 """
 
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple, Union, Literal, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Literal, Any
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
@@ -20,6 +20,9 @@ from cavsim3d.solvers.figures_of_merit import (ModePiece, beam_line, field_on_li
 import cavsim3d.utils.printing as pr
 from pathlib import Path
 from cavsim3d.geometry.base import _display_webgui_fallback
+
+if TYPE_CHECKING:
+    from cavsim3d.solvers.concatenation import ConcatenatedSystem
 
 
 class EigenMixinBase:
@@ -37,9 +40,33 @@ class EigenMixinBase:
     # Default threshold for filtering static modes
     DEFAULT_MIN_EIGENVALUE = MIN_EIGENVALUE  # omega^2 of 1 MHz: below is static
 
+    # A reduced model is accurate near the band its snapshots cover; far from
+    # it the projection leaves spurious modes (e.g. 0.4 and 0.7 GHz for a
+    # guide reduced over 1.5-3 GHz).  Its default spectrum -- the listing and
+    # the mode indices of get_eigenmode/get_rq/get_figures_of_merit -- keeps
+    # the modes within this fraction of the band's edges.
+    TRAINING_BAND_MARGIN = 0.1
+
     # Cache storage (initialized by subclasses or on first use)
     _eigenvalues_cache: Dict[str, np.ndarray] = None
     _eigenvectors_cache: Dict[str, np.ndarray] = None
+
+    def _eigen_training_band(self) -> Optional[Tuple[float, float]]:
+        """Training band ``(fmin, fmax)`` [GHz] of a reduced model, else None.
+
+        None (a full-order model) keeps every mode in the default spectrum.
+        """
+        return None
+
+    def _training_window(self) -> Optional[Tuple[float, float]]:
+        """Default spectrum window ``(lam_lo, lam_hi)`` in omega^2, or None."""
+        band = self._eigen_training_band()
+        if not band:
+            return None
+        m = self.TRAINING_BAND_MARGIN
+        lo, hi = band
+        return ((2 * np.pi * (1 - m) * lo * 1e9) ** 2,
+                (2 * np.pi * (1 + m) * hi * 1e9) ** 2)
 
     # =========================================================================
     # Abstract methods - must be implemented by each solver type
@@ -444,12 +471,21 @@ class EigenMixinBase:
                     sigma=sigma
                 )
 
-            return self._filter_eigenpairs(
+            eigs, vecs = self._filter_eigenpairs(
                 raw_eigs, raw_vecs,
                 filter_static=filter_static,
                 min_eigenvalue=min_eigenvalue,
-                n_modes=n_modes
+                n_modes=None
             )
+            # a reduced model: only the modes near its training band
+            window = (self._training_window()
+                      if filter_static and min_eigenvalue is None else None)
+            if window is not None:
+                keep = (np.real(eigs) >= window[0]) & (np.real(eigs) <= window[1])
+                eigs, vecs = eigs[keep], vecs[:, keep]
+            if n_modes is not None:
+                eigs, vecs = eigs[:n_modes], vecs[:, :n_modes]
+            return eigs, vecs
 
         # Handle specific domain request
         if domain is not None:
@@ -617,12 +653,12 @@ class EigenMixinBase:
 
         if show_info:
             print(f"\n{'=' * 60}")
-            print(f"Eigenmode Visualization")
+            print("Eigenmode Visualization")
             print(f"{'=' * 60}")
             print(f"Domain: {domain}")
             print(f"Mode index: {mode_index}")
             print(f"Resonant frequency: {frequency / 1e9:.6f} GHz")
-            print(f"Angular frequency ω: {2 * np.pi * frequency:.4e} rad/s")
+            pr.echo(f"Angular frequency ω: {2 * np.pi * frequency:.4e} rad/s")
             print(f"Field type: {field_type}")
             print(f"Component: {component}")
             print(f"{'=' * 60}")
@@ -644,7 +680,7 @@ class EigenMixinBase:
 
         # Try to use BoundaryFromVolumeCF for better visualization
         try:
-            from ngsolve import BoundaryFromVolumeCF
+            from ngsolve import BoundaryFromVolumeCF  # noqa: F401  (availability)
             use_boundary = True
         except ImportError:
             use_boundary = False
@@ -783,7 +819,7 @@ class EigenMixinBase:
                 freqs = np.sqrt(np.maximum(eigs, 0)) / (2 * np.pi)
 
                 print(f"\nDomain: {d}")
-                print(f"{'Index':<8} {'Frequency (GHz)':<18} {'ω² (rad²/s²)':<20}")
+                pr.echo(f"{'Index':<8} {'Frequency (GHz)':<18} {'ω² (rad²/s²)':<20}")
                 print("-" * 50)
 
                 for i, (f, e) in enumerate(zip(freqs, eigs)):
@@ -1420,6 +1456,10 @@ class ROMEigenMixin(EigenMixinBase):
         """
         return self.get_eigenmodes(_auto_save=True, **kwargs)
 
+    def _eigen_training_band(self) -> Optional[Tuple[float, float]]:
+        band = getattr(self, '_band', None)
+        return (band["fmin_GHz"], band["fmax_GHz"]) if band else None
+
     def _get_eigen_system_matrices(
             self,
             domain: str
@@ -1541,6 +1581,10 @@ class ConcatEigenMixin(EigenMixinBase):
     Uses coupled reduced matrices (A_coupled). Field reconstruction requires
     W_coupled and access to original structures' projection bases.
     """
+
+    def _eigen_training_band(self) -> Optional[Tuple[float, float]]:
+        # where the joined parts' training bands overlap
+        return getattr(self, '_training_band', None)
 
     def _get_eigen_system_matrices(
             self,

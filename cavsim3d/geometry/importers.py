@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 import warnings
-from typing import List, Optional, Tuple, Callable, Dict, Union, Literal
+from typing import Any, List, Optional, Tuple, Callable, Dict, Literal
 import numpy as np
 
 # PythonOCC imports — must come before netgen imports
@@ -13,7 +13,7 @@ from OCC.Core.IGESControl import IGESControl_Reader
 from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.BOPAlgo import BOPAlgo_Splitter
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon, BRepBuilderAPI_Transform
-from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Ax1, gp_Ax2, gp_Trsf, gp_Vec
+from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Ax2, gp_Trsf
 from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeCone
 from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Fuse
 from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape, topods
@@ -28,14 +28,15 @@ from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
 from OCC.Core.GeomAbs import GeomAbs_Plane
-from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
 
 # Netgen/NGSolve imports — must come after OCC imports
-from netgen.occ import OCCGeometry, Glue, X, Y, Z, Axis
+from netgen.occ import OCCGeometry, Glue, X, Y, Z
 from netgen.webgui import Draw as NetgenDraw
-from ngsolve import Mesh
 
-from .base import BaseGeometry, _display_webgui_fallback
+from .base import (BaseGeometry, MATERIAL_DEFAULTS, _display_webgui_fallback,
+                   validate_material_properties)
+import cavsim3d.utils.printing as pr
+from cavsim3d.utils.names import is_port_name
 
 
 # ==================== STEP LABEL EXTRACTION ====================
@@ -52,6 +53,17 @@ def extract_brep_names_from_step(filename: str) -> List[str]:
             if match:
                 names.append(match.group(1))
     return names
+
+
+def _jupyter_renderer():
+    """pythonocc's notebook viewer (needs ``pythreejs``), loaded on first use."""
+    try:
+        from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
+    except ImportError as e:
+        raise ImportError(
+            f"The OCC notebook viewer is not available ({e}). It needs pythreejs: "
+            "conda install -c conda-forge pythreejs") from e
+    return JupyterRenderer()
 
 
 def _simplify_label(full_label: str) -> str:
@@ -290,11 +302,6 @@ def create_coordinate_axes(
     dict
         Dictionary with 'x', 'y', 'z' axis shapes
     """
-    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeCone
-    from OCC.Core.gp import gp_Ax2, gp_Pnt, gp_Dir
-    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Fuse
-    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
-
     r = length * radius
     cone_height = length * 0.15
     cone_radius = r * 2.5
@@ -615,7 +622,7 @@ class OCCImporter(BaseGeometry):
 
             # Print labels (short names)
             if self._solid_labels:
-                print(f"\nSTEP solids found:")
+                print("\nSTEP solids found:")
                 for name in self._solid_labels:
                     print(f"  - {_simplify_label(name)}")
                 print()
@@ -1040,7 +1047,6 @@ class OCCImporter(BaseGeometry):
         # This correctly handles the case where a base solid (e.g. vacuum)
         # is split into multiple disconnected pieces by the Glue
         # fragmentation — all pieces keep the parent's material name.
-        pre_named = False
         if hasattr(occ_geo, 'solids'):
             solids = list(occ_geo.solids)
             if (self._original_solids_info
@@ -1048,7 +1054,6 @@ class OCCImporter(BaseGeometry):
                 for solid, info in zip(solids, self._original_solids_info):
                     solid.name = _simplify_label(info['label'])
                     solid.mat(_simplify_label(info['label']))
-                pre_named = True
 
         if self._is_split and hasattr(occ_geo, 'solids') and len(occ_geo.solids) > 1:
             # Glue solids together for mesh connectivity
@@ -1165,7 +1170,7 @@ class OCCImporter(BaseGeometry):
             raise RuntimeError("No OCC shape loaded.")
 
         # Create renderer
-        rnd = JupyterRenderer()
+        rnd = _jupyter_renderer()
 
         # Get bounding box for axes scaling
         pmin, pmax = get_shape_bounding_box(self._occ_shape)
@@ -1181,7 +1186,6 @@ class OCCImporter(BaseGeometry):
             n_solids = len(solids)
 
             if n_solids > 1:
-                colors = generate_distinct_colors(n_solids)
                 for i, solid in enumerate(solids):
                     rnd.DisplayShape(
                         solid,
@@ -1192,7 +1196,6 @@ class OCCImporter(BaseGeometry):
                 print(f"Displayed {n_solids} solids with distinct colors")
             else:
                 # Single solid
-                color = geometry_color or self.GEOMETRY_COLOR
                 rnd.DisplayShape(
                     self._occ_shape,
                     render_edges=show_edges,
@@ -1201,7 +1204,6 @@ class OCCImporter(BaseGeometry):
                 )
         else:
             # Single color for entire geometry
-            color = geometry_color or self.GEOMETRY_COLOR
             rnd.DisplayShape(
                 self._occ_shape,
                 render_edges=show_edges,
@@ -1211,7 +1213,6 @@ class OCCImporter(BaseGeometry):
 
         # Display splitting planes
         if show_planes and self._planes:
-            p_color = plane_color or self.PLANE_COLOR
             for i, plane in enumerate(self._planes):
                 rnd.DisplayShape(
                     plane.Shape(),
@@ -1256,17 +1257,11 @@ class OCCImporter(BaseGeometry):
         renderer
             JupyterRenderer instance
         """
-        try:
-            from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
-        except ImportError:
-            raise ImportError("JupyterRenderer not available.")
-
         if not self._planes:
             raise ValueError("No splitting planes added.")
 
-        rnd = JupyterRenderer()
+        rnd = _jupyter_renderer()
 
-        colors = generate_distinct_colors(len(self._planes))
         for i, plane in enumerate(self._planes):
             rnd.DisplayShape(
                 plane.Shape(),
@@ -1449,7 +1444,7 @@ class OCCImporter(BaseGeometry):
         print(f"Number of splitting planes: {info['n_planes']}")
         if info['plane_positions']:
             print(f"Plane positions (z): {info['plane_positions']}")
-        print(f"\nBounding Box:")
+        print("\nBounding Box:")
         print(f"  Min: ({info['bounding_box']['min'][0]:.4f}, "
               f"{info['bounding_box']['min'][1]:.4f}, "
               f"{info['bounding_box']['min'][2]:.4f})")
@@ -1467,7 +1462,7 @@ class OCCImporter(BaseGeometry):
 
     def name_solids(
             self,
-            naming_func: Optional[Callable[[int, 'solid'], str]] = None,
+            naming_func: Optional[Callable[[int, Any], str]] = None,
             sort_axis: str = 'Z',
             port_axis: Optional[str] = None,
             port_prefix: str = 'port',
@@ -1948,7 +1943,7 @@ class OCCImporter(BaseGeometry):
                   f"normal=({nx:.4f}, {ny:.4f}, {nz:.4f})")
 
         if unmatched:
-            print(f"\nUnmatched ports ({len(unmatched)}) — these are internal ports "
+            pr.echo(f"\nUnmatched ports ({len(unmatched)}) — these are internal ports "
                   f"that require splitting:")
             for port_shape, raw_name in unmatched:
                 fp = get_port_shape_properties(port_shape)
@@ -2453,7 +2448,7 @@ class OCCImporter(BaseGeometry):
 
     def _show_planar_faces_jupyter(self, port_indices, highlight_ports, **kwargs):
         """Jupyter-based planar face viewer."""
-        rnd = JupyterRenderer()
+        rnd = _jupyter_renderer()
 
         # Display geometry with transparency
         solids = get_solids(self._occ_shape)
@@ -2623,9 +2618,17 @@ class OCCImporter(BaseGeometry):
                 d = dict(val)
                 if 'epsilon_r' in d and 'eps_r' not in d:
                     d['eps_r'] = d.pop('epsilon_r')
+                unknown = set(d) - set(MATERIAL_DEFAULTS)
+                if unknown:
+                    raise ValueError(
+                        f"Material {key!r}: unknown properties {sorted(unknown)}; "
+                        f"use {sorted(MATERIAL_DEFAULTS)}.")
+                validate_material_properties(key, d)
                 normalised[key] = d
             else:
-                normalised[key] = val
+                raise ValueError(
+                    f"Material {key!r}: expected a dict of properties "
+                    f"({sorted(MATERIAL_DEFAULTS)}) or 'PEC', got {val!r}.")
 
         # Validate material keys with the same resolution the PEC
         # subtraction and get_material() use, so a key that selects no
@@ -2793,7 +2796,7 @@ class OCCImporter(BaseGeometry):
         for solid in pec_solids:
             for face in solid.faces:
                 pec_faces.add(face)
-                if face.name and 'port' in face.name.lower():
+                if is_port_name(face.name):
                     c = face.center
                     pec_port_info.append((
                         face.name,
@@ -2949,7 +2952,7 @@ class OCCImporter(BaseGeometry):
         for solid, mk in pairs:
             col = mat_color[mk]
             for face in solid.faces:
-                if face.name and 'port' in face.name.lower():
+                if is_port_name(face.name):
                     continue  # keep red
                 elif face.name == bc_name:
                     face.col = (0.5, 0.5, 0.5)  # color PEC faces grey

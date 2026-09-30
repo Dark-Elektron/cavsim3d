@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 from cavsim3d.core.persistence import ProjectManager
 from pathlib import Path
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional, Union
 import json
 from datetime import datetime
 import shutil
@@ -24,14 +24,62 @@ def _default_part_name(geometry) -> str:
     return type(geometry).__name__.lower()
 
 
+# What a project folder holds at its top level (current and older layouts),
+# plus files an operating system drops into any folder.
+_PROJECT_ENTRIES = {
+    'project.json', 'timing.json', 'geometry', 'mesh', 'fds',
+    'fom', 'foms', 'roms', 'eigenmode', 'port_modes', 'matrices.h5', 'snapshots.h5',
+    '.DS_Store', 'Thumbs.db', 'desktop.ini',
+}
+
+
+def _check_project_name(name) -> str:
+    """A project name is one folder name: not empty, no path, no '.'/'..'."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"Project name must be a non-empty string, got {name!r}.")
+    bad = set('<>:"|?*\\/') & set(name)
+    if (name in ('.', '..') or bad or name != name.strip() or name.endswith('.')
+            or any(ord(c) < 32 for c in name)):
+        raise ValueError(
+            f"Invalid project name {name!r}: it becomes the project's folder inside "
+            f"base_dir, so it must be a plain folder name (no path separators, no "
+            f"'.' or '..', none of <>:\"|?*, no leading/trailing space or trailing dot).")
+    return name
+
+
+def _looks_like_project(path: Path) -> bool:
+    """True if ``path`` holds only what a cavsim3d project writes (or is empty)."""
+    if (path / 'project.json').is_file():
+        return True
+    try:
+        return all(entry.name in _PROJECT_ENTRIES for entry in path.iterdir())
+    except OSError:
+        return False
+
+
 class EMProject:
     """
     Central class for managing electromagnetic simulation projects.
-    
+
     Responsibility:
     - Manage the project directory structure.
     - Orchestrate saving and loading of geometry, mesh, and solvers.
     - Provide a unified entry point for simulation.
+
+    Parameters
+    ----------
+    name : str
+        Project name; the project lives in the folder ``base_dir / name``.
+        An existing project of that name is opened.
+    base_dir : str or Path, optional
+        Folder holding the project folder (default: the current directory).
+    geometry : BaseGeometry, optional
+        Geometry of a new project.
+    bc : str, optional
+        Boundary condition pattern (default: the geometry's).
+    overwrite : bool
+        Delete an existing project of that name and start afresh.  A folder
+        that is not a cavsim3d project is never deleted.
     """
     
     def create_assembly(self, main_axis: Optional[str] = None, force: bool = False) -> 'Assembly':
@@ -80,14 +128,33 @@ class EMProject:
         geometry: Optional[BaseGeometry] = None,
         bc: Optional[str] = None,
         overwrite: bool = False,
+        *,
+        _read_only: bool = False,
+        _announce: bool = True,
     ):
-        self.name = name
+        # _read_only: open another project to read its results (an imported
+        # part): no questions about its CAD file, and save() writes nothing.
+        # _announce=False: an internal (scratch) project, created and opened
+        # without messages or a notebook banner.
+        self._read_only = bool(_read_only)
+        self._announce = bool(_announce)
+        if self._read_only and overwrite:
+            raise ValueError("a project opened read-only cannot be overwritten")
+        self.name = _check_project_name(name)
         # Use current directory if base_dir is not provided
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.project_path = self.base_dir / self.name
-        
+        if self.project_path.exists() and not self.project_path.is_dir():
+            raise FileExistsError(
+                f"{self.project_path} exists and is a file, not a project folder.")
+
         # Overwrite protection: if overwrite=True, delete existing project folder
         if overwrite and self.project_path.exists():
+            if not _looks_like_project(self.project_path):
+                raise FileExistsError(
+                    f"{self.project_path} exists but is not a cavsim3d project (no "
+                    f"project.json, and it holds other files), so overwrite=True does "
+                    f"not delete it. Choose another name, or remove the folder yourself.")
             pr.info(f"Project '{self.name}' already exists and overwrite=True. Deleting old project...")
             self._force_rmtree(self.project_path)
             if self.project_path.exists():
@@ -125,12 +192,13 @@ class EMProject:
         self._part_name: Optional[str] = None
         
         # Automatic Loading or Creation
+        say = pr.milestone if self._announce else pr.debug
         if self.project_path.exists():
-            pr.milestone(f"Project '{self.name}' exists. Loading...")
+            say(f"Project '{self.name}' exists. Loading...")
             self._initial_load()
-            pr.milestone(f"Project '{self.name}' loaded.")
+            say(f"Project '{self.name}' loaded.")
         else:
-            pr.milestone(f"Creating new project '{self.name}' at {self.project_path}")
+            say(f"Creating new project '{self.name}' at {self.project_path}")
             self.project_path.mkdir(parents=True, exist_ok=True)
             self.geometry_path.mkdir(parents=True, exist_ok=True)
             self.mesh_path.mkdir(parents=True, exist_ok=True)
@@ -140,7 +208,8 @@ class EMProject:
                 self.save()
 
         # Show welcome banner in Jupyter
-        self._show_welcome_banner()
+        if self._announce:
+            self._show_welcome_banner()
 
     def _show_welcome_banner(self):
         """Display the cavsim3d logo in Jupyter notebooks."""
@@ -151,9 +220,10 @@ class EMProject:
             import base64
             from IPython.display import display, HTML
             from cavsim3d import __version__
+            # shipped with the package (assets/), so installed copies show it
             logo_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                "docs", "assets", "cavsim3d_logo_square.svg"
+                "assets", "cavsim3d_logo_square.svg"
             )
             if os.path.exists(logo_path):
                 with open(logo_path, 'rb') as fh:
@@ -175,7 +245,17 @@ class EMProject:
             return
 
         self._loading = True  # Prevent save() from being triggered during load
+        try:
+            self._load_saved_state(metadata_file)
+        finally:
+            self._loading = False  # Re-enable save()
 
+    def _load_saved_state(self, metadata_file: Path) -> None:
+        """Geometry, mesh and solver of a saved project (see _initial_load).
+
+        A part that cannot be read (a missing or damaged file) is reported and
+        skipped, so the project still opens and can be solved again.
+        """
         with open(metadata_file, "r") as f:
             metadata = json.load(f)
 
@@ -193,7 +273,8 @@ class EMProject:
 
         if has_geo:
             try:
-                self.geometry = BaseGeometry.load_geometry(self.project_path)
+                self.geometry = BaseGeometry.load_geometry(
+                    self.project_path, check_source=not self._read_only)
             except Exception as e:
                 pr.warning(f"Could not load geometry: {e}")
 
@@ -204,24 +285,36 @@ class EMProject:
             has_mesh = True
 
         if has_mesh:
-            pm = ProjectManager(self.base_dir)
-            self.mesh = pm.load_ngs_mesh(self.mesh_path)
+            try:
+                pm = ProjectManager(self.base_dir)
+                self.mesh = pm.load_ngs_mesh(self.mesh_path)
+            except Exception as e:
+                pr.warning(f"Could not load the saved mesh: {e}. generate_mesh() "
+                           "makes a new one.")
             # A reloaded chain has no mesh of its own until meshed again; give
             # it the project's, so proj.geo.show('mesh') works after reopening.
-            if self.geometry is not None and getattr(self.geometry, 'mesh', None) is None:
+            if (self.mesh is not None and self.geometry is not None
+                    and getattr(self.geometry, 'mesh', None) is None):
                 self.geometry.mesh = self.mesh
 
         # 3. Load Solver (FDS) LAST - needs mesh for port mode reconstruction
         if metadata.get("has_fds"):
-
-            # Pass mesh to load method so port modes can be reconstructed
-            self._fds = FrequencyDomainSolver.load_from_path(
-                self.fds_path,
-                geometry=self.geometry,
-                mesh=self.mesh,  # Pass mesh here
-                order=self._order,
-                bc=self.bc
-            )
+            if not (self.fds_path / "config.json").exists():
+                pr.info("No saved solver state in fds/: the solver starts afresh.")
+            else:
+                try:
+                    # Pass mesh to load method so port modes can be reconstructed
+                    self._fds = FrequencyDomainSolver.load_from_path(
+                        self.fds_path,
+                        geometry=self.geometry,
+                        mesh=self.mesh,  # Pass mesh here
+                        order=self._order,
+                        bc=self.bc
+                    )
+                except Exception as e:
+                    self._fds = None
+                    pr.warning(f"Could not load the saved solver state: {e}. The "
+                               "solver starts afresh: solve() again to recompute.")
 
             if self._fds:
                 self._fds._project_path = self.project_path
@@ -240,8 +333,6 @@ class EMProject:
                            "again to refresh them (or localize() to keep copies).")
         except Exception as e:
             pr.warning(f"Could not check referenced projects: {e}")
-
-        self._loading = False  # Re-enable save()
 
     @property
     def geo(self) -> Optional[BaseGeometry]:
@@ -273,7 +364,6 @@ class EMProject:
             value._project_name = self.name
             value._project_ref = self
             value.order = self._order
-            value.n_port_modes = self._n_port_modes
 
     # =========================================================================
     # Parts: the project's geometry list
@@ -573,8 +663,16 @@ class EMProject:
         if self._fds and (getattr(self._fds, '_fom_cache', None) or getattr(self._fds, '_resonant_mode_cache', None)):
             return True
         
-        # Check on disk (config.json marks a valid simulation save)
-        return (self.fds_path / "config.json").exists()
+        # Check on disk: the solver's saved state says whether it holds
+        # results (a netlist's fds/config.json holds its solve settings only)
+        config = self.fds_path / "config.json"
+        if not config.exists():
+            return False
+        try:
+            saved = json.loads(config.read_text())
+        except (OSError, ValueError):
+            return True                     # unreadable: treat as results
+        return bool(saved.get("has_results", True))
 
     def invalidate_mesh(self) -> None:
         """Invalidate the mesh and all downstream results (fom, rom, etc.)."""
@@ -615,6 +713,11 @@ class EMProject:
             # Use full_reset to ensure matrices, FES, and flags are cleared.
             self._fds.full_reset()
             self._fds.mesh = self.mesh # Ensure solver still has access to new mesh if it exists
+
+        # 3. project.json must describe what is left on disk, or reopening
+        # would look for the deleted solver state.
+        if not self._loading:
+            self.save()
 
     @property
     def geometry(self) -> Optional[BaseGeometry]:
@@ -664,13 +767,18 @@ class EMProject:
 
     @property
     def n_port_modes(self) -> int:
+        """Deprecated: has no effect.  Set the port modes per solve with
+        ``proj.fds.solve(..., nportmodes=...)``."""
         return self._n_port_modes
 
     @n_port_modes.setter
     def n_port_modes(self, value: int):
+        import warnings
+        warnings.warn(
+            "proj.n_port_modes has no effect: give the number of port modes to the "
+            "solve, proj.fds.solve(..., nportmodes=N) (an int, a list per port, or "
+            "a dict {port: N}).", DeprecationWarning, stacklevel=2)
         self._n_port_modes = value
-        if self._fds:
-            self._fds.n_port_modes = value
 
     @property
     def mesh_path(self) -> Path:
@@ -698,6 +806,9 @@ class EMProject:
 
     def save(self):
         """Save the entire project with the new folder structure."""
+        if self._read_only:
+            pr.debug(f"Project {self.project_path} is open read-only: not saved.")
+            return
         pr.info(f"Saving project to {self.project_path}")
         
         # 1. Save Geometry
@@ -819,11 +930,22 @@ class EMProject:
             time.sleep(0.3)
 
     @classmethod
-    def load(cls, name: str, base_dir: Optional[Union[str, Path]] = None, overwrite: bool = False) -> EMProject:
-        """Load a project from disk."""
+    def load(cls, name: str, base_dir: Optional[Union[str, Path]] = None,
+             overwrite: bool = False) -> EMProject:
+        """Load a project from disk (``EMProject(name, base_dir)`` does the same).
+
+        ``overwrite`` is accepted for compatibility only: ``overwrite=True``
+        would delete the project being loaded, so it is refused.
+        """
+        if overwrite:
+            raise ValueError(
+                "EMProject.load() opens an existing project; overwrite=True would "
+                "delete it. To start afresh use EMProject(name, base_dir, overwrite=True).")
         base_dir = Path(base_dir) if base_dir else Path.cwd()
+        if not (base_dir / _check_project_name(name)).is_dir():
+            raise FileNotFoundError(f"No project '{name}' in {base_dir}.")
         # The __init__ already handles searching and automatic loading
-        return cls(name=name, base_dir=base_dir, overwrite=overwrite)
+        return cls(name=name, base_dir=base_dir)
 
     def __repr__(self) -> str:
         return f"EMProject({self.name}, path={self.project_path})"

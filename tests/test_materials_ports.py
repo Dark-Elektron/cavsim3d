@@ -6,7 +6,6 @@ Tests use the c3794_1hc_1fpc_ports.stp model which contains:
 """
 
 import pytest
-import numpy as np
 from pathlib import Path
 
 from cavsim3d.geometry.importers import OCCImporter

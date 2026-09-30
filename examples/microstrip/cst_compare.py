@@ -2,7 +2,12 @@
 
 CST 1D exports are 3 columns: frequency [GHz], magnitude (linear), phase [deg].
 Port-information exports (eps_eff, line impedance) are: freq [GHz], real, imag.
+
+The CST export folder is taken from the environment variable
+``CAVSIM3D_CST_MICROSTRIP`` or, if that is not set, from
+``cst_exports/microstrip_line/Export`` next to this file.
 """
+import os
 from pathlib import Path
 import numpy as np
 
@@ -24,7 +29,8 @@ def read_cst_realimag(path):
 
 
 def default_cst_dir():
-    p = Path(r"C:\Users\Soske\Documents\CEM2\cst\microstrip_line\Export")
+    p = Path(os.environ.get("CAVSIM3D_CST_MICROSTRIP")
+             or Path(__file__).parent / "cst_exports" / "microstrip_line" / "Export")
     return p if p.exists() else None
 
 

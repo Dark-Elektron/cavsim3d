@@ -28,7 +28,7 @@ def main():
     # =========================
     # 1. Define Geometry
     # =========================
-    print("\n1. Creating cavsim3d.geometry...")
+    print("\n1. Creating geometry...")
 
     a = 100e-3  # Width: 100 mm
     L = 200e-3  # Length: 200 mm
@@ -45,8 +45,8 @@ def main():
     print("\n2. Computing analytical solution...")
 
     analytical = RWGAnalytical(a=a, L=L)
-    frequencies = np.linspace(1.5, 3.0, 100) * 1e9
-    Z_analytical = cavsim3d.analytical.z_parameters(frequencies)
+    frequencies = np.linspace(1.5, 3.0, 100)  # GHz, as RWGAnalytical takes them
+    Z_analytical = analytical.z_parameters(frequencies)
 
     print(f"   Computed Z-parameters at {len(frequencies)} frequency points")
 
@@ -56,7 +56,7 @@ def main():
     print("\n3. Running full-order frequency sweep...")
 
     solver = FrequencyDomainSolver(rwg, order=3)
-    solver.assemble_matrices(nmodes=1)
+    solver.assemble_matrices(nportmodes=1)
 
     solver.print_info()
 
@@ -70,13 +70,13 @@ def main():
     print("\n4. Building reduced-order model...")
 
     rom = ModelOrderReduction(solver)
-    cavsim3d.rom.reduce(tol=1e-6)
+    rom.reduce(tol=1e-6)
 
-    cavsim3d.rom.print_info()
+    rom.print_info()
 
     # Solve ROM over finer frequency grid
-    results_rom = cavsim3d.rom.solve(fmin=1.5, fmax=3.0, nsamples=100)
-    print(f"   Solved ROM at {len(cavsim3d.rom.frequencies)} frequency points")
+    results_rom = rom.solve(fmin=1.5, fmax=3.0, nsamples=100)
+    print(f"   Solved ROM at {len(rom.frequencies)} frequency points")
 
     # =========================
     # 5. Comparison and Plotting
@@ -85,15 +85,15 @@ def main():
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     freq_ghz_fom = solver.frequencies / 1e9
-    freq_ghz_rom = cavsim3d.rom.frequencies / 1e9
-    freq_ghz_ana = frequencies / 1e9
+    freq_ghz_rom = rom.frequencies / 1e9
+    freq_ghz_ana = frequencies
 
     # Z11 Magnitude
     ax = axes[0, 0]
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(Z_analytical['Z11']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, solver.get_z_db(1, 1), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, cavsim3d.rom.get_z_db(1, 1), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, rom.get_z_db(1, 1), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|Z11| (dB)')
     ax.set_title('Z11 Magnitude')
@@ -105,7 +105,7 @@ def main():
     ax.plot(freq_ghz_ana, 20 * np.log10(np.abs(Z_analytical['Z21']) + 1e-15),
             '-', label='Analytical', linewidth=2)
     ax.plot(freq_ghz_fom, solver.get_z_db(1, 2), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, cavsim3d.rom.get_z_db(1, 2), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, rom.get_z_db(1, 2), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|Z21| (dB)')
     ax.set_title('Z21 Magnitude')
@@ -115,7 +115,7 @@ def main():
     # S11 Magnitude
     ax = axes[1, 0]
     ax.plot(freq_ghz_fom, solver.get_s_db(1, 1), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, cavsim3d.rom.get_s_db(1, 1), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, rom.get_s_db(1, 1), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|S11| (dB)')
     ax.set_title('S11 Magnitude')
@@ -125,7 +125,7 @@ def main():
     # S21 Magnitude
     ax = axes[1, 1]
     ax.plot(freq_ghz_fom, solver.get_s_db(1, 2), 'o', label='FOM', markersize=4)
-    ax.plot(freq_ghz_rom, cavsim3d.rom.get_s_db(1, 2), '--', label='ROM', linewidth=1.5)
+    ax.plot(freq_ghz_rom, rom.get_s_db(1, 2), '--', label='ROM', linewidth=1.5)
     ax.set_xlabel('Frequency (GHz)')
     ax.set_ylabel('|S21| (dB)')
     ax.set_title('S21 Magnitude')
@@ -138,7 +138,7 @@ def main():
     print("   Saved: rwg_z_parameters.png")
 
     # Singular value decay
-    cavsim3d.rom.plot_singular_values()
+    rom.plot_singular_values()
     plt.savefig('rwg_singular_values.png', dpi=100, bbox_inches='tight')
     print("   Saved: rwg_singular_values.png")
 
@@ -148,13 +148,13 @@ def main():
     print("\n6. Error analysis...")
 
     # ROM vs FOM
-    errors = cavsim3d.rom.compute_error(solver)
+    errors = rom.compute_error(solver)
     print(f"   ROM vs FOM errors:")
     for key, err in errors.items():
         print(f"      {key}: {err:.4e}")
 
     # Analytical comparison (interpolated to FOM frequencies)
-    Z_ana_interp = cavsim3d.analytical.z_parameters(solver.frequencies)
+    Z_ana_interp = analytical.z_parameters(solver.frequencies / 1e9)
     Z11_fom = solver.get_param('Z', '1(1)1(1)')
     Z11_ana = Z_ana_interp['Z11']
 
@@ -169,7 +169,9 @@ def main():
     print("\n7. Eigenfrequency comparison...")
 
     freqs_fom = solver.get_resonant_frequencies() / 1e9
-    freqs_rom = cavsim3d.rom.get_resonant_frequencies() / 1e9
+    # a ROM lists the modes near its training band (1.5-3 GHz); far from it
+    # the projection has spurious ones (fmin=0 lists every mode)
+    freqs_rom = rom.get_resonant_frequencies() / 1e9
 
     print(f"\n   FOM eigenfrequencies (GHz, first 10):")
     for i, f in enumerate(sorted(freqs_fom)[:10]):

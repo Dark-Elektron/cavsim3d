@@ -1640,25 +1640,24 @@ def build_fom_collection(fds) -> FOMCollection:
 class NetlistSection:
     """One unique section of a netlist assembly.
 
-    ``proj.fds.foms['cavity']`` returns this. A netlist solves each unique
-    section standalone in its own scratch project, so the section owns a whole
-    :class:`EMProject`; the useful thing is usually its FOM, which this
-    forwards to::
+    ``proj.fds.foms['cavity']`` returns this.  A section computed in this
+    project (``kind == 'live'``) keeps its full-order results in the project's
+    ``fds/foms`` tree; the usual result API reads them::
 
         sec = proj.fds.foms['cavity']
-        sec.plot_s(['1(1)1(1)'])     # straight to the section's FOM
-        sec.fom                      # the FOMResult itself
-        sec.project                  # the scratch EMProject, if you need it
+        sec.plot_s(['1(1)1(1)'])     # the section's full-order S-parameters
+        sec.fom                      # its FOMResult
 
-    Mapping access (``sec['project']``) still works: the section used to BE the
-    raw record dict, and internal staging code still reads it that way.
+    Mapping access (``sec['kind']``) reads the section's record.
     """
 
-    __slots__ = ('_name', '_rec')
+    __slots__ = ('_name', '_rec', '_root', '_fom')
 
-    def __init__(self, name: str, record: Dict):
+    def __init__(self, name: str, record: Dict, project_root=None):
         self._name = name
         self._rec = record
+        self._root = Path(project_root) if project_root is not None else None
+        self._fom = None
 
     # -- what the section IS ------------------------------------------------
     @property
@@ -1667,24 +1666,30 @@ class NetlistSection:
 
     @property
     def kind(self) -> Optional[str]:
-        """'live' (computed here) or 'imported' (copied from another project)."""
+        """'live' (computed in this project) or 'imported' (another project's)."""
         return self._rec.get('kind')
 
     @property
     def project(self):
-        """The section's own EMProject (``None`` for an imported section)."""
-        return self._rec.get('project')
+        """Always None: a section is solved in a scratch project that is not kept.
+
+        Its results are staged in this project (see :attr:`fom`).
+        """
+        return None
 
     @property
     def fom(self):
-        """The section's full-order result."""
-        proj = self.project
-        if proj is None:
-            raise AttributeError(
-                f"Section {self._name!r} is {self.kind!r}: it has no live "
-                f"project, its artifacts were copied from "
-                f"{self._rec.get('source')!r}.")
-        return proj.fds.fom
+        """The section's full-order result (S, Z over the solve band)."""
+        if self._fom is None:
+            meta = self._rec.get('fom')
+            if self.kind != 'live' or not meta or self._root is None:
+                raise AttributeError(
+                    f"Section {self._name!r} is imported from "
+                    f"{self._rec.get('source')!r}: its full-order result is in "
+                    f"that project.")
+            from cavsim3d.solvers import netlist_persistence as npz
+            self._fom = npz.load_staged_fom(self._root, self._name, meta)
+        return self._fom
 
     # -- forward the usual result API ---------------------------------------
     @property
@@ -1701,7 +1706,7 @@ class NetlistSection:
 
     @property
     def ports(self):
-        return self.project.fds.ports
+        return list(self.fom.ports)
 
     def plot_s(self, *args, **kwargs):
         return self.fom.plot_s(*args, **kwargs)
@@ -1709,7 +1714,7 @@ class NetlistSection:
     def plot_z(self, *args, **kwargs):
         return self.fom.plot_z(*args, **kwargs)
 
-    # -- back-compat: this used to be a plain dict --------------------------
+    # -- the section's record -------------------------------------------------
     def __getitem__(self, key):
         return self._rec[key]
 
@@ -1728,7 +1733,8 @@ class NetlistFOMs:
 
     Produced by ``fds.solve()`` when the project geometry is an assembly whose
     components carry repeat counts (``n > 1``) and/or reference already-run
-    projects.  Mirrors the standard fluent chain:
+    projects (and rebuilt from the project's files when it is reopened).
+    Mirrors the standard fluent chain:
 
         proj.fds.solve(config=...)                # FOM per unique component
         roms  = proj.fds.foms.reduce(tol=...)     # ROM per unique component
@@ -1736,14 +1742,21 @@ class NetlistFOMs:
         concat.solve(...); concat.reduce(...)     # sweep / further reduction
 
     Each unique component is computed ONCE regardless of its repeat count;
-    imported components are loaded, never recomputed.
+    imported components are loaded, never recomputed.  ``reduce()`` may be
+    called again (another ``tol``): it reduces from the staged full-order
+    files.
     """
 
     def __init__(self, assembly, components: Dict[str, Dict], fds_ref, fom_config: Dict):
         self._assembly = assembly
-        self._components = components          # base_name -> {kind, path, project?}
+        self._components = components          # base_name -> section record
         self._fds_ref = fds_ref
         self._config = fom_config
+        self._roms_cache = None
+
+    @property
+    def _root(self) -> Path:
+        return Path(self._fds_ref._project_path)
 
     # -- introspection -----------------------------------------------------
     @property
@@ -1758,10 +1771,10 @@ class NetlistFOMs:
             raise KeyError(
                 f"No section {name!r} in this netlist. Sections: "
                 f"{list(self._components)}")
-        return NetlistSection(name, self._components[name])
+        return NetlistSection(name, self._components[name], self._root)
 
     def __repr__(self) -> str:
-        parts = ", ".join(f"{b}({r['kind']})" for b, r in self._components.items())
+        parts = ", ".join(f"{b}({r.get('kind')})" for b, r in self._components.items())
         return f"NetlistFOMs([{parts}])"
 
     # -- stages ------------------------------------------------------------
@@ -1769,67 +1782,131 @@ class NetlistFOMs:
         """ROM stage: reduce each unique section once and stage its ROM into the
         single flat ``fds/foms/roms`` tree (``matrices/A_r_<domain>.h5`` …).
 
-        Live sections are reduced from their scratch FOM (no recompute of the
-        FOM); imported sections are copied from their already-run ROM.  The
-        merged ``foms/roms/structures.json`` lists every section with its own
+        Live sections are reduced from their staged full-order files (their
+        FOM is never recomputed; a section already reduced with the same
+        ``tol`` and ``max_rank`` is reused); imported sections are copied from
+        (or referenced in) their already-run ROM.  The merged
+        ``foms/roms/structures.json`` lists every section with its own
         fingerprints/band/impedance so the sections stay distinct.
         """
+        import time
+        from cavsim3d.rom.reduction import check_reduce_args
         from cavsim3d.solvers import netlist_persistence as npz
+        from cavsim3d.utils.timing import get_timing_registry
+        import cavsim3d.utils.printing as pr
         import shutil as _shutil
 
-        project_root = Path(self._fds_ref._project_path)
-        flat = project_root / "fds" / "foms" / "roms" / "structures.json"
+        check_reduce_args(tol, max_rank)
+        project_root = self._root
+        roms_dir = project_root / "fds" / "foms" / "roms"
+        flat = roms_dir / "structures.json"
         existing = {}
         if flat.exists():
-            import json as _json
             existing = {e.get("domain"): e for e in
-                        _json.loads(flat.read_text()).get("structures", [])}
-        entries = []
+                        json.loads(flat.read_text()).get("structures", [])}
+        t0 = time.time()
+        entries, changed = [], False
+        reduced_now = []                    # sections reduced by this call
+
+        def announce():
+            """Header before the first section this call reduces."""
+            if not reduced_now:
+                pr.running("\n" + "=" * 60)
+                pr.running("Model Order Reduction")
+                pr.running("=" * 60)
+
         for base, rec in self._components.items():
+            if rec.get("kind") == "live":
+                prev = existing.get(base)
+                if (prev is not None and prev.get("tol") == float(tol)
+                        and prev.get("max_rank") == max_rank
+                        and (roms_dir / "matrices" / f"A_r_{base}.h5").exists()):
+                    entries.append(prev)            # reduced so already: reuse
+                    continue
+                template = rec.get("rom_template")
+                if template is None:
+                    raise RuntimeError(
+                        f"Section '{base}' has no recorded port data (solved by an "
+                        "older version): solve the project again with rerun=True.")
+                announce()
+                entry = npz.reduce_staged_section(project_root, base, template,
+                                                  tol, max_rank)
+                pr.info(f"  {base}: {entry['n_full']} -> {entry['r']} DOFs")
+                entries.append(entry)
+                reduced_now.append(base)
+                changed = True
+                continue
             if rec.get("local") and base in existing \
                     and not existing[base].get("source_rom_dir"):
                 entries.append(existing[base])      # copied earlier: reuse
                 continue
+            changed = True
             if rec["kind"] == "imported" and rec.get("reduce"):
                 # Full-order results but no reduced model: reduce them here
                 # (the source is read, never written) and keep the result.
                 import tempfile as _tf
+                announce()
                 work = Path(_tf.mkdtemp(prefix="cavsim3d_reduce_"))
                 try:
                     npz.reduce_source_into(Path(rec["source"]), work, tol, max_rank)
                     entries.append(npz.stage_rom(work, base, project_root))
                 finally:
                     _shutil.rmtree(work, ignore_errors=True)
+                reduced_now.append(base)
                 continue
-            if rec["kind"] == "imported":
-                src = Path(rec["source"])
-                try:
-                    npz.find_rom_dir(src)
-                except FileNotFoundError:
-                    raise FileNotFoundError(
-                        f"Imported section '{base}' has no saved reduced model "
-                        f"under {src}. Reduce it in its own project first "
-                        "(fds.fom.reduce / fds.foms.reduce).")
-                if rec.get("mode") == "reference":
-                    # read in place from the source project; nothing copied
-                    entries.append(npz.reference_rom(src, base, project_root))
-                else:
-                    entries.append(npz.stage_rom(src, base, project_root))
+            src = Path(rec["source"])
+            try:
+                npz.find_rom_dir(src)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"Imported section '{base}' has no saved reduced model "
+                    f"under {src}. Reduce it in its own project first "
+                    "(fds.fom.reduce / fds.foms.reduce).")
+            if rec.get("mode") == "reference":
+                # read in place from the source project; nothing copied
+                entries.append(npz.reference_rom(src, base, project_root))
             else:
-                sub = rec["project"]
-                if getattr(sub.fds, "is_compound", False):
-                    sub.fds.foms.reduce(tol=tol)
-                else:
-                    sub.fds.fom.reduce(tol=tol, max_rank=max_rank)
-                sub.save()
-                entries.append(npz.stage_rom(Path(rec["scratch"]), base,
-                                             project_root))
-                # ROM staged: the scratch project is no longer needed.
-                _shutil.rmtree(rec.get("_work", ""), ignore_errors=True)
-                rec.pop("project", None)
-        npz.write_flat_structures(project_root, entries)
-        return NetlistROMs(self._assembly, self._components, self._fds_ref,
-                           self._config, tol)
+                entries.append(npz.stage_rom(src, base, project_root))
+        if changed or [e.get("domain") for e in entries] != list(existing):
+            npz.write_flat_structures(project_root, entries)
+            # a joined model of the previous reduced models no longer applies
+            _shutil.rmtree(roms_dir / "concat", ignore_errors=True)
+        total_full = sum(int(e.get("n_full", 0)) for e in entries)
+        total_r = sum(int(e.get("r", 0)) for e in entries)
+        get_timing_registry().record(
+            "reduction", time.time() - t0, category="ROM",
+            full_dofs=total_full, reduced_dofs=total_r, n_domains=len(entries))
+        # report what this call reduced; the other sections' ROMs were reused
+        now = [e for e in entries if e.get("domain") in reduced_now]
+        now_full = sum(int(e.get("n_full", 0)) for e in now)
+        now_r = sum(int(e.get("r", 0)) for e in now)
+        if now_full:
+            pr.done(f"Reduction complete: {now_full} -> {now_r} DOFs "
+                    f"({100 * (1 - now_r / now_full):.1f}% compression)")
+        reused = [e.get("domain") for e in entries if e.get("domain") not in reduced_now]
+        if reused:
+            # nothing reduced: say so; otherwise the reuse is a detail
+            (pr.info if reduced_now else pr.done)(
+                f"Reduced models reused: {', '.join(reused)}")
+        self._roms_cache = NetlistROMs(self._assembly, self._components, self._fds_ref,
+                                       self._config, tol)
+        return self._roms_cache
+
+    @property
+    def roms(self) -> "NetlistROMs":
+        """The ROM stage from the last :meth:`reduce` (also after reopening)."""
+        if self._roms_cache is None:
+            flat = self._root / "fds" / "foms" / "roms" / "structures.json"
+            entries = (json.loads(flat.read_text()).get("structures", [])
+                       if flat.exists() else [])
+            domains = {e.get("domain") for e in entries}
+            if not entries or any(b not in domains for b in self._components):
+                raise RuntimeError("No reduced models yet: call "
+                                   "proj.fds.foms.reduce(tol) first.")
+            tol = next((e.get("tol") for e in entries if e.get("tol") is not None), None)
+            self._roms_cache = NetlistROMs(self._assembly, self._components,
+                                           self._fds_ref, self._config, tol)
+        return self._roms_cache
 
     def concatenate(self):
         """FOM-level concatenation of a netlist is not supported.
@@ -1864,21 +1941,29 @@ class NetlistROMs:
     def __repr__(self) -> str:
         return f"NetlistROMs([{', '.join(self._components.keys())}])"
 
+    @property
+    def _roms_dir(self) -> Path:
+        return Path(self._fds_ref._project_path) / "fds" / "foms" / "roms"
+
     def concatenate(self):
         """Couple the netlist: expand repeat counts, load each component's ROM
-        (from its run under fds/foms/<name>/ or from its LINKED project),
+        (from this project's ``fds/foms/roms`` or from its referenced project),
         validate the joins (port-mode counts, mode fingerprints, training
         bands) and return the coupled system (with .solve() / .reduce()).
 
         The coupled system is saved into the module project's standard
-        location: ``<project>/fds/foms/roms/concat/``.
+        location: ``<project>/fds/foms/roms/concat/`` (its sweep results too,
+        when it is solved).
         """
         from cavsim3d.solvers.concatenation import ConcatenatedSystem
-        base_dir = Path(self._fds_ref._project_path) / "fds" / "foms"
+        concat_dir = self._roms_dir / "concat"
+        # results of an earlier coupling must not pass for this one's
+        shutil.rmtree(concat_dir, ignore_errors=True)
         self._concat_cache = ConcatenatedSystem.from_flat_roms(
-            self._assembly, base_dir / "roms")
+            self._assembly, self._roms_dir)
+        self._concat_cache._save_dir = concat_dir
         try:
-            self._concat_cache.save(base_dir / "roms" / "concat")
+            self._concat_cache.save(concat_dir)
         except Exception as e:
             warnings.warn(f"Could not save concatenated system: {e}",
                           UserWarning, stacklevel=2)
@@ -1886,8 +1971,15 @@ class NetlistROMs:
 
     @property
     def concat(self):
-        """The cached concatenated system (call concatenate() first)."""
+        """The concatenated system (also after reopening, with its saved sweep)."""
         if self._concat_cache is None:
-            raise RuntimeError("No concatenated system yet: call "
-                               "roms.concatenate() first.")
+            from cavsim3d.solvers.concatenation import ConcatenatedSystem
+            concat_dir = self._roms_dir / "concat"
+            if not (concat_dir / "metadata.json").exists():
+                raise RuntimeError("No concatenated system yet: call "
+                                   "roms.concatenate() first.")
+            concat = ConcatenatedSystem.from_flat_roms(self._assembly, self._roms_dir)
+            concat._save_dir = concat_dir
+            concat.load_results(concat_dir)
+            self._concat_cache = concat
         return self._concat_cache

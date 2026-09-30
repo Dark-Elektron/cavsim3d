@@ -38,8 +38,10 @@ three on one waveguide.
 A reduced model interpolates between its snapshots. Inside the band they cover, and with
 enough samples to resolve the band's features, it reproduces the full-order model. Outside
 that band it has no information: its S-parameters and its resonances there can be wrong
-without any sign of it. The resonances of a reduced model include spurious values below
-and above the band, and it misses modes that none of its port excitations produced.
+without any sign of it. The eigenvalues of a reduced model include spurious values below
+and above the band, and it misses modes that none of its port excitations produced. For
+this reason `get_resonant_frequencies()` of a reduced or joined model lists only the
+resonances within 10 % of the band's edges; `fmin=` and `fmax=` list others.
 
 When reduced parts are joined, their training bands are checked: parts trained on bands
 that do not overlap cannot be joined, and sweeping the joined model outside the common band

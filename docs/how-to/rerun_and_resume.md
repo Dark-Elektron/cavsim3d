@@ -20,7 +20,8 @@ results, reduced models and concatenated models are all available again, for exa
 
 !!! warning
     `overwrite=True` deletes the project folder, results included. Use it only to start a
-    project from scratch.
+    project from scratch. A folder that is not a cavsim3d project is never deleted: the call
+    raises `FileExistsError` instead.
 
 ## Let `solve()` decide (the default)
 
@@ -59,6 +60,28 @@ res = proj.fds.solve(fmin=1.5, fmax=3.0, nsamples=30, rerun=False)
 ```
 
 If the request differs, `solve()` warns that the returned results do not match it.
+
+## Chains of repeated or imported parts
+
+For a chain, `solve()` prints a plan with one line per part. A part solved before with the
+same settings and the same geometry is reused, in the same session or after reopening:
+
+```text
+Solve plan:
+  cell  geometry             reuse     its full-order results from an earlier solve
+```
+
+The reduced models can be rebuilt with another tolerance at any time; they are reduced from
+the stored full-order results, and a part already reduced with the same `tol` is reused:
+
+```python
+roms = proj.fds.foms.reduce(tol=1e-6)
+roms = proj.fds.foms.reduce(tol=1e-9)     # again, tighter
+concat = roms.concatenate()
+```
+
+After reopening, `proj.fds.foms`, `proj.fds.foms.roms` and `proj.fds.foms.roms.concat`
+(with its last sweep) are available without solving again.
 
 ## Resume an interrupted sweep
 

@@ -24,6 +24,7 @@ material name for its full-order files.
 | `solve.log` | log of the last full-order solve |
 | `port_modes/port_modes.pkl` | port modes |
 | `imports.json` | imported projects: source path, mode (`reference` / `copy`), fingerprint |
+| `sections.json` | parts of a chain solved in this project: the solve settings and geometry each was solved for, and its port data (reused by the next `solve()`, and needed to reduce it again) |
 | `checkpoint/<sweep>/sample_*.npz` | finished samples of a running sweep; deleted when the sweep completes |
 
 ## Stage folders

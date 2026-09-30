@@ -13,12 +13,12 @@ Default dimensions reproduce the CST ``microstrip_line`` reference model.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 
-from netgen.occ import Rectangle, X, Y, Z, Glue, OCCGeometry
-from ngsolve import Mesh
+from netgen.occ import Rectangle, Glue
 
 from .base import BaseGeometry
+from cavsim3d.utils.names import is_port_name
 
 
 class MicrostripLine(BaseGeometry):
@@ -126,7 +126,7 @@ class MicrostripLine(BaseGeometry):
 
         # ---- PEC faces: ground interface, strip footprint, outer walls ----
         for f in geo.faces:
-            if f.name and 'port' in f.name:
+            if is_port_name(f.name):
                 continue
             c = f.center
             bb = f.bounding_box

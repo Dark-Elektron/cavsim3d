@@ -15,19 +15,33 @@ Canonical folder contents (see CLAUDE.md): ``fom(s)``/``rom(s)``/``concat``
 hold ONLY ``matrices, eigenmodes, s, z, snapshots`` (+ their nested stage
 folders); one ``mesh/`` and one ``geometry/`` folder per project, at the top
 level next to ``fds/``.  Live sections are computed once in a throwaway
-scratch project and staged through the exact same copy.
+scratch project, staged through the exact same copy, and the scratch is
+deleted at once.  ``fds/sections.json`` records, per live section, the solve
+settings and geometry it was computed for and its port data, so the section is
+reused by a later ``solve()`` and reduced from its staged full-order files.
 """
 
 from __future__ import annotations
 
+import atexit
+import hashlib
 import json
 import shutil
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 FOM_MATS = ("K", "M", "B", "C", "D")   # C, D only exist for lossy sections
 ROM_MATS = ("A_r", "B_r", "W", "Q_L_inv", "C_r", "D_r")
 RESULT_DIRS = ("s", "z", "eigenmodes", "snapshots")
+
+# The solve options that decide a section's full-order results: a section
+# staged with the same values (and the same geometry) is reused, not re-solved.
+SECTION_CFG_KEYS = ("fmin", "fmax", "nsamples", "order", "nedelec", "nportmodes",
+                    "mode_source", "mode_source_internal", "impedance_reference",
+                    "qtem_ports", "qtem_conductor_bbnd", "qtem_voltage_path",
+                    "store_snapshots")
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +284,9 @@ def reduce_source_into(source_project: Path, work: Path, tol: float,
     """
     from cavsim3d.core.em_project import EMProject
     source_project = Path(source_project)
-    proj = EMProject(name=source_project.name, base_dir=str(source_project.parent))
+    # read-only: no questions about its CAD file, and nothing saved into it
+    proj = EMProject(name=source_project.name, base_dir=str(source_project.parent),
+                     _read_only=True, _announce=False)
     fds = proj.fds
     if getattr(fds, "is_compound", False):
         raise ValueError(f"Cannot reduce '{source_project}' as one part: it is a "
@@ -299,10 +315,14 @@ def write_imports(project_root: Path, imports: dict) -> None:
         if f.exists():
             f.unlink()
         return
-    stored = {name: {"source": _relpath(r["source"], project_root),
-                     "mode": r.get("mode", "copy"),
-                     "fingerprint": r.get("fingerprint")}
-              for name, r in imports.items()}
+    stored = {}
+    for name, r in imports.items():
+        stored[name] = {"source": _relpath(r["source"], project_root),
+                        "mode": r.get("mode", "copy"),
+                        "fingerprint": r.get("fingerprint")}
+        if r.get("reduce"):
+            # full-order results only: reduced here, from the source
+            stored[name]["reduce"] = True
     with open(f, "w") as fh:
         json.dump(stored, fh, indent=2)
 
@@ -392,3 +412,202 @@ def _source_domain(fom_dir: Path) -> str:
     for f in (fom_dir / "matrices").glob("K_*.h5"):
         return f.stem[2:]
     return "global"
+
+
+# --------------------------------------------------------------------------- #
+# Live sections: record, reuse, reduce from the staged files
+# --------------------------------------------------------------------------- #
+def _jsonable(value):
+    """``value`` as plain JSON types (numpy scalars and tuples converted)."""
+    return json.loads(json.dumps(
+        value, default=lambda o: o.item() if hasattr(o, "item") else str(o)))
+
+
+def section_config(cfg: dict) -> dict:
+    """The part of a solve config that decides a section's full-order results."""
+    return _jsonable({k: cfg.get(k) for k in SECTION_CFG_KEYS})
+
+
+def geometry_signature(geometry) -> str:
+    """Hash of how a part is built: its operation history and its CAD file."""
+    from cavsim3d.utils.io_utils import compute_file_hash, strip_keys
+    history = strip_keys(_jsonable(geometry.get_history()), {"timestamp"})
+    h = hashlib.sha1(json.dumps(history, sort_keys=True).encode())
+    fp = getattr(geometry, "filepath", None)
+    if fp and Path(str(fp)).is_file():
+        h.update(compute_file_hash(str(fp)).encode())
+    return h.hexdigest()
+
+
+def project_signature(project: Path) -> str:
+    """Hash of a saved project's geometry (history.json and its CAD copy)."""
+    h = hashlib.sha1()
+    geo = Path(project) / "geometry"
+    for f in (sorted(geo.glob("*")) if geo.is_dir() else []):
+        if f.is_file():
+            h.update(f.name.encode())
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def read_sections(project_root: Path) -> dict:
+    """``fds/sections.json``: ``{"config": {...}, "sections": {name: record}}``."""
+    f = Path(project_root) / "fds" / "sections.json"
+    data = {}
+    if f.exists():
+        with open(f) as fh:
+            data = json.load(fh)
+    data.setdefault("config", {})
+    data.setdefault("sections", {})
+    return data
+
+
+def write_sections(project_root: Path, config: dict, sections: dict) -> None:
+    """Record the live sections of a netlist (see :func:`section_record`)."""
+    fds_dir = Path(project_root) / "fds"
+    fds_dir.mkdir(parents=True, exist_ok=True)
+    f = fds_dir / "sections.json"
+    if not sections:
+        if f.exists():
+            f.unlink()
+        return
+    payload = json.dumps(_jsonable({"config": config, "sections": sections}), indent=2)
+    with open(f, "w") as fh:
+        fh.write(payload)
+
+
+def has_staged_fom(project_root: Path, domain: str) -> bool:
+    """True if a section's matrices AND field snapshots are in this project."""
+    foms = Path(project_root) / "fds" / "foms"
+    return ((foms / "matrices" / f"K_{domain}.h5").exists()
+            and (foms / "snapshots" / f"snapshots_{domain}.h5").exists())
+
+
+def section_record(fds) -> dict:
+    """What a staged live section needs once its scratch solver is gone.
+
+    ``fom``: the labels of its full-order result; ``rom_template``: the port
+    data of its reduced model (ports, port modes, port positions, impedance
+    parameters, mode fingerprints, training band) -- everything of a
+    ``structures.json`` entry except the reduced sizes.
+    """
+    from cavsim3d.rom.reduction import (_band_record, _port_geometry_record,
+                                        _port_impedance_record)
+    ports = list(fds.external_ports)
+    modes = fds.port_modes or {}
+    ps = fds.port_solver
+    impedance, fingerprints = _port_impedance_record(ps, ports)
+    template = {
+        "ports": ports,
+        "port_modes": {p: [int(m) for m in modes[p]] for p in ports if p in modes},
+        "impedance": impedance,
+        "fingerprints": fingerprints,
+    }
+    geometry = _port_geometry_record(ps, ports) if ps is not None else {}
+    if geometry:
+        template["port_geometry"] = geometry
+    band = _band_record(fds.frequencies)
+    if band is not None:
+        template["band"] = band
+    fom = fds.fom
+    return _jsonable({
+        "fom": {"domain": fom.domain, "ports": list(fom.ports),
+                "n_ports": int(fom.n_ports),
+                "n_modes_per_port": int(fom._n_modes_per_port or 1),
+                "mode_labels": fom.mode_labels},
+        "rom_template": template,
+    })
+
+
+def reduce_staged_section(project_root: Path, domain: str, template: dict,
+                          tol: float, max_rank=None) -> dict:
+    """Reduce a section from its staged full-order files; return its entry.
+
+    Reads ``fds/foms/{matrices,snapshots}/*_<domain>.h5``, applies the same
+    POD as ``fom.reduce()``, writes ``fds/foms/roms/matrices/*_<domain>.h5``
+    and returns the ``structures.json`` entry (``template`` + reduced sizes).
+    """
+    import h5py
+    from cavsim3d.core.persistence import H5Serializer
+    from cavsim3d.rom.reduction import pod_reduce
+    root = Path(project_root)
+    foms = root / "fds" / "foms"
+    mats = {}
+    for name in FOM_MATS:
+        f = foms / "matrices" / f"{name}_{domain}.h5"
+        if f.exists():
+            with h5py.File(f, "r") as fh:
+                mats[name] = H5Serializer.load_dataset(fh["data"])
+    snap = foms / "snapshots" / f"snapshots_{domain}.h5"
+    missing = [n for n in ("K", "M", "B") if n not in mats]
+    if missing or not snap.exists():
+        raise FileNotFoundError(
+            f"Section '{domain}': its full-order results are not in {foms} "
+            f"(missing {missing or [snap.name]}). Solve the project again.")
+    with h5py.File(snap, "r") as fh:
+        if "field_snapshots" not in fh:
+            raise ValueError(
+                f"Section '{domain}' was solved without field snapshots "
+                "(store_snapshots=False), so it cannot be reduced. Solve again "
+                "with store_snapshots=True.")
+        snapshots = H5Serializer.load_dataset(fh["field_snapshots"])
+    red = pod_reduce(mats["K"], mats["M"], mats["B"], snapshots,
+                     C=mats.get("C"), D=mats.get("D"), tol=tol, max_rank=max_rank)
+    out = root / "fds" / "foms" / "roms" / "matrices"
+    out.mkdir(parents=True, exist_ok=True)
+    for name in ROM_MATS:
+        f = out / f"{name}_{domain}.h5"
+        if red.get(name) is None:
+            if f.exists():
+                f.unlink()                  # e.g. a loss term the section lost
+            continue
+        with h5py.File(f, "w") as fh:
+            H5Serializer.save_dataset(fh, "data", np.asarray(red[name]))
+    entry = dict(template)
+    entry.update(domain=domain, r=int(red["r"]), n_full=int(red["W"].shape[0]),
+                 is_full_order=False, tol=float(tol),
+                 max_rank=None if max_rank is None else int(max_rank))
+    entry["reduction"] = {"r_pod": int(red["r_pod"]),
+                          "n_snapshots": int(np.shape(snapshots)[1])}
+    return entry
+
+
+def load_staged_fom(project_root: Path, domain: str, meta: dict):
+    """The full-order result (S, Z, frequencies) of a staged section."""
+    import h5py
+    from cavsim3d.core.persistence import H5Serializer
+    from cavsim3d.solvers.results import FOMResult
+    foms = Path(project_root) / "fds" / "foms"
+    data = {}
+    for key, rel in (("S", f"s/s_{domain}.h5"), ("Z", f"z/z_{domain}.h5")):
+        f = foms / rel
+        if f.exists():
+            with h5py.File(f, "r") as fh:
+                data[key] = H5Serializer.load_dataset(fh["data"]) if "data" in fh else None
+    freqs = None
+    snap = foms / "snapshots" / f"snapshots_{domain}.h5"
+    if snap.exists():
+        with h5py.File(snap, "r") as fh:
+            if "frequencies" in fh:
+                freqs = H5Serializer.load_dataset(fh["frequencies"])
+    if data.get("S") is None and data.get("Z") is None:
+        raise FileNotFoundError(f"Section '{domain}': no S or Z results in {foms}.")
+    return FOMResult(
+        domain=domain, frequencies=freqs,
+        Z_matrix=data.get("Z"), S_matrix=data.get("S"), Z_dict=None, S_dict=None,
+        n_ports=int(meta.get("n_ports", len(meta.get("ports", [])))),
+        ports=list(meta.get("ports", [])),
+        n_modes_per_port=int(meta.get("n_modes_per_port", 1)),
+        mode_labels=meta.get("mode_labels"))
+
+
+def remove_scratch(path: Path) -> None:
+    """Delete a scratch folder now, or at the latest when Python exits.
+
+    On Windows a file still open elsewhere blocks the deletion; the retry at
+    exit then removes what is left.
+    """
+    path = Path(path)
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        atexit.register(shutil.rmtree, str(path), True)

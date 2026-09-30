@@ -30,6 +30,8 @@ my_project/
     ├── config.json         the request the results belong to
     ├── solve.log
     ├── port_modes/
+    ├── imports.json        imported projects (chains)
+    ├── sections.json       parts of a chain solved here (chains)
     ├── checkpoint/         finished samples of a running sweep (temporary)
     ├── fom/                a single part ...
     │   ├── matrices/ eigenmodes/ s/ z/ snapshots/

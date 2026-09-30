@@ -12,11 +12,10 @@ Validates:
   - Full mock chain: fds.fom.rom, fds.foms.roms.concat.rom
 """
 
-import numpy as np
 import pytest
 import unittest.mock as mock
 import matplotlib.pyplot as plt
-from cavsim3d.solvers.results import FOMResult, FOMCollection, ROMCollection
+from cavsim3d.solvers.results import FOMCollection, ROMCollection
 from cavsim3d.utils.visualization import DataExtractor
 from tests.helpers import make_fom
 

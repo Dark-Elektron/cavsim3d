@@ -3,8 +3,9 @@
 from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 from scipy.special import jn_zeros, jnp_zeros
-from cavsim3d.core.constants import mu0, eps0, c0, Z0
+from cavsim3d.core.constants import mu0, eps0, c0
 from cavsim3d.utils.plot_mixin import PlotMixin
+import cavsim3d.utils.printing as pr
 
 
 
@@ -966,7 +967,7 @@ class CWGAnalytical(PlotMixin):
 
         modes = self.list_cutoff_frequencies(n_max, m_max)
 
-        print(f"{'Mode':<10} {'f_c [GHz]':>12} {'λ_c [mm]':>12} {'kc [rad/m]':>15}")
+        pr.echo(f"{'Mode':<10} {'f_c [GHz]':>12} {'λ_c [mm]':>12} {'kc [rad/m]':>15}")
         print("-" * 50)
         for mode in modes[:15]:
             wavelength = c0 / (mode['fc'] * 1e9) * 1e3  # mm
