@@ -2306,9 +2306,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """On-axis longitudinal field profile along the chain.
 
         For an accelerating structure the quantity of interest is
-        :math:`E_z(z)` on the beam axis. Give either ``mode_idx`` (an eigenmode
-        of the coupled chain, see :meth:`chain_eigenfrequencies`) or
-        ``freq_idx`` (a sample of the coupled sweep).
+        :math:`E_z(z)` on the beam axis. Give either ``mode_idx`` (a mode of
+        :meth:`get_resonant_frequencies`, as :meth:`chain_eigenfrequencies`
+        lists them) or ``freq_idx`` (a sample of the coupled sweep).
 
         Returns ``(coord, E_long, label)`` where ``coord`` is the position along
         the chain [m] and ``E_long`` the complex longitudinal component.
@@ -2318,15 +2318,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             raise ValueError("give exactly one of mode_idx or freq_idx")
 
         if mode_idx is not None:
-            if self.A_coupled is None:
-                raise ValueError("System not coupled.")
-            evals, evecs = np.linalg.eigh(self.A_coupled)
-            keep = evals > 1e-6
-            evals, evecs = evals[keep], evecs[:, keep]
-            if mode_idx >= evecs.shape[1]:
-                raise ValueError(f"mode_idx {mode_idx} out of range "
-                                 f"(max {evecs.shape[1] - 1})")
-            x_uncoupled = self.W_coupled @ evecs[:, mode_idx]
+            evals, evecs, k = self._coupled_mode(mode_idx)
+            x_uncoupled = self.W_coupled @ evecs[:, k]
             scales = np.ones(self.n_structures, dtype=complex)
             if (enforce_continuity and self.n_structures > 1 and self.connections
                     and self.mesh is not None and self.fes is not None):
@@ -2336,7 +2329,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 start = self._structure_dof_offsets[i]
                 vecs.append(np.asarray(
                     st.reconstruct(x_uncoupled[start:start + st.r])) * scales[i])
-            f_ghz = float(np.sqrt(evals[mode_idx]) / (2 * np.pi) / 1e9)
+            f_ghz = float(np.sqrt(evals[k]) / (2 * np.pi) / 1e9)
             label = f"eigenmode {mode_idx} @ {f_ghz:.4f} GHz"
         else:
             vecs = self._section_coefficient_vectors(freq_idx, excitation_port)
@@ -2375,20 +2368,16 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     def chain_eigenfrequencies(self, fmin_ghz=None, fmax_ghz=None):
         """Eigenfrequencies (GHz) of the coupled chain, with their mode indices.
 
-        The indices returned are exactly the ``mode_idx`` accepted by
-        :meth:`reconstruct_chain_eigenmode`, so a mode found here can be
-        reconstructed directly.  Without a band, the training band widened
-        by 10 % at each edge (see :meth:`get_resonant_frequencies`).
+        The modes of :meth:`get_resonant_frequencies` (those within 10 % of
+        the training band's edges) between *fmin_ghz* and *fmax_ghz*.  Their
+        indices count that list, as the ``mode_idx`` of
+        :meth:`reconstruct_chain_eigenmode`, :meth:`chain_axis_profile` and
+        :meth:`plot_eigenmode` and the ``mode_index`` of :meth:`get_eigenmode`,
+        :meth:`get_rq` and :meth:`get_figures_of_merit` do.
         """
         if self.A_coupled is None:
             raise ValueError("System not coupled.")
-        band = self._eigen_training_band()
-        if fmin_ghz is None and fmax_ghz is None and band:
-            m = self.TRAINING_BAND_MARGIN
-            fmin_ghz, fmax_ghz = (1 - m) * band[0], (1 + m) * band[1]
-        evals, _ = np.linalg.eigh(self.A_coupled)
-        evals = evals[evals > 1e-6]                 # same filter as the reconstruction
-        f = np.sqrt(evals) / (2 * np.pi) / 1e9
+        f = self.get_resonant_frequencies() / 1e9
         idx = np.arange(len(f))
         if fmin_ghz is not None:
             keep = f >= fmin_ghz
@@ -2397,6 +2386,23 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             keep = f <= fmax_ghz
             f, idx = f[keep], idx[keep]
         return idx, f
+
+    def _coupled_mode(self, mode_idx: int):
+        """``(evals, evecs, k)``: the eigenpairs of ``A_coupled`` above 1e-6, which
+        the chain reconstruction uses, and the position among them of mode
+        *mode_idx* of :meth:`get_resonant_frequencies` (a run of them, from the
+        first mode near the training band on)."""
+        if self.A_coupled is None:
+            raise ValueError("System not coupled.")
+        listed = self.get_resonant_frequencies()
+        if not 0 <= int(mode_idx) < len(listed):
+            raise ValueError(f"mode_idx {mode_idx} out of range: "
+                             f"get_resonant_frequencies() lists {len(listed)} modes")
+        evals, evecs = np.linalg.eigh(self.A_coupled)
+        keep = evals > 1e-6
+        evals, evecs = evals[keep], evecs[:, keep]
+        first = (2 * np.pi * listed[0]) ** 2
+        return evals, evecs, int(np.searchsorted(evals, first * (1 - 1e-9))) + int(mode_idx)
 
     def _balance_degenerate_mode(self, evals, evecs, mode_idx, tol=1e-6):
         """Pick the most evenly distributed member of a degenerate group.
@@ -2481,24 +2487,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         compound mesh built by rigidly replicating the reference section, so a
         chain eigenmode can be viewed across the full structure.
 
-        Use :meth:`chain_eigenfrequencies` to find the ``mode_idx`` of interest.
+        ``mode_idx`` is a mode of :meth:`get_resonant_frequencies`;
+        :meth:`chain_eigenfrequencies` lists them with their frequencies.
         Returns ``(coefficient_function, compound_mesh, label)`` for
         ``netgen.webgui.Draw``.
         """
-        if self.A_coupled is None:
-            raise ValueError("System not coupled.")
-
-        evals, evecs = np.linalg.eigh(self.A_coupled)
-        keep = evals > 1e-6
-        evals, evecs = evals[keep], evecs[:, keep]
-        if mode_idx >= evecs.shape[1]:
-            raise ValueError(f"mode_idx {mode_idx} out of range "
-                             f"(max {evecs.shape[1] - 1})")
-
-        coeffs = evecs[:, mode_idx]
+        evals, evecs, k = self._coupled_mode(mode_idx)
+        coeffs = evecs[:, k]
         if balance_degenerate and self.n_structures > 1:
-            coeffs = self._balance_degenerate_mode(evals, evecs, mode_idx,
-                                                   degeneracy_tol)
+            coeffs = self._balance_degenerate_mode(evals, evecs, k, degeneracy_tol)
         x_uncoupled = self.W_coupled @ coeffs
         scales = np.ones(self.n_structures, dtype=complex)
         if enforce_continuity and self.n_structures > 1 and self.connections:
@@ -2518,7 +2515,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             xi = struct.reconstruct(x_uncoupled[start:start + struct.r])
             vecs.append(np.asarray(xi) * scales[i])
 
-        omega = float(np.sqrt(evals[mode_idx]))
+        omega = float(np.sqrt(evals[k]))
         label = (f"{component}({field_type}) - chain eigenmode {mode_idx} @ "
                  f"{omega / (2 * np.pi) / 1e9:.4f} GHz")
         return self._assemble_chain(vecs, omega, field_type, component, label,
@@ -2551,29 +2548,20 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         Netlist sections have independent meshes, so there is no single space to
         draw a chain mode on. The coupled eigenvector still spans every section;
         this slices out ``section_idx``'s reduced coordinates and lifts them
-        through that section's basis.
+        through that section's basis.  ``mode_idx`` is a mode of
+        :meth:`get_resonant_frequencies`.
         """
         from ngsolve import GridFunction
-        if self.A_coupled is None:
-            raise ValueError("System not coupled. Call couple() first.")
         if not (0 <= section_idx < self.n_structures):
             raise IndexError(f"section_idx {section_idx} out of range "
                              f"[0, {self.n_structures - 1}]")
 
-        evals, evecs = np.linalg.eigh(self.A_coupled)
-        keep = evals > 1e-6
-        evals, evecs = evals[keep], evecs[:, keep]
-        order = np.argsort(evals)
-        evals, evecs = evals[order], evecs[:, order]
-        if mode_idx >= len(evals):
-            raise IndexError(
-                f"mode_idx {mode_idx} out of range: only {len(evals)} "
-                f"physical mode(s) above the zero-frequency cutoff.")
+        evals, evecs, k = self._coupled_mode(mode_idx)
         pr.info(f"\nEigenmode {mode_idx} at f = "
-                f"{np.sqrt(evals[mode_idx]) / (2 * np.pi) / 1e9:.4f} GHz "
+                f"{np.sqrt(evals[k]) / (2 * np.pi) / 1e9:.4f} GHz "
                 f"(section {section_idx})")
 
-        x_uncoupled = self.W_coupled @ evecs[:, mode_idx]
+        x_uncoupled = self.W_coupled @ evecs[:, k]
         struct = self.structures[section_idx]
         start = self._structure_dof_offsets[section_idx]
         x_full = struct.reconstruct(x_uncoupled[start:start + struct.r])
@@ -2598,10 +2586,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         Parameters
         ----------
         mode_idx : int
-            Index of the eigenmode to reconstruct
+            A mode of :meth:`get_resonant_frequencies`
         enforce_continuity : bool
             If True, scale fields to enforce continuity at interfaces
-            
+
         Returns
         -------
         E_gf : GridFunction
@@ -2617,20 +2605,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
                 mode_idx, section_idx=section_idx)
 
         self._ensure_unified_fes()
-        
-        # Compute eigenmodes of coupled system
-        eigenvalues, eigenvectors = np.linalg.eigh(self.A_coupled)
-        
-        # Filter positive eigenvalues
-        valid_idx = eigenvalues > 1e-6
-        eigenvalues = eigenvalues[valid_idx]
-        eigenvectors = eigenvectors[:, valid_idx]
-        
-        if mode_idx >= eigenvectors.shape[1]:
-            raise ValueError(f"mode_idx {mode_idx} out of range (max {eigenvectors.shape[1]-1})")
-        
-        # Get the coupled eigenvector
-        x_coupled = eigenvectors[:, mode_idx]
+        _evals, evecs, k = self._coupled_mode(mode_idx)
+        x_coupled = evecs[:, k]
         
         # Map to uncoupled coordinates
         x_uncoupled = self.W_coupled @ x_coupled
@@ -2807,7 +2783,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         Parameters
         ----------
         mode_idx : int
-            Index of the eigenmode to plot
+            A mode of :meth:`get_resonant_frequencies`, as
+            :meth:`get_eigenmode` and :meth:`get_external_q` count them
         component : {'real', 'imag', 'abs'}
             Field component to plot
         field_type : {'E', 'H'}
@@ -2819,15 +2796,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         enforce_continuity : bool
             If True, scale fields for interface continuity
         """
-        # Get eigenvalue for frequency
-        eigenvalues, _ = np.linalg.eigh(self.A_coupled)
-        valid_idx = eigenvalues > 1e-6
-        eigenvalues = eigenvalues[valid_idx]
-        
-        if mode_idx >= len(eigenvalues):
-            raise ValueError(f"mode_idx {mode_idx} out of range (max {len(eigenvalues)-1})")
-        
-        freq = np.sqrt(eigenvalues[mode_idx]) / (2 * np.pi)
+        evals, _evecs, k = self._coupled_mode(mode_idx)
+        freq = np.sqrt(evals[k]) / (2 * np.pi)
         omega = 2 * np.pi * freq
         
         if self.mesh is not None:   # the per-section path prints its own

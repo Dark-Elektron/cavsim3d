@@ -374,9 +374,12 @@ print(f"   further-reduced coupled system: {type(rom_of_concat).__name__}")
 # --------------------------------------------------------------------------- #
 # Chain eigenmodes, and why identical cells need a balanced basis              #
 # --------------------------------------------------------------------------- #
-# chain_eigenfrequencies() returns (indices, GHz); the indices are exactly the
-# mode_idx that reconstruct_chain_eigenmode() takes, so a mode found here can
-# be drawn directly on a compound mesh of the replicated section.
+# chain_eigenfrequencies() returns (indices, GHz) of the modes that
+# get_resonant_frequencies() lists.  Every eigen method of the joined model
+# counts that list: reconstruct_chain_eigenmode(), chain_axis_profile(),
+# plot_eigenmode(), get_eigenmode(), get_rq(), get_figures_of_merit() and the
+# mode_index of get_external_q() -- so a mode found here can be drawn directly
+# on a compound mesh of the replicated section.
 idx3, f3 = concat3.chain_eigenfrequencies(fmin_ghz=1.8, fmax_ghz=2.4)
 print(f"   {len(f3)} chain modes in band; first at {f3[0]:.4f} GHz")
 

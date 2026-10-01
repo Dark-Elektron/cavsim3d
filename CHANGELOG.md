@@ -87,9 +87,12 @@ No version has been released yet. The entries compare with the code published on
 - `get_resonant_frequencies()` of a reduced or joined model lists the resonances within
   10 % of its training band's edges; far from the band the projection has spurious
   eigenvalues. The mode indices of `get_eigenmode()`, `get_rq()`,
-  `get_figures_of_merit()` and `get_external_q()` count the same list, and
-  `chain_eigenfrequencies()` uses the same band by default. `fmin=` and `fmax=` list
-  others (`fmin=0`: all).
+  `get_figures_of_merit()` and `get_external_q()` count the same list, and so do, on a
+  joined model, `chain_eigenfrequencies()`, `chain_axis_profile()`,
+  `reconstruct_chain_eigenmode()`, `reconstruct_eigenmode()` and `plot_eigenmode()`.
+  These used to count every eigenvalue of the coupled matrix, the spurious ones below
+  the band included, so the same index named another mode there. `fmin=` and `fmax=`
+  list others (`fmin=0`: all).
 - `NetlistSection.project` is always `None`: the scratch project a section is solved in
   is deleted once its results are copied into the project. `section.fom` reads them from
   there.

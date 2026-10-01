@@ -111,6 +111,23 @@ def test_the_joined_model_says_where_each_port_comes_from(tmp_path, scratch_dir,
     assert "port2   sec_2           port2     1" in capsys.readouterr().out
 
 
+def test_every_eigen_method_of_a_joined_model_counts_the_same_modes(tmp_path, scratch_dir):
+    # the list get_resonant_frequencies() gives (modes near the training band):
+    # the coupled matrix has other, spurious ones below it
+    p = _chain(tmp_path)
+    p.fds.solve(config=CFG)
+    concat = p.fds.foms.reduce(tol=1e-6).concatenate()
+    f = concat.get_resonant_frequencies() / 1e9
+    idx, f_chain = concat.chain_eigenfrequencies()
+    assert len(f) and list(idx) == list(range(len(f))) and np.allclose(f_chain, f)
+    for i in idx:
+        _, _, label = concat.chain_axis_profile(mode_idx=int(i), n_points=20)
+        assert f"{f[i]:.4f} GHz" in label
+        _, _, label = concat.reconstruct_chain_eigenmode(int(i))
+        assert f"{f[i]:.4f} GHz" in label
+        assert concat.get_rq(int(i))["frequency"] / 1e9 == pytest.approx(f[i], rel=1e-9)
+
+
 def test_reduce_again_and_reopen_every_stage(tmp_path, scratch_dir, monkeypatch):
     p = _chain(tmp_path)
     p.fds.solve(config=CFG)
