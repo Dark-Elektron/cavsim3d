@@ -140,7 +140,16 @@ nav:
       - Ports and port modes: explanation/ports.md
       - Parts, joins and netlists: explanation/parts_and_joins.md
       - The project folder: explanation/project_layout.md
-  - Mathematical Theory: theory.md
+  - Mathematical Theory:
+      - theory/index.md
+      - "1. Maxwell's equations": theory/maxwell.md
+      - "2. Variational formulation": theory/variational.md
+      - "3. Port modes": theory/ports.md
+      - "4. Z-parameters": theory/z_parameters.md
+      - "5. Reference impedances and S-parameters": theory/s_parameters.md
+      - "6. Model order reduction": theory/reduction.md
+      - "7. Concatenation": theory/concatenation.md
+      - "8. Resonant modes": theory/resonances.md
   - Reference:
       - reference/index.md
       - solve() options: reference/solve_options.md
