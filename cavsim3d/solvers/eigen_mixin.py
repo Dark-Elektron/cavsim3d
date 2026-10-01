@@ -555,10 +555,12 @@ class EigenMixinBase:
         """
         domain = domain or self._default_eigen_domain()
         if not self._can_reconstruct_field(domain):
+            hint = ("Its parts have meshes of their own: reconstruct_chain_eigenmode"
+                    f"({mode_index}) gives the field over the whole chain."
+                    if hasattr(self, "reconstruct_chain_eigenmode")
+                    else "Ensure mesh and FES are available.")
             raise ValueError(
-                f"Field reconstruction not supported for domain '{domain}'. "
-                f"Ensure mesh and FES are available."
-            )
+                f"Field reconstruction not supported for domain '{domain}'. {hint}")
         frequency, eigenvector = self._eigenpair(mode_index, domain, filter_static,
                                                  min_eigenvalue)
         return frequency, self._reconstruct_eigenmode_field(eigenvector, domain)

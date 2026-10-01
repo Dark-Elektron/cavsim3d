@@ -126,6 +126,9 @@ def test_every_eigen_method_of_a_joined_model_counts_the_same_modes(tmp_path, sc
         _, _, label = concat.reconstruct_chain_eigenmode(int(i))
         assert f"{f[i]:.4f} GHz" in label
         assert concat.get_rq(int(i))["frequency"] / 1e9 == pytest.approx(f[i], rel=1e-9)
+    # the parts have meshes of their own: the error names the call that works
+    with pytest.raises(ValueError, match=r"reconstruct_chain_eigenmode\(0\)"):
+        concat.get_eigenmode(0)
 
 
 def test_reduce_again_and_reopen_every_stage(tmp_path, scratch_dir, monkeypatch):
