@@ -140,7 +140,7 @@ nav:
       - Ports and port modes: explanation/ports.md
       - Parts, joins and netlists: explanation/parts_and_joins.md
       - The project folder: explanation/project_layout.md
-  # - Mathematical Theory: theory.md   # temporarily excluded from nav (content kept in docs/theory.md)
+  - Mathematical Theory: theory.md
   - Reference:
       - reference/index.md
       - solve() options: reference/solve_options.md

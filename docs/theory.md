@@ -1,6 +1,6 @@
 # Mathematical Theory
 
-**cavsim3d** solves the frequency-domain Maxwell's equations using the **Finite Element Method (FEM)** and accelerates wideband analysis through **Model Order Reduction (MOR)**.
+The code solves the frequency-domain Maxwell's equations with the **Finite Element Method (FEM)** and speeds up wideband analysis with **Model Order Reduction (MOR)**. This page derives the equations behind each step, from the variational form to the joined model and its resonances.
 
 ---
 
@@ -483,17 +483,23 @@ $$
 $$
 
 removes the gradient part of a vector (it is the $\mathbf{M}_{\text{port}}$-orthogonal
-projection onto the complement of the range of $\mathbf{G}$). The lowest eigenpairs are
-found by preconditioned inverse iteration (PINVIT) with the preconditioner
-$\mathbf{P}\,(\mathbf{K}_{\text{port}} + \mathbf{M}_{\text{port}})^{-1}$, so the iteration
-never enters the gradient space.
+projection onto the complement of the range of $\mathbf{G}$). A port face of up to 600 free
+unknowns is solved directly, as a dense generalised eigenvalue problem whose null space holds
+the gradients. A larger face is solved by preconditioned inverse iteration (PINVIT) with the
+preconditioner $\mathbf{P}\,(\mathbf{K}_{\text{port}} + \mathbf{M}_{\text{port}})^{-1}$, so the
+iteration never enters the gradient space. Either way, a vector whose gradient-free part
+$\mathbf{P}\hat{\mathbf{e}}$ holds less than a quarter of its norm is round-off, not a mode,
+and is dropped. A face that resolves fewer modes than requested is an error: the port needs a
+finer mesh or a higher element order, or analytic modes.
 
 **TEM modes.** After the projection, $\mathbf{K}_{\text{port}}\hat{\mathbf{e}} = \mathbf{0}$
 still holds for curl-free fields that are *not* gradients of functions vanishing on the
 outline: the discrete harmonic fields. Such a field is the gradient of a potential that
 is constant on each conductor, which is the electrostatic field of the line. There is one
-for each conductor beyond the first, i.e. one per hole in the port face. They come out of
-the TE iteration with $k_c^2$ at round-off level, and an eigenpair is classified as TEM when
+for each conductor beyond the first, i.e. one per hole in the port face. The direct solve
+takes them from its null space, as the null vectors $\mathbf{M}_{\text{port}}$-orthogonal to
+every gradient; PINVIT returns them with $k_c^2$ at round-off level. An eigenpair is
+classified as TEM when
 
 $$
 |k_c^2| \le \frac{10^{-6}}{A_p},
@@ -516,8 +522,9 @@ or in matrix form
 $\mathbf{S}_{\text{port}}\,\hat{\mathbf{u}}_m = k_{c,m}^2\,\mathbf{T}_{\text{port}}\,\hat{\mathbf{u}}_m$,
 with $(S_{\text{port}})_{ji} = \int \nabla_t L_i \cdot \nabla_t L_j \,\mathrm{d}S$ and
 $(T_{\text{port}})_{ji} = \int L_i L_j \,\mathrm{d}S$. No projection is needed, because
-with $E_z = 0$ on the outline the problem has no zero eigenvalue. It is solved by PINVIT
-with the preconditioner $(\mathbf{S}_{\text{port}} + \mathbf{T}_{\text{port}})^{-1}$. The
+with $E_z = 0$ on the outline the problem has no zero eigenvalue. It is solved directly for a
+face of up to 600 free unknowns, and otherwise by PINVIT with the preconditioner
+$(\mathbf{S}_{\text{port}} + \mathbf{T}_{\text{port}})^{-1}$. The
 transverse mode $\mathbf{e}_m = -\nabla_t E_{z,m}$ lies in the Nédélec trace space, since
 the scalar space is one order higher, so it is transferred into that space without
 approximation.
@@ -948,7 +955,8 @@ graph LR
 
 !!! warning "Training band"
     A reduced model is accurate only over the frequency range its snapshots covered.
-    Sweeping outside that band extrapolates.
+    Sweeping outside that band extrapolates, and its resonances are listed only near the
+    band (§8).
 
 ---
 
@@ -1151,9 +1159,51 @@ the results:
   solved band, $\sigma = \tfrac12(\omega_\text{min}^2 + \omega_\text{max}^2)$, which places every
   in-band mode closer than the static ones; before any sweep it is $(2\pi c_0/L)^2$ for the
   model's largest extent $L$. A different target can be passed as `sigma`.
+- **Reduced and joined models are trusted near their band.** Far from the band its snapshots
+  covered, the projection of a reduced model has spurious eigenvalues. Its resonances are
+  therefore listed only within 10 % of the training band's edges (`fmin=` and `fmax=` list
+  others), and every method that takes a mode index counts that list.
 
 The eigenvalue analysis uses the lossless operators $\mathbf{K}$ and $\mathbf{M}$; losses
 ($\mathbf{C}$, $\mathbf{D}$) shift and damp the resonances but are not included in it.
+
+### 8.1 Loaded Resonances
+
+With every port mode terminated in its reference impedance $Z_0$ -- the matched load the
+S-parameters assume -- power leaves through the ports, and the resonances of a reduced model
+become the eigenvalues of
+
+$$
+\left(\hat{\mathbf{A}} + j\omega\,\hat{\mathbf{B}}\,\mathbf{Y}_0\,\hat{\mathbf{B}}^T - \omega^2\,\mathbf{I}\right)\mathbf{y} = \mathbf{0},
+\qquad \mathbf{Y}_0 = \mathrm{diag}(1/Z_0) .
+$$
+
+For a fixed $\mathbf{Y}_0$ this is a quadratic eigenvalue problem, solved exactly through its
+linearisation of size $2r$,
+
+$$
+\begin{bmatrix} \mathbf{0} & \mathbf{I} \\ \hat{\mathbf{A}} & j\,\hat{\mathbf{B}}\mathbf{Y}_0\hat{\mathbf{B}}^T \end{bmatrix}
+\begin{bmatrix} \mathbf{y} \\ \omega\,\mathbf{y} \end{bmatrix}
+= \omega
+\begin{bmatrix} \mathbf{y} \\ \omega\,\mathbf{y} \end{bmatrix} .
+$$
+
+Its complex eigenvalues are the loaded resonances, with the loaded quality factor
+$Q_L = \mathrm{Re}\,\omega / (2\,\mathrm{Im}\,\omega)$. The power a port takes from the mode is
+$\mathrm{Re}(Y_{0,k})\,|(\hat{\mathbf{B}}^T\mathbf{y})_k|^2$ summed over the port's modes $k$,
+and its external Q splits the damping in that proportion, $Q_{\text{ext},p} = Q_L\,P/P_p$, so
+that $1/Q_L = \sum_p 1/Q_{\text{ext},p}$. A port mode below cutoff has an imaginary $Z_0$: it
+takes no power, but its reactance still shifts the resonance.
+
+The $Z_0$ of a TE or TM mode depends on frequency, so $\mathbf{Y}_0$ is taken at the resonance
+itself. The problem is solved with $\mathbf{Y}_0$ at the closed-problem frequency of the mode,
+then again at the loaded frequency found, until that frequency settles. Each loaded resonance
+belongs to the closed-problem mode its eigenvector overlaps most, one to one; modes within
+0.1 % of each other are matched together, so both members of a degenerate pair keep their own.
+A strongly damped mode whose best match is another mode's resonance has none of its own.
+
+Only the external loading enters here. The losses in the walls and the materials give the
+unloaded Q of the figures of merit instead.
 
 ---
 
