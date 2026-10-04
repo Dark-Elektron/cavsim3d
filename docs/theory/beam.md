@@ -113,115 +113,170 @@ the line integral of the load vector with the opposite phase.
 
 ## 9.4 The Beam's Own Field
 
-Let the beam travel through a homogeneous **reference medium** with complex permittivity
-$\varepsilon_b$ and permeability $\mu_b$, the medium around the beam line. In this medium,
-unbounded, the beam's field follows from the potentials in the Lorenz gauge,
+The scattered-field formulation of [§9.6](#96-scattered-field-formulation) subtracts the field the
+beam has on its own, in a homogeneous **reference medium** around the beam line, unbounded, with
+complex permittivity $\varepsilon_b$ and permeability $\mu_b$.
+
+When the beam moves with the speed of light of that medium, $v_b^2\mu_b\varepsilon_b = 1$ ($\beta = 1$
+in vacuum), this is the field of the line charge $i/v_b$, carried along with the beam's phase:
 
 $$
-\mathbf{E} = -j\omega\mathbf{A} - \nabla\Phi, \qquad \mu_b\mathbf{H} = \nabla\times\mathbf{A}, \qquad
-\nabla\cdot\mathbf{A} + j\omega\mu_b\varepsilon_b\,\Phi = 0,
+\mathbf{E}^{free} = \frac{i}{2\pi v_b\varepsilon_b}\,\frac{\hat{\mathbf{e}}_\rho}{\rho}\,e^{-jk_bz},
+\qquad
+\mathbf{H}^{free} = v_b\varepsilon_b\,\hat{\mathbf{z}}\times\mathbf{E}^{free} = \frac{i}{2\pi\rho}\,\hat{\mathbf{e}}_\varphi\,e^{-jk_bz} .
 $$
 
-which satisfy $(\nabla^2 + \omega^2\mu_b\varepsilon_b)\,\mathbf{A} = -\mu_b\mathbf{J}$ and
-$(\nabla^2 + \omega^2\mu_b\varepsilon_b)\,\Phi = -\varrho/\varepsilon_b$. With $\mathbf{A} = A_z\hat{\mathbf{z}}$
-and the beam's dependence $e^{-jk_b z}$, both become 2D modified Helmholtz equations,
+It is purely transverse. Its profile is the gradient of the line-charge potential,
+$\mathbf{E}^{free} = -\nabla_t\Phi^{free}\,e^{-jk_bz}$ with
+$\Phi^{free} = -\dfrac{i}{2\pi v_b\varepsilon_b}\ln\rho$.
+
+### Why it carries the beam current
+
+$\mathbf{E}^{free}$ solves the field equation of [§9.2](#92-field-equation-with-the-beam) with exactly
+the beam current as its source; the current does not have to be put in by hand. Two properties of
+the 2D field $\hat{\mathbf{e}}_\rho/\rho$ give this.
+
+**2D lemma.** $\hat{\mathbf{e}}_\rho/\rho = \nabla_t\ln\rho$ is a gradient, so it is curl-free. Away from
+the line its divergence is zero, and its flux through any circle around the line is
+$\oint(\hat{\mathbf{e}}_\rho/\rho)\cdot\hat{\mathbf{e}}_\rho\,\rho\,\mathrm{d}\varphi = 2\pi$, whatever the
+radius. As distributions,
 
 $$
-(\nabla_t^2 - \kappa_b^2)\,A_z = -\mu_b\, i\,\delta_b, \qquad
-(\nabla_t^2 - \kappa_b^2)\,\Phi = -\frac{i}{v_b\varepsilon_b}\,\delta_b,
+\nabla_t\cdot\frac{\hat{\mathbf{e}}_\rho}{\rho} = 2\pi\,\delta_b, \qquad
+\nabla_t\times\frac{\hat{\mathbf{e}}_\rho}{\rho} = 0 .
 $$
 
+**3D computation.** Write $\mathbf{E}^{free} = \mathbf{e}(x, y)\,e^{-jk_bz}$ with
+$\mathbf{e} = \frac{i}{2\pi v_b\varepsilon_b}\,\hat{\mathbf{e}}_\rho/\rho$, and use
+$\nabla\times\nabla\times = \nabla\nabla\cdot - \nabla^2$.
+
+- Divergence, Gauss's law with the line charge $\varrho$ of [§9.1](#91-beam-current):
+
 $$
-\kappa_b^2 = k_b^2 - \omega^2\mu_b\varepsilon_b = k_b^2\left(1 - v_b^2\mu_b\varepsilon_b\right),
+\nabla\cdot\mathbf{E}^{free} = \frac{i}{v_b\varepsilon_b}\,\delta_b\,e^{-jk_bz} = \frac{\varrho}{\varepsilon_b} .
+$$
+
+- Its gradient:
+
+$$
+\nabla(\nabla\cdot\mathbf{E}^{free}) = \frac{i}{v_b\varepsilon_b}\bigl[\nabla_t\delta_b - jk_b\,\delta_b\,\hat{\mathbf{z}}\bigr]e^{-jk_bz} .
+$$
+
+- Laplacian: $\mathbf{e}$ is curl-free, so $\nabla_t^2\mathbf{e} = \nabla_t(\nabla_t\cdot\mathbf{e})$ and
+
+$$
+\nabla^2\mathbf{E}^{free} = \frac{i}{v_b\varepsilon_b}\,\nabla_t\delta_b\,e^{-jk_bz} - k_b^2\,\mathbf{E}^{free} .
+$$
+
+- Subtracting, the singular $\nabla_t\delta_b$ terms cancel; only the $\hat{\mathbf{z}}$ term and the
+  $k_b^2$ term remain:
+
+$$
+\nabla\times\nabla\times\mathbf{E}^{free} - \omega^2\mu_b\varepsilon_b\,\mathbf{E}^{free}
+= -j\,\frac{k_b}{v_b\varepsilon_b}\,i\,\delta_b\,e^{-jk_bz}\,\hat{\mathbf{z}}
++ \bigl(k_b^2 - \omega^2\mu_b\varepsilon_b\bigr)\,\mathbf{E}^{free} .
+$$
+
+With $v_b^2\mu_b\varepsilon_b = 1$, $k_b^2 = \omega^2/v_b^2 = \omega^2\mu_b\varepsilon_b$, so the volume term
+vanishes, and $k_b/(v_b\varepsilon_b) = \omega/(v_b^2\varepsilon_b) = \omega\mu_b$. Dividing by $\mu_b$,
+
+$$
+\nabla\times\left(\frac{1}{\mu_b}\nabla\times\mathbf{E}^{free}\right) - \omega^2\varepsilon_b\,\mathbf{E}^{free}
+= -j\omega\, i\,\delta_b\,e^{-jk_bz}\,\hat{\mathbf{z}} = -j\omega\,\mathbf{J} :
+$$
+
+the field equation of [§9.2](#92-field-equation-with-the-beam), written for the reference medium,
+with the beam current of [§9.1](#91-beam-current). The line current is the $\hat{\mathbf{z}}$ residue
+that the singular transverse derivatives leave behind. Ampère's law says the same: the circulation
+of $\mathbf{H}^{free}$ around any circle about the line is $i\,e^{-jk_bz}$, the line current.
+
+Near the line $\mathbf{E}^{free}$ and $\mathbf{H}^{free}$ grow like $1/\rho$. $\mathbf{E}^{free}$ has no
+$z$-component, so it adds nothing to the beam voltage of
+[§9.3](#93-beam-voltage-and-beam-impedance).
+
+### When $v_b^2\mu_b\varepsilon_b \ne 1$
+
+For a slower beam ($\beta < 1$), or a reference medium that is dielectric, magnetic or lossy, the
+computation above leaves the delta coefficient $\omega\mu_b/(v_b^2\mu_b\varepsilon_b)$ instead of
+$\omega\mu_b$, and the volume term $\kappa_b^2\,\mathbf{E}^{free}$ with
+
+$$
+\kappa_b^2 = k_b^2 - \omega^2\mu_b\varepsilon_b = k_b^2\left(1 - v_b^2\mu_b\varepsilon_b\right) \ne 0,
 \qquad \mathrm{Re}\,\kappa_b \ge 0 .
 $$
 
-The solution of $(\nabla_t^2 - \kappa^2)\,G = -\delta$ in the plane that decays, or radiates
-outwards, is $G = K_0(\kappa\rho)/(2\pi)$, so
-
-$$
-A_z^{free} = \frac{\mu_b\, i}{2\pi}\,K_0(\kappa_b\rho)\,e^{-jk_b z}, \qquad
-\Phi^{free} = \frac{i}{2\pi v_b\varepsilon_b}\,K_0(\kappa_b\rho)\,e^{-jk_b z},
-$$
-
-that is, $A_z^{free} = v_b\,\mu_b\varepsilon_b\,\Phi^{free}$. With $K_0' = -K_1$ and
-$E_z = -j\omega A_z + jk_b\Phi$, the fields are
+The $1/\rho$ field is then not a solution. The free field has a modified-Bessel profile instead
+(it follows from the potentials in the Lorenz gauge, with
+$\Phi^{free} = \frac{i}{2\pi v_b\varepsilon_b}K_0(\kappa_b\rho)$):
 
 $$
 \begin{aligned}
 \mathbf{E}^{free} &= \frac{i}{2\pi v_b\varepsilon_b}\Bigl[\kappa_b K_1(\kappa_b\rho)\,\hat{\mathbf{e}}_\rho
-+ jk_b\bigl(1 - v_b^2\mu_b\varepsilon_b\bigr)K_0(\kappa_b\rho)\,\hat{\mathbf{z}}\Bigr]e^{-jk_b z}, \\
-\mathbf{H}^{free} &= \frac{i}{2\pi}\,\kappa_b K_1(\kappa_b\rho)\,\hat{\mathbf{e}}_\varphi\;e^{-jk_b z},
++ jk_b\bigl(1 - v_b^2\mu_b\varepsilon_b\bigr)K_0(\kappa_b\rho)\,\hat{\mathbf{z}}\Bigr]e^{-jk_bz}, \\
+\mathbf{H}^{free} &= \frac{i}{2\pi}\,\kappa_b K_1(\kappa_b\rho)\,\hat{\mathbf{e}}_\varphi\,e^{-jk_bz} .
 \end{aligned}
 $$
 
-related by $\mathbf{H}^{free} = v_b\varepsilon_b\,\hat{\mathbf{z}}\times\mathbf{E}^{free}_t$. By construction
-they satisfy, everywhere,
+- Near the line $\kappa_b K_1(\kappa_b\rho)\to 1/\rho$: the beam current arises from the same flux,
+  and the magnetic field there is $i/(2\pi\rho)\,\hat{\mathbf{e}}_\varphi$ whatever the medium.
+- $E^{free}_z \propto K_0(\kappa_b\rho)$ no longer vanishes. It is logarithmically singular on the
+  line and proportional to $1 - v_b^2\mu_b\varepsilon_b$ ($1/\gamma^2$ in vacuum), so the free field
+  now contributes to the beam voltage; for a line beam that contribution is infinite
+  ([§9.7](#97-port-voltages-and-currents-with-the-beam)).
+- If the beam outruns light in the medium, $v_b^2\mu_b\,\mathrm{Re}\,\varepsilon_b > 1$, $\kappa_b$ is
+  (nearly) imaginary and $K_0$ describes the outgoing Cherenkov wave.
 
-$$
-\nabla\times\left(\frac{1}{\mu_b}\nabla\times\mathbf{E}^{free}\right) - \omega^2\varepsilon_b\,\mathbf{E}^{free} = -j\omega\,\mathbf{J},
-$$
-
-the field equation of [§9.2](#92-field-equation-with-the-beam) with the same source, written for
-the reference medium.
-
-- **Singularity.** As $\kappa\rho\to 0$, $\kappa K_1(\kappa\rho)\to 1/\rho$ and
-  $K_0(\kappa\rho)\sim -\ln(\kappa\rho)$: $\mathbf{E}^{free}_t$ and $\mathbf{H}^{free}$ grow like
-  $1/\rho$, $E^{free}_z$ like $\ln\rho$. The magnetic field near the line,
-  $i/(2\pi\rho)\,\hat{\mathbf{e}}_\varphi$, does not depend on the medium (Ampère's law around the line).
-- **$\kappa_b = 0$**, i.e. $v_b^2\mu_b\varepsilon_b = 1$ (for example $\beta = 1$ in vacuum):
-  $\mathbf{E}^{free} = \dfrac{i}{2\pi v_b\varepsilon_b}\dfrac{\hat{\mathbf{e}}_\rho}{\rho}\,e^{-jk_b z}$ and
-  $\mathbf{H}^{free} = \dfrac{i}{2\pi\rho}\,\hat{\mathbf{e}}_\varphi\,e^{-jk_b z}$, without a longitudinal
-  component.
-- **Faster than light in the medium**, $v_b^2\mu_b\,\mathrm{Re}\,\varepsilon_b > 1$: $\kappa_b^2$ is
-  (nearly) negative, $\kappa_b \approx +j\sqrt{\omega^2\mu_b\varepsilon_b - k_b^2}$, and $K_0$ describes
-  the outgoing Cherenkov wave. The root $\mathrm{Re}\,\kappa_b \ge 0$ of a lossy medium selects it.
+For $\kappa_b \to 0$ these expressions return the $1/\rho$ field above.
 
 ## 9.5 The Beam's Field in a Port
 
 A port face $\Gamma_p$ that the beam crosses lies in a plane $z = z_p$, with outward normal
 $\mathbf{n} = n_z\hat{\mathbf{z}}$, $n_z = \pm 1$. It is the cross-section of a uniform pipe that is
-filled homogeneously with $\varepsilon_p$, $\mu_p$ and bounded by perfect conductors. In the
-infinitely long pipe the beam's field has the structure of the free field,
-$A_z = v_b\,\mu_p\varepsilon_p\,\Phi_p$, with the potential (at unit phase) solving (eq. 9–10)
+filled homogeneously with $\varepsilon_p$, $\mu_p$ and bounded by perfect conductors.
+
+With $v_b^2\mu_p\varepsilon_p = 1$ the beam's field in the infinitely long pipe is transverse, like the
+free field, $\mathbf{E}^{inc} = -\nabla_t\Phi_p\,e^{-jk_bz}$, with the electrostatic potential of the
+line charge (eq. 9–10):
 
 $$
--\nabla_t^2\Phi_p + \kappa_p^2\,\Phi_p = \frac{i}{v_b\varepsilon_p}\,\delta_b \ \ \text{in }\Gamma_p,
+-\nabla_t^2\Phi_p = \frac{i}{v_b\varepsilon_p}\,\delta_b \ \ \text{in }\Gamma_p,
 \qquad
-\Phi_p = 0 \ \text{on the conductors},
+\Phi_p = 0 \ \text{on the conductors}.
 $$
 
-with $\kappa_p^2 = k_b^2 - \omega^2\mu_p\varepsilon_p$, $\mathrm{Re}\,\kappa_p \ge 0$. Since $A_z$ and
-$\Phi_p$ both vanish on the conductors, $\mathbf{n}\times\mathbf{E} = 0$ there. The fields are
+Its profile is curl-free with divergence $\frac{i}{v_b\varepsilon_p}\delta_b$, exactly like that of
+$\mathbf{E}^{free}$, so the computation of [§9.4](#94-the-beams-own-field) applies unchanged: the field
+solves the field equation with the beam current inside the pipe, and $\Phi_p = 0$ makes
+$\mathbf{n}\times\mathbf{E}^{inc} = 0$ on the walls. This is the field that comes in, or goes out, with
+the beam; the pipe carries it without any modal amplitude. Its magnetic field is
+$\mathbf{H}^{inc} = v_b\varepsilon_p\,\hat{\mathbf{z}}\times\mathbf{E}^{inc}$, so its tangential part on the port
+face, the boundary data of [§9.2](#92-field-equation-with-the-beam), is
 
 $$
-\begin{aligned}
-\mathbf{E}^{inc} &= \Bigl[-\nabla_t\Phi_p + jk_b\bigl(1 - v_b^2\mu_p\varepsilon_p\bigr)\Phi_p\,\hat{\mathbf{z}}\Bigr]e^{-jk_b z}, \\
-\mathbf{H}^{inc} &= -v_b\varepsilon_p\,\hat{\mathbf{z}}\times\nabla_t\Phi_p\;e^{-jk_b z} .
-\end{aligned}
+\mathbf{n}\times\mathbf{H}^{inc} = -n_z\,v_b\varepsilon_p\,\mathbf{E}^{inc}_t
+= n_z\,v_b\varepsilon_p\,\nabla_t\Phi_p\;e^{-jk_b z_p} .
 $$
 
-This is the field that comes in, or goes out, with the beam; the pipe carries it without any
-modal amplitude. Its tangential magnetic field on the port face, the boundary data of
-[§9.2](#92-field-equation-with-the-beam), is
-
-$$
-\mathbf{n}\times\mathbf{H}^{inc} = n_z\,v_b\varepsilon_p\,\nabla_t\Phi_p\;e^{-jk_b z_p}
-= -n_z\,v_b\varepsilon_p\,\mathbf{E}^{inc}_t .
-$$
-
-The potential carries the point singularity of the beam. It is split off with the free
-potential of the port medium,
+The potential carries the point singularity of the beam. It is split off with the free potential
+of the port medium,
 
 $$
 \Phi_p = \Phi_p^{free} + \Phi_p^{reg}, \qquad
-\Phi_p^{free} = \frac{i}{2\pi v_b\varepsilon_p}\,K_0(\kappa_p\rho),
+\Phi_p^{free} = -\frac{i}{2\pi v_b\varepsilon_p}\,\ln\rho ,
 $$
 
-where $\Phi_p^{reg}$ solves the homogeneous problem $-\nabla_t^2\Phi_p^{reg} + \kappa_p^2\Phi_p^{reg} = 0$
-in $\Gamma_p$, with $\Phi_p^{reg} = -\Phi_p^{free}$ on the conductors. $\Phi_p^{reg}$ is smooth on the
-whole face; its transverse field is $\mathbf{E}^{reg}_t = -\nabla_t\Phi_p^{reg}\,e^{-jk_b z_p}$. For
-$\kappa_p = 0$ the problem for $\Phi_p$ is electrostatic and $\Phi_p^{reg}$ is harmonic.
+where $\Phi_p^{reg}$ is harmonic in $\Gamma_p$ with $\Phi_p^{reg} = -\Phi_p^{free}$ on the conductors.
+$\Phi_p^{reg}$ is smooth on the whole face; its transverse field is
+$\mathbf{E}^{reg}_t = -\nabla_t\Phi_p^{reg}\,e^{-jk_b z_p}$.
+
+For $v_b^2\mu_p\varepsilon_p \ne 1$ the potential solves
+$-\nabla_t^2\Phi_p + \kappa_p^2\Phi_p = \frac{i}{v_b\varepsilon_p}\delta_b$ with
+$\kappa_p^2 = k_b^2 - \omega^2\mu_p\varepsilon_p$, and the field gains a longitudinal part:
+$\mathbf{E}^{inc} = \bigl[-\nabla_t\Phi_p + jk_b(1 - v_b^2\mu_p\varepsilon_p)\,\Phi_p\,\hat{\mathbf{z}}\bigr]e^{-jk_bz}$,
+while $\mathbf{H}^{inc} = -v_b\varepsilon_p\,\hat{\mathbf{z}}\times\nabla_t\Phi_p\,e^{-jk_bz}$ and the expression
+for $\mathbf{n}\times\mathbf{H}^{inc}$ keep their form. The free potential becomes
+$\Phi_p^{free} = \frac{i}{2\pi v_b\varepsilon_p}K_0(\kappa_p\rho)$, and $\Phi_p^{reg}$ solves the
+homogeneous equation $-\nabla_t^2\Phi_p^{reg} + \kappa_p^2\Phi_p^{reg} = 0$.
 
 ## 9.6 Scattered-Field Formulation
 
@@ -428,9 +483,10 @@ so $\mathbf{k}_Z = \frac{1}{i}\,\mathbf{B}^T(\mathbf{e}_s - \hat{\mathbf{e}}^{re
 coefficients of $\mathbf{E}^{reg}_t$ on the face.
 
 The voltage of $\mathbf{E}^{free}$ itself is left out of $z_{oc}$. It is the voltage of the beam in
-the unbounded reference medium, which for a line beam is infinite unless $\kappa_b = 0$
-($K_0(0) = \infty$), and zero for $\kappa_b = 0$, where $E^{free}_z \equiv 0$. $z_{oc}$ is therefore the
-beam impedance of the structure relative to the unbounded reference medium.
+the unbounded reference medium: zero for $v_b^2\mu_b\varepsilon_b = 1$, where $\mathbf{E}^{free}$ has no
+$z$-component, and infinite for a line beam otherwise, where $E^{free}_z \propto K_0(\kappa_b\rho)$
+([§9.4](#94-the-beams-own-field)). $z_{oc}$ is therefore the beam impedance of the structure relative
+to the unbounded reference medium.
 
 ## 9.8 Generalised Scattering Matrix
 
@@ -556,8 +612,8 @@ $z_b = z_{b,1} + z_{b,2}$. The modes at the cut carry the interaction between th
 | $i$ | beam current amplitude; $i = q$ for a point bunch of charge $q$ |
 | $v_b = \beta c_0$, $k_b = \omega/v_b$ | beam velocity and beam wavenumber |
 | $(x_b, y_b)$, $\ell_b$, $\rho$ | transverse beam position, beam line, distance from it |
-| $\varepsilon_b$, $\mu_b$, $\kappa_b$ | reference medium around the beam and its transverse constant $\kappa_b^2 = k_b^2 - \omega^2\mu_b\varepsilon_b$ |
-| $\mathbf{E}^{free}$, $\mathbf{H}^{free}$ | the beam's field in the unbounded reference medium |
+| $\varepsilon_b$, $\mu_b$, $\kappa_b$ | reference medium around the beam; $\kappa_b^2 = k_b^2 - \omega^2\mu_b\varepsilon_b$, zero when $v_b^2\mu_b\varepsilon_b = 1$ |
+| $\mathbf{E}^{free}$, $\mathbf{H}^{free}$, $\Phi^{free}$ | the beam's field in the unbounded reference medium, and its potential |
 | $\Phi_p$, $\mathbf{E}^{inc}$, $\mathbf{H}^{inc}$ | potential and field of the beam in the pipe of port $p$ ($\varepsilon_p$, $\mu_p$, $\kappa_p$) |
 | $\Phi_p^{reg}$, $\mathbf{E}^{reg}_t$ | smooth part of the port potential and its transverse field |
 | $\mathbf{E}_s$ | scattered field $\mathbf{E} - \mathbf{E}^{free}$ |
