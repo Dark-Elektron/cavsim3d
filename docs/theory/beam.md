@@ -515,6 +515,135 @@ $$
 Without port modes at the cut the coupling term is absent and the beam impedances add,
 $z_b = z_{b,1} + z_{b,2}$. The modes at the cut carry the interaction between the segments.
 
+## 9.10 Model Order Reduction with the Beam
+
+The reduction of [§6](reduction.md) carries over to the beam column, with three changes: its
+snapshots contain a prescribed part, its right-hand side changes shape with frequency, and so does
+the functional that reads the beam voltage.
+
+### Snapshots and basis
+
+The beam snapshots are the free part $\mathbf{e}_f(\omega_i)$ of the beam column
+([§9.6](#96-scattered-field-formulation)), zero on the PEC walls like the port snapshots; the
+prescribed part $\mathbf{g}(\omega)$ is added back after the reduced solve. A basis built from
+$\mathbf{e}_s$ itself would carry wall values, where the rows of $\mathbf{A}$ are not equations of the
+problem. The beam snapshots are complex (the beam's phase), so their real and imaginary parts
+enter separately, as in [§6](reduction.md).
+
+One basis serves the ports and the beam. The two families are scaled before the SVD, each by its
+largest singular value,
+
+$$
+\mathbf{X}_s = \bigl[\,\mathbf{X}_{ports}/\sigma_1^{ports} \;\big|\; \mathbf{X}_{beam}/\sigma_1^{beam}\,\bigr] :
+$$
+
+the port columns are fields per unit modal current, the beam column a field per beam current
+amplitude $i$, and the truncation $\sigma_i/\sigma_1 > \text{tol}$ would otherwise drop the smaller
+family entirely. Truncation, projection and the mass-weighted transformation follow
+[§6](reduction.md) and give $\mathbf{V}$, $\mathbf{Q}_L^{-1}$, $\hat{\mathbf{A}}$, $\hat{\mathbf{B}}$ (and
+$\hat{\mathbf{C}}$, $\hat{\mathbf{D}}$).
+
+### Reduced right-hand side
+
+The load of the beam column, $\mathbf{b}(\omega) = \mathbf{f}^{\,s}_f(\omega) - \mathbf{A}_{fd}(\omega)\,\mathbf{g}(\omega)$
+([§9.6](#96-scattered-field-formulation)), is projected like $\mathbf{B}$,
+
+$$
+\hat{\mathbf{b}}(\omega) = (\mathbf{Q}_L^{-1})^T\,\mathbf{V}^T\,\mathbf{b}(\omega),
+$$
+
+but not once for all frequencies: the beam's phase $e^{-jk_bz}$ runs across the structure, so
+$\mathbf{b}(\omega)$ changes shape, not only magnitude. Its parts:
+
+- **Port load.** On a port face the phase is the constant $e^{-jk_bz_p}$, and for
+  $v_b^2\mu_b\varepsilon_b = 1$ the profile $n_z v_b\varepsilon_b\nabla_t\Phi_p^{reg}$ of
+  $\mathbf{n}\times(\mathbf{H}^{inc} - \mathbf{H}^{free})$ does not depend on $\omega$
+  ([§9.5](#95-the-beams-field-in-a-port)). Then
+
+    $$
+    \mathbf{f}^{\,s}_{ports}(\omega) = \sum_p j\omega\,e^{-jk_bz_p}\,\mathbf{f}_p,
+    \qquad
+    (f_p)_j = n_z\,v_b\varepsilon_b\oint_{\Gamma_p}\nabla_t\Phi_p^{reg}\cdot\mathbf{N}_j\,\mathrm{d}S ,
+    $$
+
+    and its reduced form needs one precomputed vector $(\mathbf{Q}_L^{-1})^T\mathbf{V}^T\mathbf{f}_p$ per
+    port face. For $v_b^2\mu_b\varepsilon_b \ne 1$ the profile depends on $\omega$ and is formed per
+    frequency.
+
+- **Wall lift.** $\mathbf{g}(\omega)$, the interpolant of $-\mathbf{E}^{free}$ on the walls, carries the
+  phase along the walls and is formed per frequency. It lives on the wall degrees of freedom only,
+  so with the matrices $\mathbf{V}^T\mathbf{K}_{fd}$, $\mathbf{V}^T\mathbf{C}_{fd}$, $\mathbf{V}^T\mathbf{M}_{fd}$
+  and $\mathbf{V}^T\mathbf{D}_{fd}$ ($r \times n_d$) precomputed, its projection costs one interpolation
+  on the walls and small products:
+
+    $$
+    \mathbf{V}^T\mathbf{A}_{fd}(\omega)\,\mathbf{g}(\omega)
+    = \bigl(\mathbf{V}^T\mathbf{K}_{fd} + j\omega\,\mathbf{V}^T\mathbf{C}_{fd}
+    - \omega^2\,\mathbf{V}^T(\mathbf{M}_{fd} - j\mathbf{D}_{fd})\bigr)\,\mathbf{g}(\omega) .
+    $$
+
+    For $v_b^2\mu_b\varepsilon_b = 1$, $\mathbf{E}^{free}$ is radial about the beam line, so
+    $\mathbf{g} = 0$ on a round pipe wall centred on the beam; tapers, steps and other walls
+    contribute.
+
+- **Contrast load.** Where the material differs from the reference medium, the volume terms of
+  [§9.6](#96-scattered-field-formulation) also carry the phase and are formed per frequency.
+
+### Reduced solve and outputs
+
+$$
+\bigl(\hat{\mathbf{A}} + j\omega\hat{\mathbf{C}} - \omega^2(\mathbf{I} - j\hat{\mathbf{D}})\bigr)\,\mathbf{y}_b = \hat{\mathbf{b}}(\omega),
+\qquad
+\mathbf{e}_f \approx \mathbf{V}\mathbf{Q}_L^{-1}\mathbf{y}_b ,
+\qquad
+\mathbf{e}_s = \begin{bmatrix}\mathbf{e}_f\\ \mathbf{g}\end{bmatrix} .
+$$
+
+For a lossless structure the eigendecomposition of [§6](reduction.md) still solves every
+frequency at once, with $\hat{\mathbf{b}}(\omega)$ in place of $\omega\hat{\mathbf{B}}$. The eigenvalues near
+zero belong to the quasi-static part of the field, which at low frequency carries most of the
+beam's field; they stay in the sum.
+
+The beam voltage is read at the Gauss points $z_k$ (weights $w_k$) of the beam line
+([§9.3](#93-beam-voltage-and-beam-impedance)), $\mathbf{c}(\omega) = \sum_k w_k\,e^{jk_bz_k}\,\mathbf{p}_k$
+with $(p_k)_j = N_{j,z}(x_b, y_b, z_k)$. The vectors $\mathbf{p}_k$ do not depend on $\omega$, so with
+$\hat{\mathbf{c}}_k = (\mathbf{Q}_L^{-1})^T\mathbf{V}^T\mathbf{p}_k$ precomputed,
+
+$$
+z_{oc} = \frac{1}{i}\sum_k w_k\,e^{jk_bz_k}\,\hat{\mathbf{c}}_k^T\,\mathbf{y}_b,
+\qquad
+\mathbf{h}_Z = j\sum_k w_k\,e^{jk_bz_k}\,\hat{\mathbf{c}}_k^T\,\mathbf{Y} ,
+$$
+
+exactly, with $\mathbf{Y}$ the reduced port columns of [§6](reduction.md). (The prescribed part adds
+$\mathbf{c}^T[\mathbf{0};\mathbf{g}]$, which is zero when no element on the beam line touches a PEC wall.)
+The port voltages of the beam column are
+
+$$
+\mathbf{k}_Z = \frac{1}{i}\Bigl(\hat{\mathbf{B}}^T\mathbf{y}_b + \mathbf{B}^T\begin{bmatrix}\mathbf{0}\\ \mathbf{g}\end{bmatrix}
+- \sum_p e^{-jk_bz_p}\,\mathbf{B}^T\hat{\mathbf{e}}^{reg}_p\Bigr),
+$$
+
+with $\hat{\mathbf{e}}^{reg}_p$ the coefficients of $\mathbf{E}^{reg}_t$ on face $p$ at unit phase. The
+middle term reaches only the wall degrees of freedom on the rims of the port faces, whose basis
+functions extend into the face, and is formed with $\mathbf{g}(\omega)$.
+$\mathbf{Z} = j\hat{\mathbf{B}}^T\mathbf{Y}$ is that of [§6](reduction.md), and $\tilde{\mathbf{S}}$ follows as in
+[§9.8](#98-generalised-scattering-matrix).
+
+### Limits
+
+- The truncation bounds the error of the field in the norm of the snapshots, which the large
+  transverse field near the walls dominates. $z_{oc}$ comes from $E_z$ on the beam line, which can
+  be a small part of that field, so the rank has to be judged by $z_{oc}$, not by the singular
+  values alone.
+- The beam's phase across a structure of length $L$ repeats every $\Delta f = v_b/L$, and the beam
+  column changes with frequency at least that fast. The snapshots need a spacing below
+  $v_b/(2L)$, and the basis needs about $2f_{\max}L/v_b$ vectors for the phase alone; short
+  segments ([§9.9](#99-concatenation-of-segments)) keep this small.
+- A reduced model holds for the beam velocity $v_b$ of its snapshots.
+- The wall lift, and a contrast load where there is one, are formed per frequency from the mesh;
+  every other part of the reduced model is independent of it.
+
 ## Symbols
 
 | Symbol | Meaning |
@@ -532,6 +661,8 @@ $z_b = z_{b,1} + z_{b,2}$. The modes at the cut carry the interaction between th
 | $\mathbf{k}_Z$, $\mathbf{h}_Z$, $z_{oc}$ | open-port coupling and beam impedance |
 | $\mathbf{k}$, $\mathbf{h}$, $z_b$, $\tilde{\mathbf{S}}$ | matched coupling, beam impedance and generalised scattering matrix |
 | $\mathbf{G}$, $\mathbf{F}$, $\mathbf{d}$, $\mathbf{T}$ | permuted block matrix, cut connection, beam delay, beam projection (concatenation) |
+| $\hat{\mathbf{b}}(\omega)$, $\mathbf{y}_b$ | reduced beam load and reduced beam column |
+| $\mathbf{f}_p$, $\mathbf{p}_k$, $\hat{\mathbf{c}}_k$ | port load per face at unit phase, beam-line values at a Gauss point, their reduced form |
 
 ---
 
