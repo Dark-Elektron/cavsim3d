@@ -113,11 +113,9 @@ the line integral of the load vector with the opposite phase.
 
 ## 9.4 The Beam's Own Field
 
-The scattered-field formulation of [§9.6](#96-scattered-field-formulation) subtracts the field the
-beam has on its own, in a homogeneous **reference medium** around the beam line, unbounded, with
-complex permittivity $\varepsilon_b$ and permeability $\mu_b$.
-
-When the beam moves with the speed of light of that medium, $v_b^2\mu_b\varepsilon_b = 1$ ($\beta = 1$
+The **reference medium** is the homogeneous material around the beam line, with complex
+permittivity $\varepsilon_b$ and permeability $\mu_b$; the beam's own field is its field in this
+medium, unbounded. When the beam moves with the speed of light of that medium, $v_b^2\mu_b\varepsilon_b = 1$ ($\beta = 1$
 in vacuum), this is the field of the line charge $i/v_b$, carried along with the beam's phase:
 
 $$
@@ -132,9 +130,8 @@ $\Phi^{free} = -\dfrac{i}{2\pi v_b\varepsilon_b}\ln\rho$.
 
 ### Why it carries the beam current
 
-$\mathbf{E}^{free}$ solves the field equation of [§9.2](#92-field-equation-with-the-beam) with exactly
-the beam current as its source; the current does not have to be put in by hand. Two properties of
-the 2D field $\hat{\mathbf{e}}_\rho/\rho$ give this.
+Two properties of the 2D field $\hat{\mathbf{e}}_\rho/\rho$ show that $\mathbf{E}^{free}$ solves the
+field equation of [§9.2](#92-field-equation-with-the-beam) with the beam current as its source.
 
 **2D lemma.** $\hat{\mathbf{e}}_\rho/\rho = \nabla_t\ln\rho$ is a gradient, so it is curl-free. Away from
 the line its divergence is zero, and its flux through any circle around the line is
@@ -186,13 +183,8 @@ $$
 $$
 
 the field equation of [§9.2](#92-field-equation-with-the-beam), written for the reference medium,
-with the beam current of [§9.1](#91-beam-current). The line current is the $\hat{\mathbf{z}}$ residue
-that the singular transverse derivatives leave behind. Ampère's law says the same: the circulation
-of $\mathbf{H}^{free}$ around any circle about the line is $i\,e^{-jk_bz}$, the line current.
-
-Near the line $\mathbf{E}^{free}$ and $\mathbf{H}^{free}$ grow like $1/\rho$. $\mathbf{E}^{free}$ has no
-$z$-component, so it adds nothing to the beam voltage of
-[§9.3](#93-beam-voltage-and-beam-impedance).
+with the beam current of [§9.1](#91-beam-current): the line current is the $\hat{\mathbf{z}}$ residue
+that the singular transverse derivatives leave behind.
 
 ### When $v_b^2\mu_b\varepsilon_b \ne 1$
 
@@ -217,18 +209,13 @@ $$
 \end{aligned}
 $$
 
-- Near the line $\kappa_b K_1(\kappa_b\rho)\to 1/\rho$: the beam current arises from the same flux,
-  and the magnetic field there is $i/(2\pi\rho)\,\hat{\mathbf{e}}_\varphi$ whatever the medium.
-- $E^{free}_z \propto K_0(\kappa_b\rho)$ no longer vanishes. It is logarithmically singular on the
-  line and proportional to $1 - v_b^2\mu_b\varepsilon_b$ ($1/\gamma^2$ in vacuum), so the free field
-  now contributes to the beam voltage; for a line beam that contribution is infinite
-  ([§9.7](#97-port-voltages-and-currents-with-the-beam)).
-- If the beam outruns light in the medium, $v_b^2\mu_b\,\mathrm{Re}\,\varepsilon_b > 1$, $\kappa_b$ is
-  (nearly) imaginary and $K_0$ describes the outgoing Cherenkov wave.
-
-For $\kappa_b \to 0$ these expressions return the $1/\rho$ field above. Like that field, the
-Bessel field satisfies the field equation of the reference medium with the beam current as its
-source, which is all that [§9.6](#96-scattered-field-formulation) uses.
+$E^{free}_z \propto K_0(\kappa_b\rho)$ no longer vanishes: it is logarithmically singular on the line
+and proportional to $1 - v_b^2\mu_b\varepsilon_b$ ($1/\gamma^2$ in vacuum). If the beam outruns light in
+the medium, $v_b^2\mu_b\,\mathrm{Re}\,\varepsilon_b > 1$, $\kappa_b$ is (nearly) imaginary and $K_0$
+describes the outgoing Cherenkov wave. For $\kappa_b \to 0$ these expressions return the $1/\rho$
+field above. Like that field, the Bessel field satisfies the field equation of the reference
+medium with the beam current as its source, which is all that
+[§9.6](#96-scattered-field-formulation) uses.
 
 ## 9.5 The Beam's Field in a Port
 
@@ -282,7 +269,7 @@ homogeneous equation $-\nabla_t^2\Phi_p^{reg} + \kappa_p^2\Phi_p^{reg} = 0$.
 
 ## 9.6 Scattered-Field Formulation
 
-The beam is solved for the **scattered field**
+The **scattered field** is
 
 $$
 \mathbf{E}_s = \mathbf{E} - \mathbf{E}^{free},
@@ -319,15 +306,13 @@ $-\nabla\times\bigl((\frac{1}{\mu} - \frac{1}{\mu_b})\nabla\times\mathbf{E}^{fre
 
 ### What is left: the boundary data
 
-With the line source gone, the beam reaches $\mathbf{E}_s$ only through its boundary conditions,
-and these carry $\mathbf{E}^{free}$:
+The boundary conditions carry $\mathbf{E}^{free}$:
 
 - **PEC walls:** $\mathbf{n}\times\mathbf{E} = 0$ becomes
   $\mathbf{n}\times\mathbf{E}_s = -\mathbf{n}\times\mathbf{E}^{free}$, a prescribed tangential value.
 - **Port faces:** $\mathbf{n}\times\mathbf{H} = \mathbf{n}\times\mathbf{H}^{inc}$ becomes
   $\mathbf{n}\times\mathbf{H}_s = \mathbf{n}\times(\mathbf{H}^{inc} - \mathbf{H}^{free})$, with
-  $\mathbf{H}_s = \mathbf{H} - \mathbf{H}^{free}$; on natural boundaries the beam does not cross,
-  $\mathbf{H}^{inc} = 0$.
+  $\mathbf{H}_s = \mathbf{H} - \mathbf{H}^{free}$.
 
 The weak form of the source-free equation, as in [§2](variational.md), therefore has the boundary
 term as its only load:
@@ -340,17 +325,15 @@ $$
 \end{aligned}
 $$
 
-with $\mathbf{n}\times\mathbf{E}_s = -\mathbf{n}\times\mathbf{E}^{free}$ on the PEC walls. Neither term is
-singular. $\mathbf{H}^{inc}$ and $\mathbf{H}^{free}$ have the same singular part at the beam point,
-$i/(2\pi\rho)\,\hat{\mathbf{e}}_\varphi$, so their difference is smooth. On a port face filled with the
-reference medium,
+with $\mathbf{n}\times\mathbf{E}_s = -\mathbf{n}\times\mathbf{E}^{free}$ on the PEC walls. Neither datum is
+singular: the walls keep away from the beam line, and $\mathbf{H}^{inc}$ and $\mathbf{H}^{free}$ have
+the same singular part at the beam point, $i/(2\pi\rho)\,\hat{\mathbf{e}}_\varphi$, whatever the media.
+On a port face filled with the reference medium the port data is the smooth field of
+[§9.5](#95-the-beams-field-in-a-port),
 
 $$
-\mathbf{n}\times(\mathbf{H}^{inc} - \mathbf{H}^{free}) = -n_z\,v_b\varepsilon_b\,\mathbf{E}^{reg}_t ,
+\mathbf{n}\times(\mathbf{H}^{inc} - \mathbf{H}^{free}) = -n_z\,v_b\varepsilon_b\,\mathbf{E}^{reg}_t .
 $$
-
-the smooth part of the beam's field in the pipe. The walls keep away from the beam line, so
-$-\mathbf{n}\times\mathbf{E}^{free}$ is smooth there.
 
 ### Matrix form
 
@@ -367,8 +350,7 @@ $$
 $$
 
 The matrix is that of the port excitations, so one factorisation per frequency serves the ports
-and the beam. The total field is $\mathbf{E} = \mathbf{E}_s + \mathbf{E}^{free}$; on the beam line
-$E_z = E_{s,z} + E^{free}_z$, with $E^{free}_z = 0$ for $v_b^2\mu_b\varepsilon_b = 1$.
+and the beam.
 
 ## 9.7 Port Voltages and Currents with the Beam
 
