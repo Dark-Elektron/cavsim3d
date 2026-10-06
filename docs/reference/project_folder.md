@@ -25,7 +25,7 @@ material name for its full-order files.
 | `port_modes/port_modes.pkl` | port modes |
 | `port_modes/beam_port_fields.pkl` | with a beam: the beam's electrostatic potential on every port face it crosses |
 | `imports.json` | imported projects: source path, mode (`reference` / `copy`), fingerprint |
-| `sections.json` | parts of a chain solved in this project: the solve settings and geometry each was solved for, and its port data (reused by the next `solve()`, and needed to reduce it again) |
+| `sections.json` | parts of a chain solved in this project: the solve settings, geometry and beams (in the part's own frame) each was solved for, and its port data (reused by the next `solve()`, and needed to reduce it again) |
 | `checkpoint/<sweep>/sample_*.npz` | finished samples of a running sweep; deleted when the sweep completes |
 
 ## Stage folders
@@ -50,12 +50,14 @@ single part):
 | Path | Content |
 |---|---|
 | `z_tilde/z_tilde_<part>.h5` | $\tilde{Z} = [[Z, k_Z], [h_Z, z_{oc}]]$ with its labels and the beam definition |
-| `s_tilde/s_tilde_<part>.h5` | $\tilde{S} = [[S, k], [h, z_b]]$, the same |
+| `s_tilde/s_tilde_<part>.h5` | $\tilde{S} = [[S, k], [h, z_b]]$, the same, with the reference impedance of each port mode and the positions and mode fingerprints of the ports (what a join needs) |
 | `snapshots_beam/snapshots_beam_<part>.h5` | the beam's scattered field per sample |
 | `matrices/beam_<part>.h5` | the beam data that do not depend on frequency: Gauss points, weights and evaluation matrix of each voltage path; the load of each port face |
 
-The port files (`s/`, `z/`, `snapshots/`) are the same with and without a beam. A model
-joined from full-order parts with a beam (`fds/foms/concat/`) holds
+The port files (`s/`, `z/`, `snapshots/`) are the same with and without a beam. In a
+chain of repeated or imported parts, each part's beam files sit in `fds/foms/` under the
+part's name, also for a part imported by reference (its beam columns are computed in this
+project). A model joined from full-order parts with a beam (`fds/foms/concat/`) holds
 `s_tilde/s_tilde.h5` and no matrices.
 
 | Stage | Single part | Several parts |

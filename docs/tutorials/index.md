@@ -28,6 +28,10 @@ reduced, and then concatenated. Repeating a part, and reusing a project solved e
 **[Ports and port modes](ports/index.md)**: more than one mode per port, coaxial (TEM)
 ports, and microstrip (quasi-TEM) ports.
 
+**[Beams](beam/index.md)**: a beam through a model and its beam impedance, next to the
+S-parameters: in one solve, added to a solved cavity, past a lossy absorber, and for a
+chain of parts joined with the beam.
+
 **[Applications](applications/index.md)**: complete studies on real structures, such as a
 TESLA 9-cell cavity chain and a two-cavity module benchmarked against CST Studio Suite.
 

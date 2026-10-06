@@ -105,6 +105,16 @@ class TestCoaxialFit:
                 f"Rectangle should fail coaxial fit, error={error}"
             )
 
+    def test_square_port_is_rectangular(self):
+        """A square face is isotropic, and area and moment alone fit an annulus
+        to it (inner/outer = 0.15); it has no hole, so it is rectangular."""
+        from cavsim3d.geometry.primitives import RectangularWaveguide
+        geo = RectangularWaveguide(a=0.04, b=0.04, L=0.05, maxh=0.02)
+        solver = PortEigenmodeSolver(geo.mesh, 1, geo.bc)
+        port = solver._detect_port_geometry('port1')
+        assert port.type == PortGeometryType.RECTANGULAR
+        assert port.a == pytest.approx(0.04) and port.b == pytest.approx(0.04)
+
 
 # ============================================================
 # Unit tests: coaxial mode generation

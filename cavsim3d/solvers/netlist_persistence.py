@@ -35,6 +35,8 @@ import numpy as np
 FOM_MATS = ("K", "M", "B", "C", "D")   # C, D only exist for lossy sections
 ROM_MATS = ("A_r", "B_r", "W", "Q_L_inv", "C_r", "D_r")
 RESULT_DIRS = ("s", "z", "eigenmodes", "snapshots")
+# with a beam: the generalised matrices, the beam's own field and its data
+BEAM_DIRS = ("z_tilde", "s_tilde", "snapshots_beam")
 
 # The solve options that decide a section's full-order results: a section
 # staged with the same values (and the same geometry) is reused, not re-solved.
@@ -150,11 +152,12 @@ def stage_fom(source_project: Path, domain: str, project_root: Path) -> None:
     src_domain = _source_domain(fom)
 
     (foms_dir / "matrices").mkdir(parents=True, exist_ok=True)
-    for base in FOM_MATS:
+    remove_section_beam_files(project_root, domain)     # of an earlier staging
+    for base in FOM_MATS + ("beam",):
         f = _pick(fom / "matrices", base, src_domain)
         if f is not None:
             shutil.copy2(f, foms_dir / "matrices" / f"{base}_{domain}.h5")
-    for rd in RESULT_DIRS:
+    for rd in RESULT_DIRS + BEAM_DIRS:
         _copy_result_dir(fom / rd, foms_dir / rd, src_domain, domain)
 
     _stage_mesh(source_project, domain, project_root)
@@ -199,8 +202,9 @@ def stage_rom(source_project: Path, domain: str, project_root: Path) -> dict:
     return sm
 
 
-def port_geometry_from_project(project: Path, ports) -> dict:
-    """Port centres/normals from a project's saved port modes, or ``{}``.
+def port_geometry_from_project(project: Path, ports=None) -> dict:
+    """Port centres/normals from a project's saved port modes, or ``{}``
+    (``ports=None``: every port there).
 
     Reduced models saved before port positions were recorded still have them
     in ``fds/port_modes/port_modes.pkl`` (plain lists, no mesh needed).
@@ -215,8 +219,9 @@ def port_geometry_from_project(project: Path, ports) -> dict:
     except Exception:
         return {}
     out = {}
-    for p in ports:
-        g = (data.get("port_geometries") or {}).get(p)
+    geometries = data.get("port_geometries") or {}
+    for p in (geometries if ports is None else ports):
+        g = geometries.get(p)
         if not g:
             continue
         out[p] = {k: g.get(k) for k in ("center", "normal", "type", "radius",
@@ -339,6 +344,42 @@ def read_imports(project_root: Path) -> dict:
         r["source"] = str(src if src.is_absolute()
                           else (Path(project_root) / src).resolve())
     return stored
+
+
+def remove_section_beam_files(project_root: Path, domain: str) -> None:
+    """Delete a section's beam results from the flat ``fds/foms`` tree."""
+    foms = Path(project_root) / "fds" / "foms"
+    for f in [foms / d / f"{d}_{domain}.h5" for d in BEAM_DIRS] +              [foms / "matrices" / f"beam_{domain}.h5"]:
+        if f.exists():
+            f.unlink()
+
+
+def source_tilde_file(project: Path) -> Optional[Path]:
+    """The S~ file (beam results) of a single-section project, or None."""
+    try:
+        fom = find_fom_dir(Path(project))
+    except FileNotFoundError:
+        return None
+    f = fom / "s_tilde" / f"s_tilde_{_source_domain(fom)}.h5"
+    return f if f.exists() else None
+
+
+def has_field_snapshots(project: Path) -> bool:
+    """True if a single-section project stored its port solutions (the field
+    snapshots), as adding a beam to it needs."""
+    import h5py
+    try:
+        fom = find_fom_dir(Path(project))
+    except FileNotFoundError:
+        return False
+    for f in sorted((fom / "snapshots").glob("*.h5")):
+        try:
+            with h5py.File(f, "r") as fh:
+                if "field_snapshots" in fh:
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def has_local_copy(project_root: Path, domain: str) -> bool:
@@ -510,12 +551,15 @@ def section_record(fds) -> dict:
     if band is not None:
         template["band"] = band
     fom = fds.fom
+    beam = fds.beam_setup
     return _jsonable({
         "fom": {"domain": fom.domain, "ports": list(fom.ports),
                 "n_ports": int(fom.n_ports),
                 "n_modes_per_port": int(fom._n_modes_per_port or 1),
                 "mode_labels": fom.mode_labels},
         "rom_template": template,
+        # the beams (in the section's own frame) it was solved with
+        "beam": beam.fingerprint() if beam is not None else None,
     })
 
 

@@ -26,7 +26,7 @@ from cavsim3d.core.em_project import EMProject      # before netgen (pythonocc f
 from cavsim3d.core.constants import eps0
 from cavsim3d.geometry.base import BaseGeometry
 from netgen.occ import Axes, Cylinder, Glue, Z as AXIS_Z
-from ngsolve import Conj, InnerProduct, Integrate
+from ngsolve import InnerProduct, Integrate
 
 WORK = Path(tempfile.mkdtemp(prefix="cavsim3d_beam_"))
 R, R_IN, L, L_RING = 0.025, 0.012, 0.24, 0.04          # metres
@@ -72,7 +72,7 @@ def main(tan_delta=0.5, maxh=0.006, order=3, fmin=0.5, fmax=1.5, nsamples=3):
     for k, f in enumerate(lossy.frequencies):
         w = 2 * np.pi * f
         E = lossy.fom.beam_field(k)                    # E_s + E_free, 1 A
-        absorbed = Integrate(w * eps0 * 4.0 * tan_delta * InnerProduct(E, Conj(E)).real,
+        absorbed = Integrate(w * eps0 * 4.0 * tan_delta * InnerProduct(E, E).real,
                              lossy.mesh, definedon=lossy.mesh.Materials('ceramic'))
         print(f"{f / 1e9:8.3f} {z0[k].real:18.5f} {zpar[k].real:15.4f} {absorbed:10.4f}")
     return results

@@ -42,9 +42,9 @@ def count_section_solves(monkeypatch):
     calls = []
     original = FrequencyDomainSolver._run_section_fom
 
-    def counting(base, comp, cfg, project_root):
+    def counting(base, comp, cfg, project_root, **kwargs):
         calls.append(base)
-        return original(base, comp, cfg, project_root)
+        return original(base, comp, cfg, project_root, **kwargs)
 
     monkeypatch.setattr(FrequencyDomainSolver, "_run_section_fom", staticmethod(counting))
     return calls

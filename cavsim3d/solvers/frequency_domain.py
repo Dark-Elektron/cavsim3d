@@ -613,6 +613,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         nothing is nested as a sub-project and nothing is recomputed: a live
         section staged by an earlier solve with the same settings and the same
         geometry is reused (``fds/sections.json`` records both).
+
+        With beams (``proj.add_beam``), every section is solved with the beams
+        where they run through it, in its own frame (see
+        :meth:`_netlist_beam_setups`); an imported section gets its beam
+        columns computed here from its stored port solutions.  The sections
+        are then joined with the beams by ``fds.foms.concatenate()``.
         """
         if not self._project_path:
             raise RuntimeError(
@@ -624,7 +630,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 f"its own and the parts are joined through their port modes.")
 
         from cavsim3d.solvers import netlist_persistence as npz
-        plan = self._netlist_plan(asm, cfg)
+        beams = self._netlist_beam_setups(asm) if self.beam_setup is not None else {}
+        plan, beam_plan = self._netlist_plan(asm, cfg, beams)
         previous = npz.read_imports(project_root)
         saved = npz.read_sections(project_root)["sections"]
         components: Dict[str, Dict] = {}
@@ -637,11 +644,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 continue
             comp = entry.geometry
             action = plan[base][1]
+            beam = beams.get(base)
             is_import = isinstance(comp, (str, Path)) or hasattr(comp, 'project_path')
             if (action == 'reuse' and base in saved
                     and (not is_import or saved[base].get('derived_from'))):
                 # staged by an earlier solve with the same settings: reuse it
-                components[base] = live[base] = dict(saved[base], kind="live")
+                rec = dict(saved[base], kind="live")
+                if beam is None and rec.get('beam'):
+                    # the beam was removed: its results go, the port results stay
+                    npz.remove_section_beam_files(project_root, base)
+                    rec['beam'] = None
+                components[base] = live[base] = rec
                 continue
             if action == 'recompute':
                 # The imported part does not fit (or has no results): solve it
@@ -650,8 +663,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 src = Path(getattr(comp, 'project_path', comp))
                 geo = BaseGeometry.load_geometry(src, check_source=False)
                 if getattr(geo, 'mesh', None) is None:
-                    geo.generate_mesh()
-                rec = self._run_section_fom(base, geo, cfg, project_root)
+                    geo.generate_mesh(**self._beam_mesh_kwargs())
+                rec = self._run_section_fom(base, geo, cfg, project_root, beam=beam)
                 rec.update(derived_from=str(src), signature=npz.project_signature(src),
                            config=npz.section_config(cfg))
                 components[base] = live[base] = rec
@@ -667,11 +680,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     components[base] = self._stage_imported_section(base, comp, project_root)
                     components[base]["reduce"] = True
                 imports[base] = components[base]
-                continue
-            if getattr(comp, 'mode', None) == 'reference':
+            elif getattr(comp, 'mode', None) == 'reference':
                 components[base] = self._reference_imported_section(base, comp)
                 imports[base] = components[base]
-            elif isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
+            elif is_import:
                 src = Path(getattr(comp, 'project_path', comp))
                 prev = previous.get(base, {})
                 same_source = (prev.get("source")
@@ -690,12 +702,23 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                         components[base]["fingerprint"] = comp.fingerprint()
                 imports[base] = components[base]
             else:
-                rec = self._run_section_fom(base, comp, cfg, project_root)
+                rec = self._run_section_fom(base, comp, cfg, project_root, beam=beam)
                 rec.update(signature=npz.geometry_signature(comp),
                            config=npz.section_config(cfg))
                 components[base] = live[base] = rec
+                continue
+            # an imported section: its beam columns, if they are not there yet
+            if beam is None:
+                npz.remove_section_beam_files(project_root, base)
+            elif not self._imported_tilde_fits(base, comp, beam, cfg):
+                self._import_section_beam(
+                    base, Path(getattr(comp, 'project_path', comp)), beam, cfg,
+                    project_root)
         npz.write_imports(project_root, imports)
         npz.write_sections(project_root, cfg, live)
+        # a join of the earlier results no longer applies
+        import shutil as _shutil
+        _shutil.rmtree(project_root / "fds" / "foms" / "concat", ignore_errors=True)
 
         from cavsim3d.solvers.results import NetlistFOMs
         self._netlist_foms = NetlistFOMs(asm, components, self, dict(cfg))
@@ -705,31 +728,117 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         clear_checkpoints(self._checkpoint_root())
 
         pr.milestone(f"Netlist FOM stage complete: {len(components)} unique "
-                     f"section(s) for {sum(int(e.metadata.get('n', 1)) for e in asm._components.values())} instance(s)")
+                     f"section(s) for {sum(int(e.metadata.get('n', 1)) for e in asm._components.values())} instance(s)"
+                     + (" with the beam: join them with fds.foms.concatenate()" if beams else ""))
         return {"netlist_sections": list(components.keys())}
 
-    def _netlist_plan(self, asm, cfg: Dict) -> Dict[str, Tuple[str, str, str]]:
+    def _netlist_beam_setups(self, asm) -> Dict:
+        """The beams in each part's own frame, ``{section: BeamSetup}``.
+
+        The beams are defined in the frame of the first part.  Every next part
+        sits where it is joined: the centre of its joined face on the centre of
+        the face it joins (the faces that face each other along the main axis,
+        as the join takes them).  The face positions come from a part's mesh,
+        or from an imported project's saved port data.  All copies of a part
+        must see the beams at the same place in their own frame.
+        """
+        from types import SimpleNamespace
+        from cavsim3d.geometry.assembly import Assembly
+        from cavsim3d.solvers import netlist_persistence as npz
+        from cavsim3d.solvers.concatenation import (chain_placement, netlist_instances,
+                                                    netlist_joins)
+        setup = self.beam_setup
+        parts: Dict[str, object] = {}
+        for key in asm._component_order:
+            entry = asm._components[key]
+            if isinstance(entry.geometry, Assembly):
+                raise NotImplementedError(
+                    f"'{key}' is an assembly inside the chain: beams through coupled "
+                    "parts need every part as geometry or an imported project.")
+            parts.setdefault(entry.base_name, entry.geometry)
+        faces = {}
+        for base, comp in parts.items():
+            if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
+                src = Path(getattr(comp, 'project_path', comp))
+                faces[base] = npz.port_geometry_from_project(src)
+                if not faces[base]:
+                    # not solved there yet: place it from its geometry
+                    from cavsim3d.geometry.base import BaseGeometry
+                    geo = BaseGeometry.load_geometry(src, check_source=False)
+                    faces[base] = self._part_port_geometry(base, geo)
+            else:
+                faces[base] = self._part_port_geometry(base, comp)
+        instances = netlist_instances(asm)
+        structs = [SimpleNamespace(ports=list(faces[b]), port_geometry=faces[b])
+                   for _i, _k, b in instances]
+        joins = netlist_joins(asm, structs, [k for _i, k, _b in instances])
+        local: Dict[str, object] = {}
+        for (iname, _key, base), shift in zip(instances, chain_placement(structs, joins)):
+            seen = setup.shifted(shift)
+            if base not in local:
+                local[base] = seen
+            elif not local[base].same_lines(seen):
+                raise NotImplementedError(
+                    f"The copies of part '{base}' see the beams at different places "
+                    f"(copy '{iname}' is shifted across the axis): each copy would need "
+                    "its own solve. Align the parts' joined faces on one axis.")
+        return local
+
+    def _part_port_geometry(self, base: str, comp) -> Dict:
+        """``{port: {center, normal}}`` of a geometry part from its mesh, as the
+        port solver computes them (the face's centroid and mean normal)."""
+        from ngsolve import BND, Integrate, specialcf, x, y, z
+        if getattr(comp, 'mesh', None) is None:
+            if getattr(comp, 'mesh_on_demand', False) or getattr(comp, 'geo', None) is not None:
+                comp.generate_mesh(**self._beam_mesh_kwargs())
+            else:
+                raise RuntimeError(
+                    f"Part '{base}' has no mesh yet: call proj.generate_mesh() first.")
+        mesh = comp.mesh
+        out = {}
+        for port in comp.ports:
+            region = mesh.Boundaries(region_pattern([port]))
+            area = Integrate(CoefficientFunction(1.0), mesh, BND, definedon=region)
+            if area <= 0:
+                continue
+            centre = [Integrate(c, mesh, BND, definedon=region) / area for c in (x, y, z)]
+            n = np.array([Integrate(specialcf.normal(3)[i], mesh, BND, definedon=region)
+                          for i in range(3)])
+            out[port] = {"center": [float(v) for v in centre],
+                         "normal": [float(v) for v in n / max(np.linalg.norm(n), 1e-300)]}
+        return out
+
+    def _netlist_plan(self, asm, cfg: Dict, beams: Optional[Dict] = None):
         """Decide, print and (if needed) gate what each unique part needs.
 
-        ``{base: (kind, action, reason)}`` with action one of ``compute``
-        (a geometry part: full-order solve), ``reuse`` (an imported reduced
-        model that fits), ``reduce`` (imported full-order results without a
-        reduced model) or ``recompute`` (an imported part that does not fit
-        the request or has no results: full-order solve from its geometry).
-        Imported parts are never written to; what they lack is computed here.
+        Returns ``(plan, beam_plan)``.  ``plan[base] = (kind, action, reason)``
+        with action one of ``compute`` (a geometry part: full-order solve),
+        ``reuse`` (an imported reduced model that fits), ``reduce`` (imported
+        full-order results without a reduced model) or ``recompute`` (an
+        imported part that does not fit the request or has no results:
+        full-order solve from its geometry).  With beams (``beams``: the
+        beams in each part's frame), ``beam_plan[base]`` of an imported part is
+        ``ok`` (its beam results are there) or ``beam`` (computed here from its
+        stored port solutions).  Imported parts are never written to; what
+        they lack is computed here.
         """
         from cavsim3d.utils.io_utils import is_interactive
         from cavsim3d.solvers import netlist_persistence as npz
+        beams = beams or {}
         root = Path(self._project_path)
         previous = npz.read_imports(root)
         saved = npz.read_sections(root)["sections"]
         plan: Dict[str, Tuple[str, str, str]] = {}
+        beam_plan: Dict[str, str] = {}
         for key in asm._component_order:
             entry = asm._components[key]
             base = entry.base_name
             if base in plan:
                 continue
             comp = entry.geometry
+            beam = beams.get(base)
+            beam_fp = beam.fingerprint() if beam is not None else None
+            with_beam = ", with the beam" if beam is not None else ""
             if isinstance(comp, (str, Path)) or hasattr(comp, 'project_path'):
                 kind = f"imported ({getattr(comp, 'mode', 'copy')})"
                 src = Path(getattr(comp, 'project_path', comp))
@@ -740,22 +849,39 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 # did not fit): reuse it while the source's geometry is the same
                 if same_src and self._staged_section_fits(
                         base, rec, cfg, npz.project_signature(src)
-                        if src.exists() else rec.get('signature')):
+                        if src.exists() else rec.get('signature'), beam_fp):
                     plan[base] = (kind, "reuse", "computed here from its geometry earlier")
                     continue
                 action, reason = self._plan_imported_section(base, comp, cfg, previous)
+                if beam is not None and action != 'recompute':
+                    b_action, b_reason = self._plan_imported_beam(base, comp, cfg, beam)
+                    if b_action == 'recompute':
+                        action, reason = 'recompute', b_reason
+                    else:
+                        beam_plan[base] = b_action
+                        reason += f"; {b_reason}"
+                elif beam is not None:
+                    reason += with_beam
                 plan[base] = (kind, action, reason)
             elif self._staged_section_fits(base, saved.get(base), cfg,
-                                           npz.geometry_signature(comp)):
+                                           npz.geometry_signature(comp), beam_fp):
                 plan[base] = ("geometry", "reuse",
                               "its full-order results from an earlier solve")
             else:
                 plan[base] = ("geometry", "compute",
-                              f"full-order solve, {cfg.get('nsamples')} samples")
+                              f"full-order solve, {cfg.get('nsamples')} samples{with_beam}")
         width = max(len(b) for b in plan)
+        # With a beam the parts are joined at the full-order level: an imported
+        # part's full-order results are used as they are ('reduce' only tells a
+        # later foms.reduce() to reduce them)
+        shown = {b: ('reuse' if b in beam_plan and a == 'reduce' else a,
+                     reason.replace("full-order results, no reduced model yet",
+                                    "its full-order results")
+                     if b in beam_plan else reason)
+                 for b, (_k, a, reason) in plan.items()}
         lines = ["Solve plan:"] + [
-            f"  {b:<{width}}  {kind:<20} {action:<9} {reason}"
-            for b, (kind, action, reason) in plan.items()]
+            f"  {b:<{width}}  {kind:<20} {shown[b][0]:<9} {shown[b][1]}"
+            for b, (kind, _a, _r) in plan.items()]
         pr.milestone("\n".join(lines))
         redo = [b for b, (_k, a, _r) in plan.items() if a == 'recompute']
         if redo and cfg.get('rerun') is not True and not is_interactive():
@@ -763,14 +889,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 "\n".join(lines) + f"\nImported part(s) {redo} need a full-order "
                 "solve in this project. Pass rerun=True to run it (non-interactive "
                 "session).")
-        return plan
+        return plan, beam_plan
 
     def _staged_section_fits(self, base: str, record: Optional[Dict], cfg: Dict,
-                             signature: Optional[str]) -> bool:
+                             signature: Optional[str], beam: Optional[str] = None) -> bool:
         """True if a live section staged earlier can be reused for ``cfg``.
 
         Same geometry (``signature``), same full-order solve settings, its
-        files still in the project, and no ``rerun=True``.
+        files still in the project, and no ``rerun=True``; with a beam
+        (``beam``: the fingerprint of the beams in the section's frame), solved
+        with the same beams.  Without a beam a section solved with one fits
+        (its port results do not depend on the beam).
         """
         from cavsim3d.solvers import netlist_persistence as npz
         return bool(
@@ -778,6 +907,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             and record.get('rom_template') is not None
             and signature is not None and record.get('signature') == signature
             and record.get('config') == npz.section_config(cfg)
+            and (beam is None or record.get('beam') == beam)
             and npz.has_staged_fom(Path(self._project_path), base))
 
     @staticmethod
@@ -903,11 +1033,101 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         pr.info(f"  netlist section '{base}': imported (copied) from {src}")
         return {"kind": "imported", "mode": "copy", "source": str(src)}
 
+    def _plan_imported_beam(self, base: str, comp, cfg: Dict, beam) -> Tuple[str, str]:
+        """``(action, reason)`` for the beams through an imported part: ``ok``
+        (its beam results for these beams and frequencies are there), ``beam``
+        (computed here from its stored port solutions) or ``recompute``."""
+        import json as _json
+        from cavsim3d.solvers import netlist_persistence as npz
+        src = Path(getattr(comp, 'project_path', comp))
+        if self._imported_tilde_fits(base, comp, beam, cfg):
+            return 'ok', "its beam results are there"
+        if not src.exists():
+            raise FileNotFoundError(
+                f"Imported part '{base}': its beam results are not here and its project "
+                f"is not at {src}, which they are computed from. Restore it, or point "
+                "the part at its new location.")
+        want = np.linspace(cfg['fmin'], cfg['fmax'], int(cfg['nsamples'])) * 1e9
+        conf = src / "fds" / "config.json"
+        c = _json.loads(conf.read_text()) if conf.exists() else {}
+        have = (np.linspace(float(c['fmin']), float(c['fmax']), int(c['nsamples'])) * 1e9
+                if all(c.get(k) is not None for k in ('fmin', 'fmax', 'nsamples')) else None)
+        if have is None or len(have) != len(want) or not np.allclose(have, want, rtol=1e-9,
+                                                                       atol=0):
+            return 'recompute', ("its full-order samples are not the requested ones "
+                                 "(parts are joined with the beam at their samples)")
+        if not npz.has_field_snapshots(src):
+            return 'recompute', "its port solutions were not stored (the beam needs them)"
+        return 'beam', "beam columns computed here from its port solutions"
+
+    def _imported_tilde_fits(self, base: str, comp, beam, cfg: Dict) -> bool:
+        """True if the beam results of an imported part answer the request: the
+        S~ in this project's flat tree (computed here, or copied with the part)
+        or, for a part referenced in place, its own -- for these beams and the
+        requested frequencies."""
+        from cavsim3d.solvers import beam as bm
+        from cavsim3d.solvers import netlist_persistence as npz
+        want = np.linspace(cfg['fmin'], cfg['fmax'], int(cfg['nsamples'])) * 1e9
+        fp = beam.fingerprint()
+
+        def fits(path) -> bool:
+            t = bm.load_tilde(path) if path is not None else None
+            return bool(t is not None and t['fingerprint'] == fp
+                        and t.get('zref') is not None and t.get('port_modes') is not None
+                        and t.get('ports') and len(t['frequencies']) == len(want)
+                        and np.allclose(t['frequencies'], want, rtol=1e-9, atol=0))
+
+        root = Path(self._project_path)
+        if fits(root / "fds" / "foms" / "s_tilde" / f"s_tilde_{base}.h5"):
+            return True
+        src = Path(getattr(comp, 'project_path', comp))
+        return (getattr(comp, 'mode', 'copy') == 'reference' and src.exists()
+                and fits(npz.source_tilde_file(src)))
+
+    def _import_section_beam(self, base: str, src: Path, beam, cfg: Dict,
+                             project_root: Path) -> None:
+        """Beam columns of an imported part, computed into this project.
+
+        The part's project is opened read-only (every write goes to a scratch
+        folder): A(w) is factorised again per sample for the beams' right-hand
+        sides, h_Z comes from its stored port solutions.  The results go into
+        this project's flat tree under the section's name.
+        """
+        import tempfile as _tf
+        from cavsim3d.core.em_project import EMProject
+        from cavsim3d.solvers import netlist_persistence as npz
+        from cavsim3d.solvers.results import _save_beam_files
+        src = Path(src)
+        work = Path(_tf.mkdtemp(prefix="cavsim3d_beam_"))
+        try:
+            proj = EMProject(name=src.name, base_dir=str(src.parent), _read_only=True,
+                             _announce=False)
+            fds = proj.fds
+            fds._project_path = str(work)          # all writes go to the scratch folder
+            fds._project_ref = None
+            fds.beam_setup = beam
+            fds._checkpoint_dir = Path(project_root) / "fds" / "checkpoint" / "sections" / base
+            pr.milestone(f"Section '{base}': beam columns")
+            fds._solve_beam_only(cfg.get('store_snapshots', True),
+                                 cfg.get('solver_type', 'auto'),
+                                 fds._merge_iterative_opts(cfg.get('iterative_opts')),
+                                 True, persist=False)
+            if len(fds._beam_tilde) != 1:
+                raise ValueError(f"Imported part '{base}' ({src}) is a multi-solid project: "
+                                 "import its solids one by one.")
+            key, tilde = next(iter(fds._beam_tilde.items()))
+            npz.remove_section_beam_files(project_root, base)
+            _save_beam_files(Path(project_root) / "fds" / "foms", base, tilde, fds, key)
+        finally:
+            npz.remove_scratch(work)
+
     @staticmethod
-    def _run_section_fom(base: str, comp, cfg: Dict, project_root: Path) -> Dict:
+    def _run_section_fom(base: str, comp, cfg: Dict, project_root: Path,
+                         beam=None) -> Dict:
         """Compute a LIVE section's FOM in a throwaway scratch project, stage its
         files into this project and delete the scratch (also when the solve
-        fails).  Returns the section's record: what reducing it later needs
+        fails).  ``beam``: the beams in the section's frame (or None).
+        Returns the section's record: what reducing it later needs
         (see ``netlist_persistence.section_record``)."""
         import tempfile as _tf
         from cavsim3d.core.em_project import EMProject
@@ -917,11 +1137,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             sub = EMProject(name=base, base_dir=str(work), overwrite=True,
                             _announce=False)
             sub.geometry = comp
+            if beam is not None:
+                if sub.main_axis != beam.axis:
+                    sub.main_axis = beam.axis
+                sub._beam = beam
             # the section's samples live in THIS project, so an interrupted
             # netlist solve resumes the section instead of starting it over
             sub.fds._checkpoint_dir = (Path(project_root) / "fds" / "checkpoint"
                                        / "sections" / base)
-            pr.milestone(f"Section '{base}': full-order solve")
+            pr.milestone(f"Section '{base}': full-order solve"
+                         + (" with the beam" if beam is not None else ""))
             sub.fds.solve(config=dict(cfg))
             sub.save()
             npz.stage_fom(work / base, base, project_root)
@@ -968,6 +1193,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     #: curve order below which a beam on curved walls is warned about
     BEAM_MIN_CURVE_ORDER = 4
+
+    def _beam_mesh_kwargs(self) -> Dict:
+        """``generate_mesh`` arguments for a mesh made by the solver: curve
+        order 4 while a beam is defined."""
+        if self.beam_setup is None:
+            return {}
+        from cavsim3d.solvers.beam import BEAM_CURVE_ORDER
+        return {'curve_order': BEAM_CURVE_ORDER}
 
     def _warn_beam_curving(self) -> None:
         """Warn (once per mesh) if a beam is solved on curved walls that the mesh
@@ -2148,7 +2381,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             # generate_mesh() was never called.
             pr.milestone(f"No mesh yet: meshing {type(geo).__name__} with maxh={geo.maxh} m "
                          "(call generate_mesh() before solving to choose the mesh).")
-            geo.generate_mesh()
+            geo.generate_mesh(**self._beam_mesh_kwargs())
         if self.mesh is None and self.geometry and self.geometry.mesh:
             self.mesh = self.geometry.mesh
             # Sync back to the project for consistency and auto-save.
@@ -2248,10 +2481,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # never recomputed).  Continue with fds.foms.reduce(tol).concatenate().
         asm_netlist = self._netlist_assembly()
         if asm_netlist is not None:
-            if self.beam_setup is not None:
-                pr.warning("The beam is not solved for coupled parts (imported or repeated) "
-                           "yet: only the port results are. Glue the parts, or solve them "
-                           "as one model, for beam results.")
             cfg['fmin'], cfg['fmax'], cfg['nsamples'] = fmin, fmax, nsamples
             return self._solve_netlist(asm_netlist, cfg)
 
@@ -3571,12 +3800,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         return len(self._domain_port_mode_order(key))
 
     def _solve_beam_only(self, store_snapshots: bool, solver_type: str, iter_opts: Dict,
-                         compute_s_params: bool) -> Dict:
+                         compute_s_params: bool, persist: bool = True) -> Optional[Dict]:
         """Add the beam columns to stored port results.
 
         A(w) is assembled and factorised (or preconditioned) again per
         sample for the beam's right-hand sides; h_Z comes from the stored port
         solutions.  The port results themselves are not touched.
+        ``persist=False`` (an imported part, opened read-only): only compute;
+        the caller saves the beam results where they belong.
         """
         self._sync_and_validate_mesh()
         pr.milestone("Beam added to solved port results: solving the beam columns only "
@@ -3590,6 +3821,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                                        iter_opts=iter_opts, beam_only=True)
         self._compute_beam_tilde(compute_s_params)
         self._beam_fingerprint = self.beam_setup.fingerprint()
+        if not persist:
+            return None
         # the result objects in memory get the beam (their ROMs stay)
         if self._fom_cache is not None:
             self._fom_cache._beam = self._beam_tilde.get(self._fom_cache.domain)
@@ -3644,6 +3877,21 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             return ["the beam definition changed"]
         return []
 
+    def _port_join_records(self, ports: List[str]):
+        """``(positions, fingerprints)`` of ``ports``: what joining this model to
+        another through them needs (the faces' centres and outward normals, and
+        the identity of each mode), as JSON-able dicts."""
+        from cavsim3d.rom.reduction import _port_geometry_record, _port_impedance_record
+        ps = self.port_solver
+        if ps is None or not ports:
+            return None, None
+        try:
+            positions = _port_geometry_record(ps, ports)
+            _imp, fingerprints = _port_impedance_record(ps, ports)
+        except Exception:
+            return None, None
+        return positions or None, fingerprints or None
+
     def _compute_beam_tilde(self, compute_s_params: bool) -> None:
         """Generalised matrices of every system solved with a beam.
 
@@ -3670,9 +3918,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     hZ = hZ * d[None, None, :]
                 Zt = bm.z_tilde(Z, kZ, hZ, zoc)
                 St = None
+                zref = None
                 if compute_s_params:
                     Zref = np.array([self._get_impedance_matrix(f) for f in self.frequencies])
                     St = bm.s_tilde(Z, kZ, hZ, zoc, Zref)
+                    zref = np.array([np.diag(z) for z in Zref])
+                port_modes = ([(str(p), int(m)) for p, m in self._port_mode_order]
+                              if self._port_mode_order and len(self._port_mode_order) == n
+                              else None)
             else:
                 order = self._domain_port_mode_order(key)
                 Z = self._domain_dict_to_matrix(key, self._Z_per_domain[key])
@@ -3681,6 +3934,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 # S~ uses the line reference of TEM ports, as the per-domain S
                 Zt = bm.z_tilde(Z, kZ, hZ, zoc)
                 St = None
+                zref = None
+                port_modes = [(str(pn), int(m)) for (_pi, pn, m) in order]
                 if compute_s_params:
                     scale = np.ones(len(order))
                     for ri, (_pi, pn, m) in enumerate(order):
@@ -3695,14 +3950,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                                      for f in self.frequencies])
                     St = bm.s_tilde(Zs, d[None, :, None] * kZ, hZ * d[None, None, :], zoc,
                                     Zref)
+                    zref = np.array([np.diag(z) for z in Zref])
             rows, cols = bm.matrix_labels(labels, setup)
             system = self._beam_systems.get(key)
+            ports = list(dict.fromkeys(p for p, _m in (port_modes or [])))
+            port_records, fingerprints = self._port_join_records(ports)
             self._beam_tilde[key] = {
                 'Z_tilde': Zt, 'S_tilde': St, 'rows': rows, 'cols': cols,
                 'frequencies': np.asarray(self.frequencies).copy(),
                 'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
                 'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
                 'summary': system.summary() if system is not None else raw.get('summary'),
+                'port_modes': port_modes, 'zref': zref,
+                'ports': port_records, 'fingerprints': fingerprints,
             }
             if n_f and not np.all(np.isfinite(Zt)):
                 pr.warning(f"  Beam ({key}): the generalised matrix has non-finite entries.")

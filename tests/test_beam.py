@@ -10,11 +10,17 @@ Validates:
   - a lossy slab: Re Z_par (open ports, below cutoff) is the absorbed power
   - two glued parts: their S~ joined at the cut (foms.concatenate) matches the
     model solved in one piece
+  - coupled parts (a part repeated, or imported): each solved once with the beam
+    in its own frame and joined through S~ with the phase of its position, match
+    the model solved in one piece; an imported part gets its beam columns
+    computed in the importing project, its own project is never written
   - the beam definition: positions, labels, names; a beam leaving through a wall
   - an interrupted sweep with a beam resumes; a changed beam starts it afresh
 """
 
+import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -136,6 +142,44 @@ class NarrowingGuide(BaseGeometry):
         self.bc = 'default'
 
 
+class CellChain(BaseGeometry):
+    """``n`` cells along z, 200 mm each: a 70 x 50 x 40 mm box between two
+    60 x 40 mm pipes of 80 mm (one solid)."""
+
+    def __init__(self, n=1, maxh=0.014):
+        super().__init__()
+        self.n = n
+        self.build()
+        self.generate_mesh(maxh=maxh)
+
+    def build(self):
+        lp, L = 0.08, 0.2
+        shape = None
+        for i in range(self.n):
+            z0 = i * L
+            cell = (Box(Pnt(0.005, 0.005, z0), Pnt(0.065, 0.045, z0 + lp))
+                    + Box(Pnt(0.0, 0.0, z0 + lp), Pnt(0.07, 0.05, z0 + lp + 0.04))
+                    + Box(Pnt(0.005, 0.005, z0 + lp + 0.04), Pnt(0.065, 0.045, z0 + L)))
+            shape = cell if shape is None else shape + cell
+        shape.mat('vacuum')
+        self.geo = shape
+        _name_faces(self.geo, [(0.0, 'port1'), (self.n * L, 'port2')])
+        self.bc = 'default'
+
+
+CELL_CFG = dict(fmin=2.6, fmax=3.4, nsamples=3, nportmodes=1, order=3, solver_type="direct")
+CELL_BEAM = dict(x=0.035, y=0.03)        # 5 mm off the pipe's centre
+
+
+def _tree_hash(root) -> str:
+    h = hashlib.sha1()
+    for f in sorted(Path(root).rglob('*')):
+        if f.is_file():
+            h.update(str(f.relative_to(root)).encode())
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+
 def _guide(tmp_path, name, beam=True, **guide):
     p = EMProject(name=name, base_dir=str(tmp_path), overwrite=True)
     p.create_primitive("rwg", name="guide", **dict(GUIDE, maxh=0.025, **guide))
@@ -244,6 +288,88 @@ def test_glued_parts_joined_match_one_piece(tmp_path):
     # the join is restored when the project is reopened
     pc = EMProject(name="parts", base_dir=str(tmp_path))
     np.testing.assert_allclose(pc.fds.foms.concat.s_tilde, joined.s_tilde, rtol=1e-10)
+
+
+def test_coupled_copies_join_like_one_piece(tmp_path):
+    """A part repeated (n=2) is solved once, with the beam in its own frame; the
+    copies are joined through S~ with the phase of their position along the
+    axis.  The joined S~ matches the two cells solved as one piece."""
+    one = EMProject(name="one", base_dir=str(tmp_path), overwrite=True)
+    one.geometry = CellChain(n=2)
+    one.add_beam('beam', **CELL_BEAM)
+    one.fds.solve(**CELL_CFG)
+    ref = one.fds.fom.s_tilde
+
+    chain = EMProject(name="chain", base_dir=str(tmp_path), overwrite=True)
+    chain.add("cell", CellChain(n=1), n=2)
+    chain.add_beam('beam', **CELL_BEAM)
+    chain.fds.solve(**CELL_CFG)
+    joined = chain.fds.foms.concatenate()
+    St = joined.s_tilde
+    assert St.shape == ref.shape == (3, 3, 3)
+    assert joined.tilde_labels == (['1(1)', '2(1)', 'b(1)'], ['1(1)', '2(1)', 'b(1)'])
+    assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                     # measured 2.6e-3
+    assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=2e-2)            # z_b: 0.6 %
+    for block in (np.s_[:, :2, 2], np.s_[:, 2, :2]):                    # k and h: 1.5, 2.4 %
+        assert np.abs(St[block] - ref[block]).max() < 6e-2 * np.abs(ref[block]).max()
+    # the joined model is saved, and the parts' beam files are in the flat tree
+    root = tmp_path / "chain"
+    assert (root / "fds" / "foms" / "s_tilde" / "s_tilde_cell.h5").exists()
+    assert (root / "fds" / "foms" / "concat" / "s_tilde" / "s_tilde.h5").exists()
+    with pytest.raises(RuntimeError, match="full-order"):
+        joined.solve(fmin=2.6, fmax=3.4, nsamples=5)
+
+
+def test_imported_part_gets_its_beam_columns_here(tmp_path):
+    """A part imported from a project solved without a beam: its beam columns are
+    computed in the importing project from its stored port solutions; the
+    source is never written.  Reference and copy imports give the same join as
+    the part solved here, also after reopening."""
+    src = EMProject(name="cell", base_dir=str(tmp_path), overwrite=True)
+    src.geometry = CellChain(n=1)
+    src.fds.solve(**CELL_CFG)
+    before = _tree_hash(tmp_path / "cell")
+
+    live = EMProject(name="live", base_dir=str(tmp_path), overwrite=True)
+    live.add("cell", CellChain(n=1), n=2)
+    live.add_beam('beam', **CELL_BEAM)
+    live.fds.solve(**CELL_CFG)
+    expected = live.fds.foms.concatenate().s_tilde
+
+    for mode in ('reference', 'copy'):
+        p = EMProject(name=f"imp_{mode}", base_dir=str(tmp_path), overwrite=True)
+        p.import_project(tmp_path / "cell", name="cell", n=2, mode=mode)
+        p.add_beam('beam', **CELL_BEAM)
+        p.fds.solve(**CELL_CFG)
+        assert np.abs(p.fds.foms.concatenate().s_tilde - expected).max() < 1e-9
+        assert (tmp_path / f"imp_{mode}" / "fds" / "foms" / "s_tilde" / "s_tilde_cell.h5").exists()
+        assert _tree_hash(tmp_path / "cell") == before
+        reopened = EMProject(name=f"imp_{mode}", base_dir=str(tmp_path))
+        assert np.abs(reopened.fds.foms.concat.s_tilde - expected).max() < 1e-9
+
+
+def test_coupled_beam_removed_and_added_again(tmp_path):
+    """Without the beam the parts keep their port results and lose their beam
+    files; the join then needs the reduced models again."""
+    chain = EMProject(name="chain", base_dir=str(tmp_path), overwrite=True)
+    chain.add("cell", CellChain(n=1), n=2)
+    chain.add_beam('beam', **CELL_BEAM)
+    chain.fds.solve(**CELL_CFG)
+    first = chain.fds.foms.concatenate().s_tilde
+    root = tmp_path / "chain"
+    s_before = (root / "fds" / "foms" / "s" / "s_cell.h5").read_bytes()
+
+    chain.remove_beam('beam')
+    chain.fds.solve(**CELL_CFG)
+    assert not list((root / "fds" / "foms").rglob("*tilde*.h5"))
+    assert not (root / "fds" / "foms" / "concat").exists()
+    assert (root / "fds" / "foms" / "s" / "s_cell.h5").read_bytes() == s_before
+    with pytest.raises(NotImplementedError, match="Reduce first"):
+        chain.fds.foms.concatenate()
+
+    chain.add_beam('beam', **CELL_BEAM)
+    chain.fds.solve(**CELL_CFG)
+    assert np.abs(chain.fds.foms.concatenate().s_tilde - first).max() < 1e-9
 
 
 def test_side_port_the_beam_does_not_cross(tmp_path):
@@ -377,6 +503,20 @@ def test_beam_leaving_through_a_wall(tmp_path):
     p.add_beam('beam', x=0.075, y=0.025)                # misses the narrow half
     with pytest.raises(ValueError, match="through a wall"):
         p.fds.solve(**dict(CFG, nsamples=1))
+
+
+def test_mesh_curve_order_with_a_beam(tmp_path):
+    """With a beam, generate_mesh() curves to order 4 unless told otherwise."""
+    p = EMProject(name="curving", base_dir=str(tmp_path), overwrite=True)
+    p.create_primitive('pillbox', name='cav', n_cells=1, dims=[100, 100, 30, 0, 100],
+                       beampipe='both')
+    p.generate_mesh(maxh=0.06)
+    assert p.geometry.curve_order == 3
+    p.add_beam('beam')
+    p.generate_mesh(maxh=0.06, force=True)
+    assert p.geometry.curve_order == 4
+    p.generate_mesh(maxh=0.06, curve_order=2, force=True)
+    assert p.geometry.curve_order == 2
 
 
 def test_setup_round_trip():

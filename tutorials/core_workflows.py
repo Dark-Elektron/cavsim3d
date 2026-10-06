@@ -9,8 +9,9 @@ is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
 Last updated: 2026-10-06 (beam excitation: proj.add_beam(), fom.s_tilde,
 a beam added to a solved project, the parts' S~ joined by foms.concatenate()
--- section 6; solve(solver_type='auto') is the default).  What changed:
-CHANGELOG.md.
+-- also coupled parts, repeated or imported (6d); generate_mesh() curves to
+order 4 when a beam is defined -- section 6; solve(solver_type='auto') is the
+default).  What changed: CHANGELOG.md.
 =============================================================================
 
 Operation philosophy
@@ -529,8 +530,10 @@ banner("6. Beam: proj.add_beam() -> fom.s_tilde, fom.beam_impedance()")
 # The solver carries the scattered field E_s = E - E_free (the beam's own field
 # E_free is known in closed form): one factorisation per sample serves ports
 # and beams, the beam line need not be part of the mesh, and without a beam
-# every port result is bit-identical.  Curved walls: generate_mesh(curve_order=4)
-# (the beam impedance is sensitive to the wall's facets; the solve warns).
+# every port result is bit-identical.  Curved walls: with a beam defined,
+# generate_mesh() curves the mesh to order 4 unless curve_order= is given (the
+# beam impedance is sensitive to the wall's facets; a solve on a mesh curved
+# to a lower order warns).
 # Materials off the beam line (dielectric, lossy) are fine; the beam itself
 # must run in vacuum and enter and leave through port faces across the axis.
 from netgen.occ import Glue
@@ -602,6 +605,53 @@ joined6 = proj6p.fds.foms.concatenate()
 rel = np.abs(joined6.beam_impedance() - fom6.beam_impedance()) / np.abs(fom6.beam_impedance())
 print(f"   parts joined vs one piece: Z_par differs by {rel.max():.1%} "
       f"(the modes carried at the cut, and the two meshes' solutions)")
+
+# 6d. COUPLED parts (a part repeated with n=..., or an imported project): each
+# unique part is solved once, with the beams where they run through it, in its
+# own frame.  The beams are given in the first part's frame; every next part
+# sits with its joined face centred on the face it joins.  fds.foms.concatenate()
+# joins the copies through their S~, each with the phase of its position along
+# the axis (exp(-j k z) on its beam columns, exp(+j k z) on its path rows).  An
+# imported part solved without a beam gets its beam columns computed HERE from
+# its stored port solutions (its project is read, never written); its samples
+# must be the requested ones, or it is solved again here (rerun=True).
+# Reduced models do not carry the beam yet: roms.concatenate() warns.
+
+
+class Cell(BaseGeometry):
+    """A 70 x 50 x 40 mm box between two 60 x 40 mm pipes of 80 mm, along z."""
+
+    def build(self):
+        def pipe(z0):
+            return Box(Pnt(0.005, 0.005, z0), Pnt(0.065, 0.045, z0 + 0.08))
+        self.geo = pipe(0.0) + Box(Pnt(0, 0, 0.08), Pnt(0.07, 0.05, 0.12)) + pipe(0.12)
+        self.geo.mat("vacuum")
+        for f in self.geo.faces:
+            lo, hi = f.bounding_box
+            across = hi.z - lo.z < 1e-6
+            f.name = ({0.0: "port1", 0.2: "port2"}.get(round(lo.z, 6), "default")
+                      if across else "default")
+        self.bc = "default"
+
+
+CELL_CFG = dict(fmin=2.6, fmax=3.4, nsamples=3, nportmodes=1, order=3, solver_type="direct")
+proj6c = EMProject(name="beam_cells", base_dir=str(WORK), overwrite=True)
+proj6c.add("cell", Cell(), n=2)                    # repeated: coupled through port modes
+proj6c.generate_mesh(maxh=0.014)
+proj6c.add_beam("beam", x=0.035, y=0.03)           # 5 mm off the pipe's centre
+proj6c.fds.solve(config=CELL_CFG)                  # the cell once, with the beam
+chain6 = proj6c.fds.foms.concatenate()             # the copies joined through S~
+proj6w = EMProject(name="beam_cells_whole", base_dir=str(WORK), overwrite=True)
+proj6w.add("c1", Cell())
+proj6w.add("c2", Cell())                           # each once: glued, one mesh
+proj6w.generate_mesh(maxh=0.014)
+proj6w.add_beam("beam", x=0.035, y=0.03)
+proj6w.fds.solve(config=dict(CELL_CFG, per_domain=False))   # in one piece
+z_whole = proj6w.fds.fom.beam_impedance()
+rel = np.abs(chain6.beam_impedance() - z_whole) / np.abs(z_whole)
+print(f"   two copies joined vs one piece: Z_par differs by {rel.max():.1%}")
+#   proj.import_project(path, name="cell", n=2) instead of proj.add(...): the
+#   solve plan says "beam columns computed here from its port solutions".
 
 print(f"All tutorial artifacts under: {WORK}")
 banner("DONE")

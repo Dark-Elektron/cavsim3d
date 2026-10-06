@@ -30,11 +30,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-from ngsolve import (BND, VOL, BilinearForm, CoefficientFunction, Cross, ElementId,
+from ngsolve import (BND, VOL, BilinearForm, CoefficientFunction, Cross,
                      GridFunction, H1, InnerProduct, Integrate, LinearForm, TaskManager,
                      cos, ds, dx, exp, grad, log, sin, specialcf, x, y, z)
 
 from cavsim3d.core.constants import c0, eps0, mu0
+from cavsim3d.utils.mesh_geometry import line_crossings, line_intervals, surface_triangles
 from cavsim3d.utils.names import region_pattern
 
 AXES = ('X', 'Y', 'Z')
@@ -42,6 +43,10 @@ _COORDS = (x, y, z)
 
 #: version of the stored beam data; a change makes old beam results stale
 BEAM_DATA_VERSION = 1
+
+#: curve order of a mesh generated while a beam is defined: the beam impedance
+#: is sensitive to how closely the mesh follows curved walls
+BEAM_CURVE_ORDER = 4
 
 
 def axis_index(axis: str) -> int:
@@ -154,6 +159,26 @@ class BeamSetup:
         payload = dict(self.to_dict(), version=BEAM_DATA_VERSION)
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
+    def shifted(self, shift) -> "BeamSetup":
+        """The same lines seen from a frame whose origin sits at ``shift``
+        (a part placed there): the transverse positions minus the shift's,
+        to 1 pm, so equal placements give equal fingerprints."""
+        a = axis_index(self.axis)
+        lines = [BeamLine(l.name, tuple(0.0 if i == a else
+                                        round(l.point[i] - float(shift[i]), 12) + 0.0
+                                        for i in range(3)), l.beta, l.current)
+                 for l in self._lines]
+        return BeamSetup(self.axis, lines)
+
+    def same_lines(self, other: "BeamSetup", tol: float = 1e-9) -> bool:
+        """True if ``other`` has the same lines (names, kinds, beta) at the
+        same positions, to ``tol`` metres."""
+        if self.axis != other.axis or len(self._lines) != len(other._lines):
+            return False
+        return all(l.name == m.name and l.current == m.current and l.beta == m.beta
+                   and np.allclose(l.point, m.point, rtol=0, atol=tol)
+                   for l, m in zip(self._lines, other._lines))
+
     def __repr__(self) -> str:
         parts = []
         for l, lab in zip(self.paths, self.path_labels):
@@ -200,31 +225,10 @@ def _locate(mesh, point, a: int, s: np.ndarray, vorb=VOL) -> np.ndarray:
     return mesh(coords[0], coords[1], coords[2], vorb)['nr']
 
 
-def line_pieces(mesh, point, a: int, element_ok: Optional[np.ndarray] = None,
-                snap: Sequence[float] = (), n_samples: Optional[int] = None,
-                tol: float = 1e-11, snap_tol: float = 1e-4):
-    """Break points of the line through ``point`` along axis ``a`` where it
-    changes element, and per piece whether it lies in the mesh (and in an
-    element with ``element_ok[nr]``).
-
-    Element changes are found by point location -- any element type, curved
-    or not -- and refined by bisection to ``tol`` (relative to the model's
-    length); several changes between two samples are all found.  Point
-    location on curved elements accepts points slightly outside an element,
-    so a break within ``snap_tol`` (relative) of a plane in ``snap`` (the
-    port faces across the axis) is moved onto it.  Returns ``(breaks, inside)``.
-    """
-    coords = np.asarray(mesh.ngmesh.Coordinates())
-    lo, hi = float(coords[:, a].min()), float(coords[:, a].max())
-    span = hi - lo
-    if n_samples is None:
-        # about 20 samples per typical element length
-        box = np.maximum(np.ptp(coords, axis=0), 1e-12 * max(span, 1e-12))
-        h = (float(np.prod(box)) / max(mesh.ne, 1)) ** (1.0 / 3.0)
-        n_samples = int(min(2_000_001, max(20_001, 20 * span / max(h, 1e-300))))
-    # samples strictly inside the end planes (a point on the boundary or just
-    # outside a curved mesh is not located reliably)
-    s = np.linspace(lo + 1e-9 * span, hi - 1e-9 * span, n_samples)
+def _element_changes(mesh, point, a: int, s: np.ndarray, tol: float) -> np.ndarray:
+    """Where the line changes element between the samples ``s`` (all inside
+    the mesh), by bisection to ``tol``; several changes between two samples
+    are all found."""
     nr = _locate(mesh, point, a, s)
     change = np.nonzero(nr[1:] != nr[:-1])[0]
     pend_lo, pend_hi = s[change].copy(), s[change + 1].copy()
@@ -235,7 +239,7 @@ def line_pieces(mesh, point, a: int, element_ok: Optional[np.ndarray] = None,
             break
         s_lo, s_hi = pend_lo.copy(), pend_hi.copy()
         for _ in range(80):
-            if np.all(s_hi - s_lo <= tol * span):
+            if np.all(s_hi - s_lo <= tol):
                 break
             mid = 0.5 * (s_lo + s_hi)
             same = _locate(mesh, point, a, mid) == e_lo
@@ -246,16 +250,79 @@ def line_pieces(mesh, point, a: int, element_ok: Optional[np.ndarray] = None,
         more = e_after != e_hi
         pend_lo, pend_hi = s_hi[more], pend_hi[more]
         e_lo, e_hi = e_after[more], e_hi[more]
-    breaks = np.concatenate([[lo]] + found + [[hi]])
-    for plane in snap:
-        breaks[np.abs(breaks - plane) <= snap_tol * span] = plane
-    breaks = np.unique(breaks)
-    mids = 0.5 * (breaks[:-1] + breaks[1:])
-    nr_mid = _locate(mesh, point, a, mids)
-    inside = nr_mid >= 0
-    if element_ok is not None:
-        inside &= np.where(nr_mid >= 0, element_ok[np.maximum(nr_mid, 0)], False)
-    return breaks, inside
+    return np.concatenate(found) if found else np.zeros(0)
+
+
+def _perpendicular_crossings(mesh, point, a: int) -> List[float]:
+    """Axis coordinates where the line crosses a face lying across the axis
+    (exact on the straight triangles: such a face stays plane when curved)."""
+    tris, _ = surface_triangles(mesh)
+    s, idx = line_crossings(tris, point, a)
+    if not len(s):
+        return []
+    t = tris[idx]
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    across = np.abs(n[:, a]) >= (1 - 1e-9) * np.linalg.norm(n, axis=1)
+    return sorted(set(np.round(s[across], 15).tolist()))
+
+
+def line_pieces(mesh, point, a: int, domains: Optional[Sequence[int]] = None,
+                snap: Sequence[float] = (), n_samples: Optional[int] = None,
+                tol: float = 1e-11, snap_tol: float = 1e-4):
+    """Break points of the line through ``point`` along axis ``a`` where it
+    changes element, and per piece whether it lies in the region (the mesh,
+    or its ``domains``, 1-based).
+
+    The stretches in the region come from the line's crossings with the
+    region's boundary (:func:`line_intervals`), so no point outside the mesh
+    is located (NGSolve's point search can crash there on a curved mesh).
+    Inside them, element changes are found by point location -- any element
+    type, curved or not -- and refined by bisection to ``tol`` (relative to
+    the model's length).  Point location on curved elements accepts points
+    slightly outside an element, so a break within ``snap_tol`` (relative) of
+    a plane in ``snap`` or of a face across the axis is moved onto it.
+    Returns ``(breaks, inside, ends)``: ``ends`` the boundary names where
+    each stretch begins and ends.
+    """
+    coords = np.asarray(mesh.ngmesh.Coordinates())
+    lo, hi = float(coords[:, a].min()), float(coords[:, a].max())
+    span = hi - lo
+    if n_samples is None:
+        # about 20 samples per typical element length
+        box = np.maximum(np.ptp(coords, axis=0), 1e-12 * max(span, 1e-12))
+        h = (float(np.prod(box)) / max(mesh.ne, 1)) ** (1.0 / 3.0)
+        n_samples = int(min(2_000_001, max(20_001, 20 * span / max(h, 1e-300))))
+    stretches = line_intervals(mesh, point, a, domains)
+    if not stretches:
+        return np.array([lo, hi]), np.array([False]), []
+    planes = np.array(list(snap) + _perpendicular_crossings(mesh, point, a))
+    index = np.asarray(mesh.ngmesh.Elements3D().NumPy()['index'])
+    in_region = None
+    if domains is not None:
+        in_region = np.zeros(int(index.max()) + 1, dtype=bool)
+        in_region[[d for d in domains if 0 < d < len(in_region)]] = True
+    breaks: List[float] = []
+    inside: List[bool] = []
+    for s0, s1, _, _ in stretches:
+        # samples strictly inside the stretch
+        d = min(1e-9 * span, 0.25 * (s1 - s0))
+        n = max(3, int(n_samples * (s1 - s0) / span) + 1)
+        found = _element_changes(mesh, point, a, np.linspace(s0 + d, s1 - d, n), tol * span)
+        for plane in planes:
+            found[np.abs(found - plane) <= snap_tol * span] = plane
+        b = np.unique(np.concatenate([[s0], found[(found > s0) & (found < s1)], [s1]]))
+        nr = _locate(mesh, point, a, 0.5 * (b[:-1] + b[1:]))
+        ok = nr >= 0
+        if in_region is not None:
+            ok &= in_region[index[np.maximum(nr, 0)]]
+        if breaks and b[0] > breaks[-1]:
+            inside.append(False)              # a stretch outside the region
+        elif breaks:
+            b = b[1:]
+        breaks.extend(b.tolist())
+        inside.extend(ok.tolist())
+    ends = [(f_in, f_out) for _, _, f_in, f_out in stretches]
+    return np.array(breaks), np.array(inside, dtype=bool), ends
 
 
 def gauss_points(breaks: np.ndarray, inside: np.ndarray, n_gauss: int):
@@ -365,10 +432,8 @@ class BeamSystem:
             self.system_mats = set(mats)
         else:
             self.system_mats = set(region_materials)
-        # element -> in this system?
-        index = np.asarray(self.mesh.ngmesh.Elements3D().NumPy()['index']) - 1
-        in_system = np.array([mats[i] in self.system_mats for i in range(len(mats))])
-        self.element_ok = in_system[index]
+        # the system's domains (1-based)
+        self.domains = [i + 1 for i, m in enumerate(mats) if m in self.system_mats]
 
         # the contrast load: materials of the system that are not vacuum
         self.contrast = {m: materials[m] for m in self.system_mats
@@ -380,8 +445,8 @@ class BeamSystem:
 
         self.paths: List[PathData] = []
         for line in setup.paths:
-            breaks, inside = line_pieces(self.mesh, line.point, self.a, self.element_ok,
-                                         snap=planes)
+            breaks, inside, _ = line_pieces(self.mesh, line.point, self.a, self.domains,
+                                            snap=planes)
             s, w = gauss_points(breaks, inside, self.n_gauss)
             pts = np.zeros((len(s), 3))
             for i in range(3):
@@ -423,7 +488,7 @@ class BeamSystem:
         normal = unit * sign
         crossed = []
         for line in self.setup.sources:
-            crossed.append(perpendicular and self._line_hits_face(line, centre[self.a], region))
+            crossed.append(perpendicular and self._line_hits_face(line, region))
         face = FaceData(port=port, region=region, columns=list(cols), normal=normal,
                         s_face=float(centre[self.a]), perpendicular=perpendicular,
                         crossed=crossed, sign=sign)
@@ -473,14 +538,13 @@ class BeamSystem:
                 return -1.0
         return 1.0
 
-    def _line_hits_face(self, line: BeamLine, s_face: float, region: str) -> bool:
-        p = [line.point[i] if i != self.a else s_face for i in range(3)]
-        mp = self.mesh(np.array([p[0]]), np.array([p[1]]), np.array([p[2]]), BND)
-        nr = int(mp['nr'][0])
-        if nr < 0:
-            return False
-        name = self.mesh[ElementId(BND, nr)].mat
-        return name in region.replace('\\', '').split('|') or name == region
+    def _line_hits_face(self, line: BeamLine, region: str) -> bool:
+        """Does the beam's line cross the faces of ``region``?  (On the
+        straight triangles: a face across the axis stays plane when curved.)"""
+        names = set(region.replace('\\', '').split('|')) | {region}
+        tris, _ = surface_triangles(self.mesh, names=names)
+        s, _ = line_crossings(tris, line.point, self.a)
+        return len(s) > 0
 
     def _check_face_medium(self, fds, port: str, line: BeamLine) -> None:
         eps = getattr(fds.port_solver, 'port_media_eps', {}) or {}
@@ -739,6 +803,17 @@ def save_tilde(path, tilde: Dict, which: str) -> None:
         f.attrs["fingerprint"] = str(tilde.get('fingerprint', ''))
         f.attrs["summary"] = json.dumps(tilde.get('summary') or {}, default=float)
         f.attrs["version"] = BEAM_DATA_VERSION
+        # what joining this part to others needs: the (port, mode) of every
+        # port row, their reference impedances, the port positions and the
+        # identity of each mode
+        if tilde.get('port_modes') is not None:
+            f.attrs["port_modes"] = json.dumps([[str(p), int(m)] for p, m in tilde['port_modes']])
+        if tilde.get('ports') is not None:
+            f.attrs["ports"] = json.dumps(tilde['ports'], default=float)
+        if tilde.get('fingerprints') is not None:
+            f.attrs["mode_fingerprints"] = json.dumps(tilde['fingerprints'], default=float)
+        if which == 'S' and tilde.get('zref') is not None:
+            f.create_dataset("zref", data=H5Serializer.to_complex_h5(np.asarray(tilde['zref'])))
 
 
 def load_tilde(path) -> Optional[Dict]:
@@ -757,6 +832,12 @@ def load_tilde(path) -> Optional[Dict]:
             'setup': json.loads(f.attrs.get("setup", "{}")),
             'fingerprint': str(f.attrs.get("fingerprint", "")),
             'summary': json.loads(f.attrs.get("summary", "{}")),
+            'port_modes': ([(p, int(m)) for p, m in json.loads(f.attrs["port_modes"])]
+                           if "port_modes" in f.attrs else None),
+            'ports': json.loads(f.attrs["ports"]) if "ports" in f.attrs else None,
+            'fingerprints': (json.loads(f.attrs["mode_fingerprints"])
+                             if "mode_fingerprints" in f.attrs else None),
+            'zref': H5Serializer.load_dataset(f["zref"]) if "zref" in f else None,
         }
     return out
 
@@ -972,7 +1053,9 @@ class BeamResultMixin:
 # =============================================================================
 
 def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
-                 pairs: List[Tuple[int, int]], external: List[int]) -> np.ndarray:
+                 pairs: List[Tuple[int, int]], external: List[int],
+                 col_phase: Optional[List[np.ndarray]] = None,
+                 row_phase: Optional[List[np.ndarray]] = None) -> np.ndarray:
     """S~ of segments joined at their cuts (docs/theory/beam.md §9.9).
 
     ``blocks[d]``: S~ of segment d, (n_f, P_d + L, P_d + S); ``modes[d]``:
@@ -980,9 +1063,13 @@ def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
     port-mode indices joined at a cut (the wave leaving one face enters the
     other); ``external``: the global indices kept, in their order.
 
-    Every segment is solved with the beams' global phase (one coordinate for
-    the whole model), so each sees the same beam current and the beam
-    voltages of the segments add: d = (1, 1, ...) in §9.9.
+    A segment solved with the beams' global phase (one coordinate for the
+    whole model) sees the same beam current as the others, and the beam
+    voltages of the segments add: d = (1, 1, ...) in §9.9.  A segment solved
+    in its own frame, shifted by z_d along the axis, gets the phase of its
+    position: ``col_phase[d]`` (n_f, S) multiplies its beam columns
+    (exp(-j k_b z_d)) and ``row_phase[d]`` (n_f, L) its path rows
+    (exp(+j k_b z_d)).
     Returns S~ of the joined model, (n_f, len(external) + L, len(external) + S).
     """
     D = len(blocks)
@@ -1017,7 +1104,11 @@ def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
     for k in range(n_f):
         SR = np.zeros((N + D * L, N + D * S), dtype=complex)
         for d in range(D):
-            blk = blocks[d][k]
+            blk = np.array(blocks[d][k], dtype=complex)
+            if col_phase is not None and col_phase[d] is not None:
+                blk[:, P[d]:] *= col_phase[d][k][None, :]
+            if row_phase is not None and row_phase[d] is not None:
+                blk[P[d]:, :] *= row_phase[d][k][:, None]
             p = [pos[g] for g in modes[d]]
             SR[np.ix_(p, p)] = blk[:P[d], :P[d]]
             SR[np.ix_(p, range(N + d * S, N + (d + 1) * S))] = blk[:P[d], P[d]:]

@@ -51,6 +51,87 @@ ConnSigns = Tuple[float, float]  # (signA, signB) e.g. (+1,-1)
 _AXIS_IDX = {'X': 0, 'Y': 1, 'Z': 2}
 
 
+def netlist_instances(assembly) -> List[Tuple[str, str, str]]:
+    """``(instance, component key, section)`` of every copy of every part of a
+    coupled assembly, in chain order (repeat counts and sub-assemblies
+    expanded; the copies of a part ``key`` with ``n > 1`` are ``key_1``,
+    ``key_2``, ...)."""
+    instances = []
+
+    def _flatten(asm, prefix=""):
+        for key in asm._component_order:
+            entry = asm._components[key]
+            comp = entry.geometry
+            if entry.metadata.get("flip"):
+                raise NotImplementedError(
+                    f"'{key}' is flipped, but it is coupled through port modes "
+                    "(imported or repeated). flip is supported for parts glued "
+                    "into one mesh; a coupled part must be solved in the "
+                    "orientation it is used.")
+            n = int(entry.metadata.get("n", 1))
+            for i in range(n):
+                suffix = f"_{i + 1}" if n > 1 else ""
+                iname = f"{prefix}{key}{suffix}"
+                if isinstance(comp, type(asm)):
+                    _flatten(comp, prefix=iname + "/")
+                else:
+                    instances.append((iname, key, entry.base_name))
+
+    _flatten(assembly)
+    if not instances:
+        raise ValueError("Assembly contains no components.")
+    return instances
+
+
+def netlist_joins(assembly, structures, inst_keys: List[str],
+                  from_port: str = "port2", to_port: str = "port1") -> List[Conn]:
+    """``((i, port), (i + 1, port))``: how each copy joins the next.
+
+    Parts follow the list order along the main axis, so part i joins part
+    i+1 through the port of i that faces +axis and the port of i+1 that faces
+    -axis -- whatever those ports are called.  Ports named explicitly
+    (align_port) are used as given; without saved port positions the default
+    names (``from_port`` -> ``to_port``) apply.  ``structures[i]`` has the
+    ``ports`` and ``port_geometry`` (centres, outward normals) of copy i.
+    """
+    axis_idx = _AXIS_IDX.get(str(getattr(assembly, "main_axis", "Z")).upper(), 2)
+    conns = {(c.from_key, c.to_key): c for c in getattr(assembly, "_connections", [])}
+    connections = []
+    for i in range(len(structures) - 1):
+        c = conns.get((inst_keys[i], inst_keys[i + 1]))
+        if c is not None and c.explicit:
+            fp, tp = c.from_port, c.to_port
+        else:
+            fp = _facing_port(structures[i], axis_idx, +1)
+            tp = _facing_port(structures[i + 1], axis_idx, -1)
+            if fp is None or tp is None:
+                fp, tp = ((c.from_port, c.to_port) if c is not None
+                          else (from_port, to_port))
+        connections.append(((i, fp), (i + 1, tp)))
+    return connections
+
+
+def chain_placement(structures, connections: List[Conn]) -> List[np.ndarray]:
+    """Where each copy sits in the first one's frame: the translation that
+    puts the centres of the two faces of every join on each other.
+
+    ``structures[i].port_geometry[port]['center']`` are the face centres in
+    copy i's own frame; joins run from copy i to copy i + 1.
+    """
+    shift = [np.zeros(3)]
+    for (i, fp), (j, tp) in connections:
+        gi = (getattr(structures[i], 'port_geometry', None) or {}).get(fp)
+        gj = (getattr(structures[j], 'port_geometry', None) or {}).get(tp)
+        if not gi or not gj or gi.get('center') is None or gj.get('center') is None:
+            raise ValueError(
+                f"The positions of ports '{fp}' and '{tp}' are not known, so the parts "
+                "cannot be placed for the beam: solve the parts again.")
+        while len(shift) <= j:
+            shift.append(None)
+        shift[j] = shift[i] + np.asarray(gi['center'], float) - np.asarray(gj['center'], float)
+    return shift
+
+
 def _facing_port(struct, axis_idx: int, direction: int) -> Optional[str]:
     """Port of ``struct`` whose outward normal points along ``direction`` x axis.
 
@@ -306,31 +387,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         loaded, _ = load_reduced_structures(roms_dir)
         by_domain = {s.domain: s for s in loaded}
 
-        # ---- flatten the netlist into an ordered instance list --------------
-        instances = []          # (instance_name, component_key, base_name)
-
-        def _flatten(asm, prefix=""):
-            for key in asm._component_order:
-                entry = asm._components[key]
-                comp = entry.geometry
-                if entry.metadata.get("flip"):
-                    raise NotImplementedError(
-                        f"'{key}' is flipped, but it is coupled through port modes "
-                        "(imported or repeated). flip is supported for parts glued "
-                        "into one mesh; a coupled part must be solved in the "
-                        "orientation it is used.")
-                n = int(entry.metadata.get("n", 1))
-                for i in range(n):
-                    suffix = f"_{i + 1}" if n > 1 else ""
-                    iname = f"{prefix}{key}{suffix}"
-                    if isinstance(comp, type(asm)):
-                        _flatten(comp, prefix=iname + "/")
-                    else:
-                        instances.append((iname, key, entry.base_name))
-
-        _flatten(assembly)
-        if not instances:
-            raise ValueError("Assembly contains no components.")
+        instances = netlist_instances(assembly)
 
         def _instance_copy(s, domain):
             c = ReducedStructure(
@@ -359,27 +416,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             structures.append(_instance_copy(by_domain[base], iname))
             inst_keys.append(key)
 
-        # ---- consecutive connections ------------------------------------------
-        # Parts follow the list order along the main axis, so part i joins
-        # part i+1 through the port of i that faces +axis and the port of i+1
-        # that faces -axis -- whatever those ports are called.  Ports named
-        # explicitly (align_port) are used as given; without saved port
-        # positions the default names (port2 -> port1) apply.
-        axis_idx = _AXIS_IDX.get(str(getattr(assembly, "main_axis", "Z")).upper(), 2)
-        conns = {(c.from_key, c.to_key): c for c in getattr(assembly, "_connections", [])}
-        connections = []
-        for i in range(len(structures) - 1):
-            c = conns.get((inst_keys[i], inst_keys[i + 1]))
-            fp = tp = None
-            if c is not None and c.explicit:
-                fp, tp = c.from_port, c.to_port
-            else:
-                fp = _facing_port(structures[i], axis_idx, +1)
-                tp = _facing_port(structures[i + 1], axis_idx, -1)
-                if fp is None or tp is None:
-                    fp, tp = ((c.from_port, c.to_port) if c is not None
-                              else (from_port, to_port))
-            connections.append(((i, fp), (i + 1, tp)))
+        connections = netlist_joins(assembly, structures, inst_keys, from_port, to_port)
         _warn_unresolved_join_modes(structures, connections)
 
         concat = cls(structures=structures,
@@ -2385,15 +2422,19 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         coord = np.linspace(lo, hi, n_points)
         E_long = np.full(n_points, np.nan, dtype=complex)
         others = [i for i in range(3) if i != ax]
-        for k, c in enumerate(coord):
-            xyz = [0.0, 0.0, 0.0]
-            xyz[ax] = float(c)
-            xyz[others[0]], xyz[others[1]] = transverse
+        line = [0.0, 0.0, 0.0]
+        line[others[0]], line[others[1]] = transverse
+        # only points inside the mesh are located (outside -> NaN)
+        from cavsim3d.solvers.figures_of_merit import inside_samples
+        mask, s_eval = inside_samples(comp_mesh, ax, line, coord)
+        for k in np.nonzero(mask)[0]:
+            xyz = list(line)
+            xyz[ax] = float(s_eval[k])
             try:
                 val = E_gf(comp_mesh(*xyz))
                 E_long[k] = complex(val[ax])
             except Exception:
-                pass                                # outside the mesh -> NaN
+                pass
         return coord, E_long, label
 
     def chain_eigenfrequencies(self, fmin_ghz=None, fmax_ghz=None):

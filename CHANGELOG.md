@@ -71,7 +71,15 @@ No version has been released yet. The entries compare with the code published on
   a beam the port results are unchanged. Files: `z_tilde/`, `s_tilde/`, `snapshots_beam/`,
   `matrices/beam_<part>.h5`, `port_modes/beam_port_fields.pkl`. `beta = 1` and a beam in
   vacuum only; reduced models do not carry the beam yet.
-- The solve warns when a beam runs past curved walls meshed with `curve_order` below 4.
+- **Beams through repeated or imported parts.** Each unique part of a chain is solved
+  once with the beam where it runs through it, in the part's own frame (the beam is given
+  in the first part's frame; each next part sits with its joined face centred on the face
+  it joins). `proj.fds.foms.concatenate()` joins the copies through their S~, each with
+  the beam's phase at its position. A part imported from a project solved without a beam
+  gets its beam columns computed in the importing project from its stored port
+  solutions; that project is never written.
+- With a beam defined, `generate_mesh()` curves the mesh to order 4 unless `curve_order`
+  is given. The solve warns when a beam runs past curved walls meshed to a lower order.
 
 ### Changed
 
@@ -146,6 +154,12 @@ No version has been released yet. The entries compare with the code published on
 
 ### Fixed
 
+- Locating points on a line through a mesh (the beam's voltage path, the field on axis
+  of the figures of merit, `chain_axis_profile()`, the voltage path of a quasi-TEM port)
+  could crash the process on a curved mesh: NGSolve was asked for points just outside
+  it. The stretches of the line inside the mesh now come from its crossings with the
+  boundary, moved onto the curved faces, and only points inside are located.
+- A square port face was taken for a coaxial one; it is detected as rectangular.
 - `overwrite=True` could delete the wrong folder: `""` or `"."` deleted the base folder,
   and `".."` its parent.
 - A project could not be reopened after `invalidate_results()` or `invalidate_mesh()`.

@@ -67,6 +67,26 @@ def beam_line(pieces: Sequence[ModePiece], a: int, span, n_points: int) -> np.nd
     return np.linspace(float(span[0]), float(span[1]), int(n_points))
 
 
+def inside_samples(mesh, a: int, point, s: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """``(mask, s_eval)``: which positions *s* along the line parallel to axis
+    *a* through *point* lie in the mesh, and where to evaluate them -- a
+    position on the boundary is moved just inside.
+
+    From the line's crossings with the mesh boundary, so no point outside the
+    mesh is located (NGSolve's point search can crash there on a curved mesh).
+    """
+    from cavsim3d.utils.mesh_geometry import line_intervals
+    d = 1e-9 * float(np.ptp(_coordinates(mesh)[:, a]))
+    mask = np.zeros(len(s), dtype=bool)
+    s_eval = np.array(s, dtype=float)
+    for s0, s1, _, _ in line_intervals(mesh, point, a):
+        dd = min(d, 0.25 * (s1 - s0))
+        hit = (s >= s0 - dd) & (s <= s1 + dd) & ~mask
+        s_eval[hit] = np.clip(s[hit], s0 + dd, s1 - dd)
+        mask |= hit
+    return mask, s_eval
+
+
 def field_on_line(pieces: Sequence[ModePiece], a: int, offset, s: np.ndarray
                   ) -> Tuple[np.ndarray, np.ndarray]:
     """``(E_a(s), inside)`` along the line parallel to axis *a* through the
@@ -75,17 +95,25 @@ def field_on_line(pieces: Sequence[ModePiece], a: int, offset, s: np.ndarray
     others = [i for i in range(3) if i != a]
     e = np.zeros(len(s), dtype=complex)
     inside = np.zeros(len(s), dtype=bool)
+    point = [0.0, 0.0, 0.0]
+    point[others[0]], point[others[1]] = float(offset[0]), float(offset[1])
     for p in pieces:
+        mask, s_eval = inside_samples(p.mesh, a, point, s - p.shift)
+        hit = mask & ~inside
+        n = int(hit.sum())
+        if not n:
+            continue
         xyz = [None, None, None]
-        xyz[a] = s - p.shift
-        xyz[others[0]] = np.full(len(s), float(offset[0]))
-        xyz[others[1]] = np.full(len(s), float(offset[1]))
+        xyz[a] = s_eval[hit]
+        xyz[others[0]] = np.full(n, point[others[0]])
+        xyz[others[1]] = np.full(n, point[others[1]])
         mips = p.mesh(*xyz)
-        hit = (mips['nr'] >= 0) & ~inside
-        if hit.any():
-            vals = np.asarray(p.E(mips[hit])).reshape(int(hit.sum()), 3)
-            e[hit] = vals[:, a]
-            inside |= hit
+        found = mips['nr'] >= 0
+        idx = np.nonzero(hit)[0][found]
+        if len(idx):
+            vals = np.asarray(p.E(mips[found])).reshape(len(idx), 3)
+            e[idx] = vals[:, a]
+            inside[idx] = True
     return e, inside
 
 

@@ -6,13 +6,14 @@ or the coupling between the beam and the port modes.
 ## Add a beam and solve
 
 A beam is a line current of 1 A travelling along `proj.main_axis` at the speed of light.
-Add it before or after meshing; the same `solve()` then adds its column and row:
+Add it before meshing (then `generate_mesh()` curves the mesh to order 4, see below) or
+after; the same `solve()` then adds its column and row:
 
 ```python
 proj.create_primitive('taper', name='taper', R_left=50, R_right=25, L=100,
                       straight_left=30, straight_right=30)
-proj.generate_mesh(maxh=0.008, curve_order=4)
 proj.add_beam('beam')                          # on the axis: x = y = 0
+proj.generate_mesh(maxh=0.008)                 # curve order 4 with a beam
 proj.fds.solve(fmin=0.5, fmax=1.5, nsamples=11, nportmodes=3, order=3)
 
 fom = proj.fds.fom
@@ -48,10 +49,13 @@ h = fom.s_tilde_dict['1(1)b(1)']               # beam voltage of a wave from por
 z_open = fom.beam_impedance(ports='open')      # every port mode a magnetic wall
 ```
 
-Keys are excitation first, as for S. With matched ports (`z_b`) every port mode is
-terminated in its reference impedance; with open ports (`z_oc`) a lossless structure below
-cut-off has a purely reactive impedance, and its resonances are the poles of the
-eigenproblem (`get_resonant_frequencies()`).
+Keys are excitation first, as for S. With matched ports (`z_b`, the default) every port
+mode is terminated in its reference impedance: the waves the beam excites leave without
+reflection. With open ports (`z_oc`) every port mode is open-circuited: no port-mode
+current, so for the port modes each port face is a magnetic wall, as in the eigenproblem
+(`get_resonant_frequencies()`). The beam passes through the faces either way. With open
+ports, a lossless structure below cut-off has a purely reactive beam impedance whose poles
+are the resonances of the eigenproblem.
 
 ## Add a beam to a solved project
 
@@ -65,7 +69,7 @@ With the request of the stored results, only the beam columns are solved; the po
 results are kept as they are. This needs the stored port solutions
 (`store_snapshots=True`, the default); otherwise everything is solved again.
 
-## Join parts solved one by one
+## Join glued parts solved one by one
 
 Solve a model of several glued parts part by part and join the parts' generalised
 scattering matrices at the faces between them:
@@ -80,13 +84,42 @@ zpar = joined.beam_impedance()
 The join holds the frequencies of the full-order solve. It is exact for the modes carried
 at the cut: put the cut in a uniform stretch of pipe, away from discontinuities, and carry
 the modes the beam excites there (the TM0n modes for a beam on the axis of a round pipe).
-Coupled parts (imported or repeated) and reduced models do not carry the beam yet.
+
+## Join repeated or imported parts
+
+Parts that are repeated (`n=`) or imported from another project are solved on their own
+meshes and joined through their port modes. With a beam, the same two calls join them
+with the beam:
+
+```python
+proj.add('cell', cell, n=3)                    # or proj.import_project(path, name='cell', n=3)
+proj.generate_mesh(maxh=0.01)
+proj.add_beam('beam')
+proj.fds.solve(fmin=1.0, fmax=1.3, nsamples=31, nportmodes=3, order=3)
+chain = proj.fds.foms.concatenate()            # the copies joined through their S~
+zpar = chain.beam_impedance()
+```
+
+- The beam's position is given in the frame of the first part. Every next part sits with
+  the face it is joined by centred on the face it joins, and each unique part is solved
+  once, with the beam where it runs through that part.
+- A copy placed further along the axis sees the beam later: its beam column carries the
+  phase of its position. The beam impedance of the chain does not depend on where the
+  first part sits.
+- A part imported from a project solved without a beam gets its beam columns computed in
+  this project, from the port solutions stored there; that project is never written. Its
+  sweep must have the requested frequencies; otherwise the part is solved again here
+  (`rerun=True` in a script), and the solve plan says so.
+- The joined model holds the frequencies of the full-order solve. Reduced models do not
+  carry the beam yet: `roms.concatenate()` joins the port results only, and warns.
 
 ## Get accurate beam results
 
-- Mesh curved walls with `curve_order=4`. The beam's own field is almost normal to the
-  walls, and the facets of a coarser curving tilt it into a spurious datum; the solve
-  warns about it.
+- Curve the mesh to order 4. With a beam defined, `generate_mesh()` does so unless
+  `curve_order=` is given; a mesh made before the beam was added (or an imported part's)
+  keeps its curving, and the solve warns if curved walls are meshed to a lower order. The
+  beam's own field is almost normal to the walls, and the facets of a coarser curving
+  tilt it into a spurious datum.
 - Use order 3, or a finer mesh than for the port modes: the beam's field is strongest at the
   walls closest to it. Check Z_par on two meshes.
 - An off-axis beam needs a finer mesh than an on-axis one.
@@ -103,6 +136,12 @@ Coupled parts (imported or repeated) and reduced models do not carry the beam ye
   `z_b` of a model depends on the length of its pipes. Compare models with the same pipes.
 - **`RuntimeError` from `joined.solve()`**: a model joined through scattering matrices
   holds the full-order frequencies only; solve the parts at the frequencies you need.
+- **`NotImplementedError: The copies of part ... see the beams at different places`**: the
+  copies of a part are shifted across the axis against each other (their joined faces are
+  not centred on one line), so each copy would need a solve of its own. Align the parts'
+  joined faces on one axis.
+- **`RuntimeError: Part ... has no beam results to join`**: the parts were solved before
+  the beam was added; run `proj.fds.solve(...)` again.
 
 **See also:** [Results](../reference/results.md#beams) for every beam quantity and label;
 [§9 Beam excitation](../theory/beam.md) for the formulation.

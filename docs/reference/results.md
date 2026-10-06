@@ -55,7 +55,8 @@ port modes and then the beams. Every beam is also a path, and comes first:
 The longitudinal impedance is $Z_\parallel = -v/i = -z_b$.
 
 Accessors of a full-order result solved with a beam (`proj.fds.fom`, `proj.fds.foms[i]`)
-and of a model joined from such results (`proj.fds.foms.concatenate()`):
+and of a model joined from such results (`proj.fds.foms.concatenate()`, for glued parts and
+for repeated or imported ones):
 
 | Accessor | Returns |
 |---|---|
@@ -71,6 +72,10 @@ Labels: port modes as below, beams and paths `'b(1)'`, `'b(2)'`, ... in the orde
 `proj.beam_paths`. Keys are excitation first: `'b(1)b(1)'` is $z_b$, `'b(1)2(1)'` is $k$ from
 beam 1 into port 2 mode 1, `'1(1)b(2)'` is $h$ from port 1 mode 1 onto path 2.
 
+$k$ and $h$ carry the beam's phase $e^{\mp j k_b s}$ along the main axis, with $s$ measured in
+the model's frame; for repeated or imported parts, that is the frame of the first part.
+$z_b$ does not depend on it.
+
 ## Result objects
 
 | Object | Holds | Created by |
@@ -80,6 +85,7 @@ beam 1 into port 2 mode 1, `'1(1)b(2)'` is $h$ from port 1 mode 1 onto path 2.
 | `proj.fds.fom.rom` | reduced model | `fom.reduce(tol)` |
 | `proj.fds.foms.roms` | one reduced model per part | `foms.reduce(tol)` |
 | `proj.fds.foms.roms.concat` | joined model | `roms.concatenate()` |
+| `proj.fds.foms.concat` | joined model at the full-order frequencies (glued parts; with a beam, also repeated or imported parts) | `foms.concatenate()` |
 | `concat.rom` | reduced joined model | `concat.reduce(tol)` |
 
 Each has `frequencies` (Hz), `S_dict`, `Z_dict`, `plot_s()`, `plot_z()`, `compare_s()`,

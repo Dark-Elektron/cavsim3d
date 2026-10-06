@@ -26,7 +26,7 @@ Multi-solid
 
 
 from __future__ import annotations
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import json
 import shutil
 import warnings
@@ -127,7 +127,10 @@ def _load_beam_files(path: Path, tag: str) -> Optional[Dict]:
     return {'Z_tilde': z['data'] if z else None, 'S_tilde': s_['data'] if s_ else None,
             'rows': meta['rows'], 'cols': meta['cols'], 'frequencies': meta['frequencies'],
             'names': meta['names'], 'setup': meta['setup'],
-            'fingerprint': meta['fingerprint'], 'summary': meta['summary']}
+            'fingerprint': meta['fingerprint'], 'summary': meta['summary'],
+            'port_modes': meta.get('port_modes'), 'ports': meta.get('ports'),
+            'fingerprints': meta.get('fingerprints'),
+            'zref': s_.get('zref') if s_ else None}
 
 
 # =============================================================================
@@ -1985,6 +1988,7 @@ class NetlistFOMs:
         self._fds_ref = fds_ref
         self._config = fom_config
         self._roms_cache = None
+        self._concat_cache = None               # joined with the beam (S~)
 
     @property
     def _root(self) -> Path:
@@ -2141,15 +2145,168 @@ class NetlistFOMs:
         return self._roms_cache
 
     def concatenate(self):
-        """FOM-level concatenation of a netlist is not supported.
+        """Join the parts at the full-order level -- with a beam only.
 
-        The logical pipeline is FOM -> ROM -> Concatenation; reduce first:
-        ``fds.foms.reduce(tol).concatenate()``.
+        With beams (``proj.add_beam``) the parts are joined through their
+        generalised scattering matrices S~ (port modes and beams, see
+        :meth:`_concatenate_scattering`): the joined S, Z and S~ at the
+        full-order frequencies, without any matrices.  Without a beam the
+        pipeline is FOM -> ROM -> Concatenation: ``fds.foms.reduce(tol).concatenate()``.
         """
+        if self._fds_ref is not None and self._fds_ref.beam_setup is not None:
+            return self._concatenate_scattering()
         raise NotImplementedError(
             "FOM-level concatenation of an assembly netlist is not supported "
             "(sections live on different meshes and would couple as dense "
             "full-order blocks). Reduce first: fds.foms.reduce(tol).concatenate().")
+
+    @property
+    def concat(self):
+        """The parts joined with the beam (:meth:`concatenate`), also after
+        reopening the project."""
+        if self._concat_cache is None:
+            meta = self._root / "fds" / "foms" / "concat" / "metadata.json"
+            saved = False
+            try:
+                saved = bool(json.loads(meta.read_text()).get("scattering_join"))
+            except (OSError, ValueError):
+                pass
+            if not saved or self._fds_ref.beam_setup is None:
+                raise RuntimeError("No joined model yet: call proj.fds.foms.concatenate() "
+                                   "(with a beam), or reduce first: "
+                                   "proj.fds.foms.reduce(tol).concatenate().")
+            self._concatenate_scattering(announce=False)
+        return self._concat_cache
+
+    def _section_tilde(self, base: str) -> Optional[Dict]:
+        """S~ of section ``base``: from this project's flat tree, else (a part
+        referenced in place) from its own project."""
+        t = _beam.load_tilde(self._root / "fds" / "foms" / "s_tilde" / f"s_tilde_{base}.h5")
+        rec = self._components.get(base, {})
+        if t is None and rec.get("kind") == "imported" and rec.get("mode") == "reference":
+            from cavsim3d.solvers import netlist_persistence as npz
+            t = _beam.load_tilde(npz.source_tilde_file(Path(rec["source"])))
+        return t
+
+    def _concatenate_scattering(self, announce: bool = True):
+        """Join the parts through their generalised scattering matrices (beam).
+
+        Every copy of a part is joined with the S~ of its part, solved with
+        the beams where they run through it (in the part's own frame).  A copy
+        placed at z_i along the axis sees the beam's phase exp(-j k_b z_i):
+        its beam columns get that factor and its path rows exp(+j k_b z_i)
+        (docs/theory/beam.md §9.9); the beam voltages of the copies add.
+        Ports are joined as for the reduced models (the faces that face each
+        other, checked mode by mode).  The result is saved in
+        ``fds/foms/concat/``.
+        """
+        from cavsim3d.solvers.concatenation import (ConcatenatedSystem, chain_placement,
+                                                    netlist_instances, netlist_joins)
+        import cavsim3d.utils.printing as pr
+        fds = self._fds_ref
+        setup = fds.beam_setup
+        a = _beam.axis_index(setup.axis)
+        tildes = {}
+        for base in self._components:
+            t = self._section_tilde(base)
+            if (t is None or t.get('port_modes') is None or t.get('zref') is None
+                    or not t.get('ports')):
+                raise RuntimeError(
+                    f"Part '{base}' has no beam results to join: solve the project with "
+                    "the beam (proj.fds.solve()).")
+            tildes[base] = t
+        bases = list(tildes)
+        freqs = np.asarray(tildes[bases[0]]['frequencies'])
+        for b in bases[1:]:
+            f = np.asarray(tildes[b]['frequencies'])
+            if len(f) != len(freqs) or not np.allclose(f, freqs, rtol=1e-9, atol=0):
+                raise RuntimeError(
+                    f"Parts '{bases[0]}' and '{b}' were solved at different frequencies: "
+                    "the join needs the same samples. Solve the project again.")
+
+        instances = netlist_instances(self._assembly)
+        structures = []
+        for iname, _key, base in instances:
+            t = tildes[base]
+            modes: Dict[str, Dict[int, Any]] = {}
+            for port, m in t['port_modes']:
+                modes.setdefault(port, {})[int(m)] = None
+            st = ReducedStructure(Ard=np.zeros((0, 0)), Brd=np.zeros((0, len(t['port_modes']))),
+                                  ports=list(modes), port_modes=modes, domain=iname, r=0,
+                                  n_full=0, is_full_order=True)
+            st.port_geometry = t['ports']
+            st.port_fingerprints = {p: {int(m): v for m, v in d.items()}
+                                    for p, d in (t.get('fingerprints') or {}).items()}
+            st.base_domain = base
+            structures.append(st)
+        connections = netlist_joins(self._assembly, structures,
+                                    [k for _i, k, _b in instances])
+        shifts = chain_placement(structures, connections)
+        for (iname, _key, base), shift in zip(instances, shifts):
+            solved = _beam.BeamSetup.from_dict(tildes[base]['setup'])
+            if not solved.same_lines(setup.shifted(shift)):
+                raise RuntimeError(
+                    f"Part '{base}' was solved with the beams at other places than copy "
+                    f"'{iname}' needs: solve the project again (proj.fds.solve()).")
+
+        def zref_of(i):
+            t = tildes[instances[i][2]]
+            rows = {(p, int(m)): r for r, (p, m) in enumerate(t['port_modes'])}
+            return lambda port, mode, f: complex(
+                t['zref'][int(np.argmin(np.abs(freqs - f))), rows[(port, int(mode))]])
+
+        lookups = [zref_of(i) for i in range(len(instances))]
+        concat = ConcatenatedSystem(structures=structures, solver_ref=fds)
+        concat.define_connections(connections)
+
+        blocks, block_modes, col_phase, row_phase = [], [], [], []
+        k_over_w = [1.0 / (l.beta * _beam.c0) for l in setup.sources]
+        kp_over_w = [1.0 / (l.beta * _beam.c0) for l in setup.paths]
+        w = 2 * np.pi * freqs
+        for i, (iname, _key, base) in enumerate(instances):
+            t = tildes[base]
+            blocks.append(np.asarray(t['data']))
+            block_modes.append([concat.port_mode_map[(i, p, int(m))] for p, m in t['port_modes']])
+            z = float(shifts[i][a])
+            col_phase.append(np.exp(-1j * np.outer(w, k_over_w) * z))
+            row_phase.append(np.exp(1j * np.outer(w, kp_over_w) * z))
+        pairs = []
+        for (sa, pa), (sb, pb) in concat.connections:
+            n = concat.port_to_mode_range[(sa, pa)][1]
+            pairs += [(concat.port_mode_map[(sa, pa, m)], concat.port_mode_map[(sb, pb, m)])
+                      for m in range(n)]
+        external = list(concat._external_port_modes)
+        St = _beam.join_s_tilde(blocks, block_modes, pairs, external, col_phase, row_phase)
+
+        labels, numbers = [], {}
+        ext = [concat._global_to_local[g] for g in external]
+        for s_idx, port, m in ext:
+            n = numbers.setdefault((s_idx, port), len(numbers) + 1)
+            labels.append(f"{n}({m + 1})")
+        Zref = np.array([np.diag([lookups[s](p, m, f) for (s, p, m) in ext]) for f in freqs])
+        Zt = _beam.z_tilde_from_s_tilde(St, Zref)
+        rows = labels + setup.path_labels
+        cols = labels + setup.source_labels
+        n_ext = len(ext)
+        concat.frequencies = freqs
+        concat._S_matrix = St[:, :n_ext, :n_ext].copy()
+        concat._Z_matrix = Zt[:, :n_ext, :n_ext].copy()
+        concat._beam = {
+            'S_tilde': St, 'Z_tilde': Zt, 'rows': rows, 'cols': cols, 'frequencies': freqs,
+            'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
+            'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
+            'summary': {'joined': [iname for iname, _k, _b in instances],
+                        'shift': {iname: [float(v) for v in s]
+                                  for (iname, _k, _b), s in zip(instances, shifts)}}}
+        concat._scattering_join = True
+        concat._invalidate_cache()
+        if announce:
+            pr.milestone(f"Joined {len(instances)} part copies through their generalised "
+                         f"scattering matrices (beam): {n_ext} external port mode(s), "
+                         f"{len(freqs)} frequencies (those of the full-order solve).")
+        self._concat_cache = concat
+        concat.save(self._root / "fds" / "foms" / "concat")
+        return concat
 
 
 class NetlistROMs:
@@ -2188,6 +2345,11 @@ class NetlistROMs:
         when it is solved).
         """
         from cavsim3d.solvers.concatenation import ConcatenatedSystem
+        if self._fds_ref is not None and self._fds_ref.beam_setup is not None:
+            import cavsim3d.utils.printing as pr
+            pr.warning("The reduced models carry no beam yet: this joined model has the "
+                       "port results only. The parts joined with the beam: "
+                       "proj.fds.foms.concatenate().")
         concat_dir = self._roms_dir / "concat"
         # results of an earlier coupling must not pass for this one's
         shutil.rmtree(concat_dir, ignore_errors=True)

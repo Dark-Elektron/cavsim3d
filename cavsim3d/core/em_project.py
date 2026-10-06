@@ -735,11 +735,17 @@ class EMProject:
     def generate_mesh(self, force: bool = False, **kwargs) -> Mesh:
         """
         Generate mesh from current geometry.
-        
+
         Automatically invalidates existing simulation results if the mesh changes.
+        With a beam defined (:meth:`add_beam`), the mesh is curved to order 4
+        unless ``curve_order`` is given: the beam impedance is sensitive to
+        how closely the mesh follows curved walls.
         """
         if self.geometry is None:
             raise RuntimeError("Cannot generate mesh without geometry.")
+        if self.beam_setup is not None and 'curve_order' not in kwargs:
+            from cavsim3d.solvers.beam import BEAM_CURVE_ORDER
+            kwargs['curve_order'] = BEAM_CURVE_ORDER
 
         if self.has_results():
             # force only skips the question: results of the old mesh must go

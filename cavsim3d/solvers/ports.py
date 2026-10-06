@@ -652,6 +652,13 @@ class PortEigenmodeSolver:
             a=a, b=b, fit_error=total_error
         ), total_error
 
+    def _face_contains(self, port: str, point, t1, t2) -> bool:
+        """True if ``point`` (on the port plane) lies on the port's faces."""
+        from cavsim3d.utils.mesh_geometry import surface_triangles, face_contains_point
+        names = self.port_face_region.get(port, port).split('|')
+        tris, _ = surface_triangles(self.mesh, names=names)
+        return face_contains_point(tris, point, t1, t2)
+
     def _detect_port_geometry(self, port: str) -> PortGeometry:
         """
         Detect port geometry type (rectangular, circular, or coaxial).
@@ -685,6 +692,11 @@ class PortEigenmodeSolver:
             center, normal, t1, t2, area, I_uu, I_vv, I_uv
         )
         coax_geom, coax_error = coax_result if coax_result[0] is not None else (None, 1.0)
+        # Area and second moment alone fit an annulus to ANY isotropic shape (a
+        # square gives inner/outer = 0.15 with no error): a coaxial face has a
+        # hole at its centre, so it does not contain its own centroid.
+        if coax_geom is not None and self._face_contains(port, center, t1, t2):
+            coax_geom, coax_error = None, 1.0
 
         # Decision logic with tolerance
         tol = self.geometry_tolerance
@@ -1634,7 +1646,7 @@ class PortEigenmodeSolver:
 
             # Power-voltage characteristic (line) impedance for S renormalisation
             zpv = self._compute_qtem_zpv(Et_c, b.real, omega, port_region,
-                                         voltage_path)
+                                         voltage_path, port=port)
 
             basis = self._create_basis_vector(Et_real, port, fes_full)
 
@@ -1693,7 +1705,8 @@ class PortEigenmodeSolver:
         return gf
 
     def _compute_qtem_zpv(self, Et_complex, beta_real: float, omega: float,
-                          port_region, voltage_path: Optional[Tuple]) -> complex:
+                          port_region, voltage_path: Optional[Tuple],
+                          port: Optional[str] = None) -> complex:
         """Power-voltage characteristic impedance Z_PV = |V|^2 / (2 P).
 
         Quasi-TEM transverse magnetic field Ht = (beta/omega/mu0) (z x Et), so
@@ -1714,8 +1727,25 @@ class PortEigenmodeSolver:
         ts = np.linspace(0.0, 1.0, n_samp)
         V = 0j
         Evals = np.zeros(n_samp, dtype=complex)
+        # only points on the port face are located (NGSolve's point search
+        # can crash for a point just off a curved mesh)
+        tris = None
+        if port is not None:
+            from cavsim3d.utils.mesh_geometry import surface_triangles, face_contains_point
+            tris, _ = surface_triangles(
+                self.mesh, names=self.port_face_region.get(port, port).split('|'))
+            if len(tris):
+                nrm = np.cross(tris[0, 1] - tris[0, 0], tris[0, 2] - tris[0, 0])
+                nrm /= np.linalg.norm(nrm)
+                t1 = seg - np.dot(seg, nrm) * nrm
+                t1 /= max(np.linalg.norm(t1), 1e-300)
+                t2 = np.cross(nrm, t1)
+            else:
+                tris = None
         for j, tt in enumerate(ts):
             pt = p0 + tt * seg
+            if tris is not None and not face_contains_point(tris, pt, t1, t2):
+                continue                            # off the face: E = 0
             try:
                 val = Et_complex(self.mesh(pt[0], pt[1], pt[2], BND))
                 Evals[j] = complex(np.dot([complex(v) for v in val], seg)

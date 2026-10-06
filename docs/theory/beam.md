@@ -13,8 +13,10 @@ numbers in parentheses, such as (eq. 4), refer to that paper.
     vacuum ($v_b^2\mu_b\varepsilon_b = 1$), with the contrast load wherever the material
     differs. The outputs are $\tilde{\mathbf{Z}}$ ([§9.7](#97-port-voltages-and-currents-with-the-beam))
     and $\tilde{\mathbf{S}}$ ([§9.8](#98-generalised-scattering-matrix)); full-order parts
-    are joined as in [§9.9](#99-concatenation-of-segments), all parts sharing one beam phase,
-    so $\mathbf{d} = (1, 1)$. The reduction of [§9.10](#910-model-order-reduction-with-the-beam)
+    are joined as in [§9.9](#99-concatenation-of-segments). Glued parts share one beam phase,
+    so $\mathbf{d} = (1, 1)$. Repeated or imported parts are solved in their own frames: the
+    copy whose frame sits at $z_i$ in the frame of the first part enters with
+    $d_i = e^{-jk_b z_i}$. The reduction of [§9.10](#910-model-order-reduction-with-the-beam)
     is not implemented yet. The materials are those of [§1](maxwell.md):
     $\mu = \mu_0\mu_r$ and the complex permittivity $\varepsilon_c$ with conductivity and
     loss tangent. The walls are perfect conductors.
