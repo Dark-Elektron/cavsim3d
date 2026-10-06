@@ -43,6 +43,8 @@ from cavsim3d.core.persistence import H5Serializer, ProjectManager
 from cavsim3d.rom.reduction import ModelOrderReduction
 from cavsim3d.rom.structures import ReducedStructure
 from cavsim3d.solvers.concatenation import ConcatenatedSystem
+from cavsim3d.solvers.beam import BeamResultMixin
+from cavsim3d.solvers import beam as _beam
 
 
 def _safe_filename(name: str) -> str:
@@ -56,13 +58,88 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[/\\|:*?"<>]', '_', name)
 
 
+def _save_beam_files(path: Path, tag: str, beam: Optional[Dict], solver, domain: str) -> None:
+    """Write (or, without a beam, remove) the beam files of one section:
+    z_tilde/, s_tilde/, snapshots_beam/ and matrices/beam_<section>.h5."""
+    files = [path / "z_tilde" / f"z_tilde_{tag}.h5",
+             path / "s_tilde" / f"s_tilde_{tag}.h5",
+             path / "snapshots_beam" / f"snapshots_beam_{tag}.h5",
+             path / "matrices" / f"beam_{tag}.h5"]
+    if not beam:
+        for f in files:
+            if f.exists():
+                f.unlink()
+        for folder in ("z_tilde", "s_tilde", "snapshots_beam"):
+            d = path / folder
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        return
+    _beam.save_tilde(files[0], beam, 'Z')
+    _beam.save_tilde(files[1], beam, 'S')
+    raw = getattr(solver, '_beam_raw', {}).get(domain) if solver is not None else None
+    if raw is not None and raw.get('snapshots') is not None:
+        files[2].parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(files[2], "w") as f:
+            H5Serializer.save_dataset(f, "frequencies", beam['frequencies'])
+            H5Serializer.save_dataset(f, "field_snapshots", raw['snapshots'])
+            f.attrs["fingerprint"] = str(beam.get('fingerprint', ''))
+    system = getattr(solver, '_beam_systems', {}).get(domain) if solver is not None else None
+    if system is not None:
+        _beam.save_beam_data(files[3], system)
+
+
+def _join_domain_beams(concat, fds, blocks: List[Dict]) -> Dict:
+    """S~ of the joined model from the per-domain S~ (one per structure of
+    ``concat``, in the order of ``fds.domains``)."""
+    modes, labels_ext = [], []
+    for s_idx, domain in enumerate(fds.domains):
+        modes.append([concat.port_mode_map[(s_idx, pn, m)]
+                      for (_pi, pn, m) in fds._domain_port_mode_order(domain)])
+    pairs = []
+    for (sa, pa), (sb, pb) in concat.connections:
+        n = concat.port_to_mode_range[(sa, pa)][1]
+        pairs += [(concat.port_mode_map[(sa, pa, m)], concat.port_mode_map[(sb, pb, m)])
+                  for m in range(n)]
+    external = list(concat._external_port_modes)
+    numbers: Dict[Tuple[int, str], int] = {}
+    for g in external:
+        s_idx, port, m = concat._global_to_local[g]
+        n = numbers.setdefault((s_idx, port), len(numbers) + 1)
+        labels_ext.append(f"{n}({m + 1})")
+    St = _beam.join_s_tilde([b['S_tilde'] for b in blocks], modes, pairs, external)
+    first = blocks[0]
+    n_ext = len(external)
+    rows = labels_ext + list(first['rows'][len(first['rows']) - (St.shape[1] - n_ext):])
+    cols = labels_ext + list(first['cols'][len(first['cols']) - (St.shape[2] - n_ext):])
+    return {'S_tilde': St, 'Z_tilde': None, 'rows': rows, 'cols': cols,
+            'frequencies': np.asarray(first['frequencies']), 'names': first.get('names', {}),
+            'setup': first.get('setup'), 'fingerprint': first.get('fingerprint'),
+            'summary': {'joined': list(fds.domains)}}
+
+
+def _load_beam_files(path: Path, tag: str) -> Optional[Dict]:
+    """The beam results of one section, or None."""
+    z = _beam.load_tilde(path / "z_tilde" / f"z_tilde_{tag}.h5")
+    s_ = _beam.load_tilde(path / "s_tilde" / f"s_tilde_{tag}.h5")
+    if z is None and s_ is None:
+        return None
+    meta = z or s_
+    return {'Z_tilde': z['data'] if z else None, 'S_tilde': s_['data'] if s_ else None,
+            'rows': meta['rows'], 'cols': meta['cols'], 'frequencies': meta['frequencies'],
+            'names': meta['names'], 'setup': meta['setup'],
+            'fingerprint': meta['fingerprint'], 'summary': meta['summary']}
+
+
 # =============================================================================
 # FOMResult
 # =============================================================================
 
-class FOMResult(PlotMixin):
+class FOMResult(PlotMixin, BeamResultMixin):
     """
     Wrapper around a single solved FOM (one domain or a global coupled result).
+
+    Solved with a beam (``proj.add_beam``), it also holds the generalised
+    matrices ``s_tilde`` / ``z_tilde`` (see :class:`~cavsim3d.solvers.beam.BeamResultMixin`).
 
     Attributes
     ----------
@@ -95,6 +172,8 @@ class FOMResult(PlotMixin):
         # (port_number, mode_number), 1-based, for each matrix row/column.
         # Needed when ports carry different numbers of modes.
         mode_labels: Optional[List[Tuple[int, int]]] = None,
+        # beam outputs: generalised matrices with labels (solvers/beam.py)
+        beam: Optional[Dict] = None,
     ):
         self.domain = domain
         self.mode_labels = ([tuple(int(v) for v in lab) for lab in mode_labels]
@@ -109,6 +188,7 @@ class FOMResult(PlotMixin):
         self._n_modes_per_port = n_modes_per_port
         self._residual_data = residual_data
         self._solver_ref = _solver_ref
+        self._beam = beam or None
 
         # Lazy cache for backward-compatible .rom property
         self._rom_cache = None
@@ -151,6 +231,65 @@ class FOMResult(PlotMixin):
         return {f'{rp}({rm}){cp}({cm})': matrix[:, r, c]
                 for r, (rp, rm) in enumerate(labels)
                 for c, (cp, cm) in enumerate(labels)}
+
+    # ------------------------------------------------------------------
+    # Beam field
+    # ------------------------------------------------------------------
+
+    def beam_field(self, freq_index: int, beam=None, total: bool = True):
+        """The field of a beam (current 1 A) at one frequency sample.
+
+        ``total=True``: E = E_s + E_free as a CoefficientFunction (E_free,
+        the beam's own field, is singular on the beam line); ``total=False``:
+        the scattered field E_s that the finite elements carry, as a
+        GridFunction.  ``beam``: name or label (default: the first beam).
+        """
+        from ngsolve import HCurl, GridFunction, exp
+        from cavsim3d.solvers.nedelec import hcurl_flags
+        from cavsim3d.utils.names import region_pattern
+        from cavsim3d.solvers.beam import BeamSetup, axis_index, free_field_profile
+        fds = self._solver_ref
+        if fds is None or not self.has_beam:
+            raise RuntimeError("No beam results here: define a beam and solve.")
+        label = self._beam_label(beam, sources=True)
+        setup = BeamSetup.from_dict(self._beam_data().get('setup'))
+        j = [f"b({i + 1})" for i in range(len(setup.sources))].index(label)
+        line = setup.sources[j]
+        snaps = (getattr(fds, '_beam_raw', {}).get(self.domain) or {}).get('snapshots')
+        if snaps is None:
+            snaps = self._stored_beam_snapshots()
+        n_src = len(setup.sources)
+        vec = np.asarray(snaps)[:, freq_index * n_src + j]
+        if self.domain == 'global':
+            region = {}
+        else:
+            mats = fds._get_domain_mesh_materials(self.domain) or [self.domain]
+            region = {'definedon': fds.mesh.Materials(region_pattern(mats))}
+        fes = HCurl(fds.mesh, order=fds.order, **hcurl_flags(fds.nedelec), complex=True,
+                    dirichlet=fds.bc, **region)
+        e_s = GridFunction(fes)
+        e_s.vec.FV().NumPy()[:] = vec
+        if not total:
+            return e_s
+        a = axis_index(setup.axis)
+        from cavsim3d.core.constants import c0
+        from ngsolve import x, y, z
+        k = 2 * np.pi * float(self.frequencies[freq_index]) / (line.beta * c0)
+        s = (x, y, z)[a]
+        return e_s + free_field_profile(line.point, a) * exp(-1j * k * s)
+
+    def _stored_beam_snapshots(self):
+        fds = self._solver_ref
+        root = getattr(fds, '_project_path', None)
+        if root is None:
+            raise RuntimeError("The beam field was not kept (no project to read it from).")
+        sub = "fom" if self.domain == 'global' else "foms"
+        tag = _safe_filename(self.domain) if self.domain else "global"
+        path = Path(root) / "fds" / sub / "snapshots_beam" / f"snapshots_beam_{tag}.h5"
+        if not path.exists():
+            raise RuntimeError("The beam field was not stored (solve with store_snapshots=True).")
+        with h5py.File(path, "r") as f:
+            return H5Serializer.load_dataset(f["field_snapshots"])
 
     # ------------------------------------------------------------------
     # Backward-compatible ROM accessor
@@ -464,6 +603,9 @@ class FOMResult(PlotMixin):
             if self._solver_ref is not None and self.domain in getattr(self._solver_ref, 'snapshots', {}):
                 H5Serializer.save_dataset(f, "field_snapshots", self._solver_ref.snapshots[self.domain])
 
+        # 3b. Beam: generalised matrices, beam snapshots, beam data
+        _save_beam_files(path, tag or "global", self._beam, self._solver_ref, self.domain)
+
         # 4. Save eigenmodes if available
         if self._solver_ref is not None:
             # We pass the domain to save_eigenmodes to keep it granular
@@ -572,6 +714,10 @@ class FOMResult(PlotMixin):
         if _solver_ref is not None:
             _solver_ref.load_eigenmodes(path / "eigenmodes")
 
+        beam = _load_beam_files(path, _safe_filename(domain) if domain else "global")
+        if beam is not None and _solver_ref is not None:
+            _solver_ref._beam_tilde[domain] = beam
+
         # Build Z/S dicts if matrices are loaded
         res = cls(
             domain=metadata["domain"],
@@ -586,6 +732,7 @@ class FOMResult(PlotMixin):
             residual_data=residual_data,
             _solver_ref=_solver_ref,
             mode_labels=metadata.get("mode_labels"),
+            beam=beam,
         )
         return res
 
@@ -780,12 +927,27 @@ class FOMCollection(PlotMixin):
         RuntimeError
             If no concatenated system has been computed yet.
         """
+        if self._concat_cache is None and self._saved_scattering_join():
+            # a join through the parts' S~ (beam) is rebuilt from their files
+            self.concatenate()
         if self._concat_cache is None:
             raise RuntimeError(
                 "No concatenated system available. "
                 "Call foms.concatenate() first."
             )
         return self._concat_cache
+
+    def _saved_scattering_join(self) -> bool:
+        """True if the project holds a join through the parts' S~ (beam)."""
+        fds = self._fds_ref
+        root = getattr(fds, '_project_path', None)
+        if root is None or not all(f.has_beam for f in self._foms):
+            return False
+        meta = Path(root) / "fds" / "foms" / "concat" / "metadata.json"
+        try:
+            return bool(json.loads(meta.read_text()).get("scattering_join"))
+        except (OSError, ValueError):
+            return False
 
     # ------------------------------------------------------------------
     # Solve routing
@@ -915,6 +1077,9 @@ class FOMCollection(PlotMixin):
 
 
         fds = self._fds_ref
+        blocks = [getattr(fds, '_beam_tilde', {}).get(d) for d in fds.domains]
+        if blocks and all(b is not None and b.get('S_tilde') is not None for b in blocks):
+            return self._concatenate_scattering(blocks)
 
         # Warn about matrix size
         total_ndof = sum(fds._fes[d].ndof for d in fds.domains if d in fds._fes)
@@ -1023,6 +1188,63 @@ class FOMCollection(PlotMixin):
         self._concat_cache = concat
         return concat
 
+    def _concatenate_scattering(self, blocks: List[Dict]):
+        """Join the parts through their generalised scattering matrices.
+
+        With a beam, every part's S~ (port modes and beams) is joined at the
+        cuts (CSC-BEAM, docs/theory/beam.md §9.9): the joined S, Z and S~ at
+        the full-order frequencies, without any full-order matrices.  Other
+        frequencies need reduced models of the parts (not available with a
+        beam yet).
+        """
+        fds = self._fds_ref
+        structures = []
+        for domain in fds.domains:
+            ports = fds.domain_port_map[domain]
+            port_modes_d = {p: fds.port_modes[p] for p in ports if p in fds.port_modes}
+            n_pm = sum(len(m) for m in port_modes_d.values())
+            # the port bookkeeping only: no operator (r = 0)
+            structures.append(ReducedStructure(
+                Ard=np.zeros((0, 0)), Brd=np.zeros((0, n_pm)), ports=ports,
+                port_modes=port_modes_d, domain=domain, r=0, n_full=0,
+                is_full_order=True))
+        concat = ConcatenatedSystem(
+            structures=structures,
+            port_impedance_func=fds._get_port_impedance,
+            port_wave_impedance_func=fds._port_wave_impedance,
+            solver_ref=fds,
+        )
+        domain_index = {d: i for i, d in enumerate(fds.domains)}
+        connections = []
+        for port in fds.internal_ports:
+            doms = [d for d in fds.domains if port in fds.domain_port_map.get(d, [])]
+            for other in doms[1:]:
+                connections.append(((domain_index[doms[0]], port),
+                                    (domain_index[other], port)))
+        concat.define_connections(connections)
+
+        beam = _join_domain_beams(concat, fds, blocks)
+        freqs = np.asarray(beam['frequencies'])
+        ext = [concat._global_to_local[g] for g in concat._external_port_modes]
+        Zref = np.array([np.diag([fds._get_port_impedance(p, m, f) for (_s, p, m) in ext])
+                         for f in freqs])
+        beam['Z_tilde'] = _beam.z_tilde_from_s_tilde(beam['S_tilde'], Zref)
+        n = len(ext)
+        concat.frequencies = freqs
+        concat._S_matrix = beam['S_tilde'][:, :n, :n].copy()
+        concat._Z_matrix = beam['Z_tilde'][:, :n, :n].copy()
+        concat._beam = beam
+        concat._scattering_join = True
+        concat._invalidate_cache()
+        import cavsim3d.utils.printing as _pr
+        _pr.milestone(f"Joined {len(fds.domains)} parts through their generalised "
+                      f"scattering matrices (beam): {n} external port mode(s), "
+                      f"{len(freqs)} frequencies (those of the full-order solve).")
+        self._concat_cache = concat
+        if getattr(fds, '_project_path', None):
+            concat.save(Path(fds._project_path) / "fds" / "foms" / "concat")
+        return concat
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -1083,6 +1305,11 @@ class FOMCollection(PlotMixin):
                 # Save field snapshots if available in solver reference
                 if fom._solver_ref is not None and domain in getattr(fom._solver_ref, 'snapshots', {}):
                     H5Serializer.save_dataset(fsnap, "field_snapshots", fom._solver_ref.snapshots[domain])
+
+        # 3b. Beam files per domain
+        for fom in self._foms:
+            _save_beam_files(path, _safe_filename(fom.domain), fom._beam, fom._solver_ref,
+                             fom.domain)
 
         # 4. Save metadata
         metadata = {
@@ -1207,6 +1434,9 @@ class FOMCollection(PlotMixin):
                     residual_data = H5Serializer.load_dataset(fs["residual_data"]) if "residual_data" in fs else None
                     field_snapshots = H5Serializer.load_dataset(fs["field_snapshots"]) if "field_snapshots" in fs else None
 
+            beam = _load_beam_files(path, _safe_filename(domain))
+            if beam is not None and _fds_ref is not None:
+                _fds_ref._beam_tilde[domain] = beam
             fom = FOMResult(
                 domain=domain,
                 frequencies=frequencies,
@@ -1220,6 +1450,7 @@ class FOMCollection(PlotMixin):
                 residual_data=residual_data,
                 _solver_ref=_fds_ref,
                 mode_labels=solid_meta.get("mode_labels"),
+                beam=beam,
             )
 
             # Update solver state.  The solver keeps per-domain results as
@@ -1613,6 +1844,7 @@ def build_fom_result(fds, domain: str = 'global') -> FOMResult:
         residual_data=getattr(fds, '_residuals', {}).get(domain),
         _solver_ref=fds,
         mode_labels=labels,
+        beam=getattr(fds, '_beam_tilde', {}).get(domain),
     )
 
 

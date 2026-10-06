@@ -15,6 +15,12 @@ The `EMProject` class is the central entry point for managing simulations, geome
         - parts
         - main_axis
         - localize
+        - add_beam
+        - add_beam_path
+        - remove_beam
+        - remove_beam_path
+        - beams
+        - beam_paths
         - create_assembly
         - generate_mesh
         - draw_material_cf

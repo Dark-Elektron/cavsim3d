@@ -130,6 +130,7 @@ nav:
       - Control recomputation and resume a sweep: how-to/rerun_and_resume.md
       - Build a reliable reduced model: how-to/reduce_well.md
       - Get the figures of merit of resonances: how-to/resonance_figures.md
+      - Compute the beam impedance: how-to/beam_impedance.md
       - Compare with CST Studio Suite: how-to/compare_with_cst.md
       - Export results: how-to/export_results.md
       - Reuse and share projects: how-to/reuse_and_share.md

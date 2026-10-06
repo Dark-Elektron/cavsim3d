@@ -10,34 +10,37 @@ settings.
 
 | Value | Solver | Use for |
 |---|---|---|
-| `"iterative"` (default) | GMRES with a BDDC preconditioner | large models; low memory |
-| `"direct"` | sparse LU factorisation | small and medium models; hard-to-converge cases |
-| `"auto"` | iterative above 400 000 unknowns, direct below | mixed workloads |
+| `"auto"` (default) | direct when its factorisation fits in 60 % of the free memory, iterative otherwise | most models |
+| `"direct"` | sparse factorisation (PARDISO) | small and medium models; hard-to-converge cases |
+| `"iterative"` | COCG with a BDDC preconditioner, finished by GMRES if it stalls | large models; low memory |
 
 ```python
 proj.fds.solve(fmin=1.0, fmax=1.8, nsamples=12, solver_type="direct")
 ```
 
-The direct solver is usually faster for small models (the 46-sample sweep of the tutorials'
-waveguide takes about 20 s with it, against about 50 s iterative) but its memory grows
-quickly with the model size.
+`"auto"` prints its choice next to the memory estimate and the free memory
+(`Auto solver: ... unknowns, a factorisation needs about ... GB of ... GB free`).
+A factorisation serves every right-hand side of a sample (each port mode, each beam) and
+does not slow down near resonances, so it is preferred whenever it fits; its memory grows
+faster than the model (about the 1.4th power of the unknowns).
 
 ## Tune the iterative solver
 
 ```python
 proj.fds.solve(fmin=1.0, fmax=1.8, nsamples=12, solver_type="iterative",
-               iterative_opts={"precond": "bddc", "maxsteps": 1000, "tol": 1e-8})
+               iterative_opts={"method": "gmres", "maxsteps": 1000, "tol": 1e-10})
 ```
 
-The defaults are `precond="bddc"`, `maxsteps=500`, `tol=1e-6`. After a sweep, plot how each
-sample converged:
+The defaults are `method="cocg"`, `precond="bddc"`, `maxsteps=500`, `tol=1e-8`. `tol` is
+relative to the right-hand side. After a sweep, plot how each sample converged:
 
 ```python
 proj.fds.fom.plot_residual(per_excitation=True)      # proj.fds.foms.plot_residual() for several parts
 ```
 
 A sample that stops at `maxsteps` without reaching `tol` is not converged: raise
-`maxsteps`, or switch to `"direct"` for that model.
+`maxsteps`, or switch to `"direct"` for that model. A COCG solve that GMRES had to finish
+is reported in the progress output (`verbose=True`) as "finished by GMRES".
 
 ## Save memory
 

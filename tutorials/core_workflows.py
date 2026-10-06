@@ -7,10 +7,10 @@ THIS FILE IS THE ALWAYS-CURRENT REFERENCE FOR HOW THE CORE PIECES CONNECT.
 It MUST be updated whenever core functionality changes or a new core feature
 is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
-Last updated: 2026-09-29 (a reduced model lists the resonances near its
-training band -- section 1e; a chain's sections are reused by a second solve
-and reduced again from their staged files; reopening restores every stage --
-section 3).  What changed: CHANGELOG.md.
+Last updated: 2026-10-06 (beam excitation: proj.add_beam(), fom.s_tilde,
+a beam added to a solved project, the parts' S~ joined by foms.concatenate()
+-- section 6; solve(solver_type='auto') is the default).  What changed:
+CHANGELOG.md.
 =============================================================================
 
 Operation philosophy
@@ -90,6 +90,11 @@ FOM_CFG = dict(fmin=1.8, fmax=2.4, nsamples=4, nportmodes=1, order=2)
 #   recomputes.  With 'second' the direct solver stores and factorises the
 #   symmetric system matrix as symmetric (same speed, half the memory); with
 #   'first' the full matrix factorises faster.
+#   solver_type='auto' (the default) factorises A(w) when the factorisation
+#   fits in free memory -- one factorisation per sample serves every port mode
+#   and beam -- and else solves iteratively: COCG with a BDDC preconditioner,
+#   finished by GMRES if COCG stalls (iterative_opts={'method': 'gmres'} to
+#   use GMRES throughout; 'tol' is relative to the right-hand side).
 
 
 def banner(msg):
@@ -502,6 +507,101 @@ print("""
      equal cutoffs (TE01/TE20 when a = 2b) are ordered by type and indices,
      so 'mode 2' is the same mode on every port.
 """)
+
+
+# =========================================================================== #
+# 6. BEAM EXCITATION:  proj.add_beam() -> fom.s_tilde, fom.beam_impedance()   #
+# =========================================================================== #
+banner("6. Beam: proj.add_beam() -> fom.s_tilde, fom.beam_impedance()")
+
+# A beam is a line current of 1 A along proj.main_axis at the speed of light
+# (beta = 1), at the transverse position x=, y= (metres; default: the axis).
+# It is project-level input (saved in project.json, the same name replaces).
+# The same solve() adds one column per beam and one row per voltage path --
+# every beam is a path; add_beam_path() adds paths without current -- to the
+# port results, as the generalised matrices
+#     fom.s_tilde = [[S, k], [h, z_b]]      fom.z_tilde = [[Z, k_Z], [h_Z, z_oc]]
+# k: the waves the beam sends into the port modes; h: the beam voltage of an
+# incoming wave; z_b / z_oc: the beam impedance with every port mode matched /
+# open.  fom.beam_impedance() = Z_par = -z_b (ports='open': -z_oc).  Labels:
+# port modes '1(1)', ..., beams and paths 'b(1)', ...; keys excitation first
+# ('b(1)2(1)' = k into port 2 mode 1, 'b(1)b(1)' = z_b).
+# The solver carries the scattered field E_s = E - E_free (the beam's own field
+# E_free is known in closed form): one factorisation per sample serves ports
+# and beams, the beam line need not be part of the mesh, and without a beam
+# every port result is bit-identical.  Curved walls: generate_mesh(curve_order=4)
+# (the beam impedance is sensitive to the wall's facets; the solve warns).
+# Materials off the beam line (dielectric, lossy) are fine; the beam itself
+# must run in vacuum and enter and leave through port faces across the axis.
+from netgen.occ import Glue
+
+
+class SteppedGuide(BaseGeometry):
+    """A 60 x 40 mm guide stepping down to 60 x 25 mm.  Two solids, 'wide' and
+    'narrow', meet 60 mm after the step (internal port 'port3')."""
+
+    def build(self):
+        a, b, b2 = 0.06, 0.04, 0.025
+        wide = Box(Pnt(0, 0, 0), Pnt(a, b, 0.05)) + Box(Pnt(0, 0, 0.05), Pnt(a, b2, 0.11))
+        narrow = Box(Pnt(0, 0, 0.11), Pnt(a, b2, 0.16))
+        wide.mat("wide")
+        narrow.mat("narrow")
+        self.geo = Glue([wide, narrow])
+        for f in self.geo.faces:
+            lo, hi = f.bounding_box
+            across = hi.z - lo.z < 1e-6           # a face across the axis
+            f.name = ({0.0: "port1", 0.16: "port2", 0.11: "port3"}.get(round(lo.z, 6), "default")
+                      if across else "default")
+        self.bc = "default"
+
+
+BEAM_CFG = dict(fmin=3.0, fmax=4.0, nsamples=3, nportmodes=3, order=2, solver_type="direct")
+
+# 6a. One piece: the beam on the narrow guide's axis, through the step
+proj6 = EMProject(name="beam_step", base_dir=str(WORK), overwrite=True)
+proj6.geometry = SteppedGuide()
+proj6.generate_mesh(maxh=0.012)
+proj6.add_beam("beam", x=0.03, y=0.0125)
+proj6.fds.solve(config=dict(BEAM_CFG, per_domain=False))      # the whole mesh: fds.fom
+fom6 = proj6.fds.fom
+rows, cols = fom6.tilde_labels
+print(f"   S~ rows {rows}\n      columns {cols}")
+print(f"   Z_par = {np.round(fom6.beam_impedance(), 3)} Ohm "
+      f"(open ports: {np.round(fom6.beam_impedance(ports='open'), 3)})")
+#   fom6.s_tilde_dict['b(1)1(1)'] (k into port 1 mode 1), fom6.plot_beam_impedance(),
+#   fom6.beam_field(i) (E_s + E_free at sample i), fom6.z_tilde: all saved in
+#   fds/fom/{s_tilde,z_tilde,snapshots_beam}/ and matrices/beam_global.h5.
+
+# 6b. A beam added to a SOLVED project: only the beam columns are solved (with
+# the stored port solutions), the port results stay bit for bit.  The same
+# after reopening; remove_beam() drops the beam results again.
+proj1b = EMProject(name="single_rwg", base_dir=str(WORK))       # solved in section 1
+S_before = proj1b.fds.fom._S_matrix.copy()
+proj1b.add_beam("beam", x=A / 2, y=B_ / 2)
+proj1b.fds.solve(config=FOM_CFG)
+print(f"   beam added to single_rwg: S unchanged "
+      f"{np.array_equal(proj1b.fds.fom._S_matrix, S_before)}, S~ "
+      f"{proj1b.fds.fom.s_tilde.shape[1:]}")
+#   In a uniform guide the beam's field is the guide's own: Z_par, k and h are 0.
+#   This mesh (maxh 60 mm, made for the port modes) is far too coarse for the
+#   beam's field, which is strong near the walls: a beam needs a finer mesh
+#   (maxh 10 mm, order 3 here gives |Z_par| < 1e-3 Ohm; tests/test_beam.py).
+
+# 6c. FOM + concatenation: the parts solved one by one (their faces to each
+# other are ports), each with its S~; foms.concatenate() joins them at the cut
+# (CSC-BEAM): the waves leaving one face enter the other, the beam current is
+# the same in both parts, their beam voltages add.  No full-order matrices are
+# built; the join holds the full-order frequencies (reduced models do not
+# carry the beam yet).
+proj6p = EMProject(name="beam_step_parts", base_dir=str(WORK), overwrite=True)
+proj6p.geometry = SteppedGuide()
+proj6p.generate_mesh(maxh=0.012)
+proj6p.add_beam("beam", x=0.03, y=0.0125)
+proj6p.fds.solve(config=dict(BEAM_CFG, per_domain=True, global_method=None))
+joined6 = proj6p.fds.foms.concatenate()
+rel = np.abs(joined6.beam_impedance() - fom6.beam_impedance()) / np.abs(fom6.beam_impedance())
+print(f"   parts joined vs one piece: Z_par differs by {rel.max():.1%} "
+      f"(the modes carried at the cut, and the two meshes' solutions)")
 
 print(f"All tutorial artifacts under: {WORK}")
 banner("DONE")

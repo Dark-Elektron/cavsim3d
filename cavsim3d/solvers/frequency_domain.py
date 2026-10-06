@@ -20,7 +20,7 @@ from ngsolve import (
     curl, dx, ds, BoundaryFromVolumeCF, CoefficientFunction, Norm, preconditioners,
 )
 from ngsolve.webgui import Draw
-from ngsolve.krylovspace import GMResSolver
+from ngsolve.krylovspace import GMResSolver, CGSolver
 from cavsim3d.solvers.results import build_fom_collection
 from cavsim3d.solvers.nedelec import check_kind, hcurl_flags
 from cavsim3d.core.constants import mu0, eps0, c0, Z0, MIN_EIGENVALUE
@@ -41,6 +41,47 @@ from cavsim3d.geometry.base import _display_webgui_fallback
 # sparsecholesky is NGSolve's built-in LDL^T -- always compiled into the wheel,
 # no external dependency -- and factors those systems fine.
 _DIRECT_SOLVER = "sparsecholesky" if platform.system() == "Darwin" else "pardiso"
+
+
+def _available_memory() -> Optional[float]:
+    """Free memory in bytes, or None if it cannot be read."""
+    try:
+        import psutil
+        return float(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def direct_memory_estimate(n_free: int, nnz: int, complex_: bool = True,
+                           symmetric: bool = False, inverse: str = "pardiso") -> float:
+    """Bytes a sparse direct factorisation of A(w) is expected to take at its peak.
+
+    Fitted to the peak memory of 23 PARDISO factorisations of H(curl) systems
+    on tetrahedral meshes (orders 1-3, both Nedelec kinds, real and complex,
+    2.6k to 714k free unknowns), which it matches within 12 %:
+    0.61 GB (n_free / 1e5)^1.41 (nnz / n_free / 50)^0.10, times 1.70 for a
+    complex system and 0.66 for symmetric storage.  Structured and hybrid
+    meshes fill more (up to 30 % in earlier runs), hence ``_MEMORY_SAFETY``.
+    NGSolve's sparse Cholesky peaks at about 0.55 times PARDISO.
+    """
+    n = max(int(n_free), 1)
+    density = max(float(nnz) / n, 1.0)
+    gb = 0.609 * (n / 1e5) ** 1.413 * (density / 50.0) ** 0.100
+    if complex_:
+        gb *= 1.70
+    if symmetric:
+        gb *= 0.66
+    return gb * 1e9 * _INVERSE_MEMORY_FACTOR.get(inverse, 1.0) * _MEMORY_SAFETY
+
+
+_INVERSE_MEMORY_FACTOR = {"pardiso": 1.0, "sparsecholesky": 0.55}
+_MEMORY_SAFETY = 1.25
+
+
+def _nnz(matrix) -> Optional[int]:
+    """Stored entries of a scipy sparse matrix, None without one."""
+    return int(matrix.nnz) if matrix is not None and hasattr(matrix, 'nnz') else None
+
 
 def _real_csr(ngmat) -> sp.csr_matrix:
     """scipy CSR copy of an assembled NGSolve matrix.
@@ -95,14 +136,22 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     >>> fds.solve(1, 10, 100, per_domain=True)
     """
 
-    # --- Iterative solver defaults ---
-    AUTO_DOF_THRESHOLD = 400_000   # solver_type="auto": iterative above this many DOFs
+    # --- Solver defaults ---
+    # solver_type="auto" factorises when the factorisation fits in this share
+    # of the free memory, else it solves iteratively.  Without a memory reading
+    # it falls back to the number of unknowns.
+    AUTO_MEMORY_SHARE = 0.6
+    AUTO_DOF_THRESHOLD = 400_000
+    # 'tol' is relative to the right-hand side: the preconditioned residual of
+    # the start vector x = 0, whatever start vector the sweep passes.
     DEFAULT_ITERATIVE_OPTS = {
+        'method': 'cocg',
         'precond': 'bddc',
         'maxsteps': 500,
-        'tol': 1e-6,
+        'tol': 1e-8,
         'printrates': False,
     }
+    ITERATIVE_METHODS = ('cocg', 'gmres')
 
     def __init__(
         self,
@@ -205,6 +254,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Reset resonant mode cache
         self._resonant_mode_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+        # Beam excitation (solvers/beam.py): the beams of a solver without a
+        # project, the beam outputs of the last solve per system ('global' or
+        # a domain), their generalised matrices, and the fingerprint of the
+        # beam definition they belong to
+        self._beam_setup = None
+        self._beam_raw: Dict[str, Dict] = {}
+        self._beam_systems: Dict[str, object] = {}
+        self._beam_tilde: Dict[str, Dict] = {}
+        self._beam_fingerprint: Optional[str] = None
 
         # Validate boundary conditions
         self._validate_boundary_conditions()
@@ -889,6 +948,73 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     def fes(self):
         """Convenience access to the global Finite Element Space."""
         return self._fes_global
+
+    @property
+    def beam_setup(self):
+        """The beams of the next solve, a :class:`~cavsim3d.solvers.beam.BeamSetup`
+        with at least one beam, or None.
+
+        A project's beams (``proj.add_beam``) are read from the project; a
+        solver without a project uses the setup assigned here.
+        """
+        ref = getattr(self, '_project_ref', None)
+        setup = (getattr(ref, 'beam_setup', None) if ref is not None
+                 else getattr(self, '_beam_setup', None))
+        return setup if setup else None
+
+    @beam_setup.setter
+    def beam_setup(self, setup) -> None:
+        self._beam_setup = setup
+
+    #: curve order below which a beam on curved walls is warned about
+    BEAM_MIN_CURVE_ORDER = 4
+
+    def _warn_beam_curving(self) -> None:
+        """Warn (once per mesh) if a beam is solved on curved walls that the mesh
+        follows only to curve order < 4.
+
+        E_free is large and nearly normal to the walls of a pipe around the
+        beam; the facets of a curved mesh tilt it into a tangential datum of
+        their own, which the beam impedance is sensitive to (a few per cent
+        at curve order 2-3, below 0.1 % at 4 in the convergence study).
+        """
+        if getattr(self, '_beam_curving_checked', None) is self._mesh:
+            return
+        self._beam_curving_checked = self._mesh
+        order = getattr(self.geometry, 'curve_order', None)
+        if order is None or order >= self.BEAM_MIN_CURVE_ORDER:
+            return
+        try:
+            curved = bool(np.any(self._mesh.ngmesh.Elements2D().NumPy()['curved']))
+        except Exception:
+            return
+        if curved:
+            pr.warning(
+                f"The beam runs past curved walls that the mesh follows to curve order "
+                f"{order}: the beam impedance is sensitive to the wall's facets (errors of "
+                f"a few per cent). Mesh with generate_mesh(curve_order="
+                f"{self.BEAM_MIN_CURVE_ORDER}) for beam results.")
+
+    def _make_beam_system(self, key: str, fes, B: np.ndarray, excitation_keys,
+                          region_materials: Optional[List[str]] = None):
+        """Beam data of one system (None without a beam).  ``excitation_keys``
+        is the system's ``(index, port, mode)`` list, the columns of ``B``."""
+        setup = self.beam_setup
+        if setup is None:
+            return None
+        from cavsim3d.solvers.beam import BeamSystem
+        columns: Dict[str, List[int]] = {}
+        for col, (_pm, port, _m) in enumerate(excitation_keys):
+            columns.setdefault(port, []).append(col)
+        materials = {m: self._material_props(m) for m in set(self.mesh.GetMaterials())}
+        self._warn_beam_curving()
+        t0 = time.time()
+        system = BeamSystem(self, key, fes, B, columns, setup, materials, region_materials)
+        crossed = [f.port for f in system.faces if any(f.crossed)]
+        pr.info(f"  Beam data ({key}): {system.n_sources} beam(s), {system.n_paths} path(s), "
+                f"crossing {crossed or 'no port face'} ({time.time() - t0:.1f} s)")
+        self._beam_systems[key] = system
+        return system
 
     @property
     def n_ports(self) -> int:
@@ -1826,14 +1952,32 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     # === Iterative solver helpers ===
 
-    def _resolve_solver_type(self, solver_type: str, fes) -> str:
-        """Resolve 'auto' to 'direct' or 'iterative' based on DOF count."""
+    def _resolve_solver_type(self, solver_type: str, fes, nnz: Optional[int] = None) -> str:
+        """Resolve 'auto': 'direct' when the factorisation fits in free memory.
+
+        A factorisation serves every right-hand side of a sample (port modes
+        and beams) and is never slowed down by a resonance, so it is preferred
+        whenever it fits in ``AUTO_MEMORY_SHARE`` of the free memory; otherwise
+        the sweep runs iteratively.  ``nnz`` is the number of entries of the
+        system matrix (that of K).  Without a memory reading the choice falls
+        back to ``AUTO_DOF_THRESHOLD`` unknowns.
+        """
         if solver_type != 'auto':
             return solver_type
         ndof = fes.ndof if fes is not None else 0
-        chosen = 'iterative' if ndof > self.AUTO_DOF_THRESHOLD else 'direct'
-        pr.echo(f"  Auto solver: {ndof} DOFs → '{chosen}' "
-            f"(threshold: {self.AUTO_DOF_THRESHOLD})")
+        free = _available_memory()
+        if free is None or nnz is None:
+            chosen = 'iterative' if ndof > self.AUTO_DOF_THRESHOLD else 'direct'
+            pr.echo(f"  Auto solver: {ndof} unknowns -> '{chosen}' "
+                    f"(threshold: {self.AUTO_DOF_THRESHOLD})")
+            return chosen
+        n_free = int(sum(fes.FreeDofs()))
+        need = direct_memory_estimate(
+            n_free, nnz, complex_=fes.is_complex,
+            symmetric=self._store_symmetric('direct'), inverse=_DIRECT_SOLVER)
+        chosen = 'direct' if need <= self.AUTO_MEMORY_SHARE * free else 'iterative'
+        pr.echo(f"  Auto solver: {ndof} unknowns, a factorisation needs about "
+                f"{need / 1e9:.1f} GB of {free / 1e9:.1f} GB free -> '{chosen}'")
         return chosen
 
     def _merge_iterative_opts(self, user_opts: Optional[Dict]) -> Dict:
@@ -1841,12 +1985,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         opts = dict(self.DEFAULT_ITERATIVE_OPTS)
         if user_opts:
             opts.update(user_opts)
+        opts['method'] = str(opts['method']).lower()
+        if opts['method'] not in self.ITERATIVE_METHODS:
+            raise ValueError(f"iterative_opts['method'] must be one of "
+                             f"{list(self.ITERATIVE_METHODS)}, got {opts['method']!r}")
         return opts
 
     def _prepare_iterative(self, fes, opts: Dict):
         """Prepare FES for iterative solve (logging only, no mesh mutation)."""
-        pr.info(f"  Iterative mode: precond='{opts.get('precond', 'multigrid')}', "
-            f"tol={opts.get('tol', 1e-6)}, maxsteps={opts.get('maxsteps', 100)}")
+        pr.info(f"  Iterative mode: {opts['method'].upper()}, precond='{opts['precond']}', "
+                f"tol={opts['tol']} (relative), maxsteps={opts['maxsteps']}")
         pr.info(f"  FES ndof: {fes.ndof}")
         return fes
 
@@ -2100,6 +2248,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # never recomputed).  Continue with fds.foms.reduce(tol).concatenate().
         asm_netlist = self._netlist_assembly()
         if asm_netlist is not None:
+            if self.beam_setup is not None:
+                pr.warning("The beam is not solved for coupled parts (imported or repeated) "
+                           "yet: only the port results are. Glue the parts, or solve them "
+                           "as one model, for beam results.")
             cfg['fmin'], cfg['fmax'], cfg['nsamples'] = fmin, fmax, nsamples
             return self._solve_netlist(asm_netlist, cfg)
 
@@ -2113,7 +2265,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         compute_s_params = cfg.get('compute_s_params', True)
         per_domain = cfg.get('per_domain', True)
         global_method = cfg.get('global_method', 'coupled')
-        solver_type = cfg.get('solver_type', 'iterative')
+        solver_type = cfg.get('solver_type', 'auto')
         iterative_opts = cfg.get('iterative_opts')
         # rerun: None (default) = reuse results for the SAME request and
         # recompute automatically when anything that affects them changed;
@@ -2179,12 +2331,22 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     diffs = self._compare_current_sweep(fmin, fmax, nsamples,
                                                         order, nportmodes, nedelec)
                 diffs += port_setting_diffs
+                diffs += self._beam_diffs()
 
             if rerun is False or (rerun is None and not diffs):
                 cached = self._cached_results_or_none(
                     diffs, compute_s_params, per_domain, global_method)
                 if cached is not None:
                     return cached
+            if (rerun is None and diffs and set(diffs) <= set(self.BEAM_DIFFS)
+                    and self._has_valid_results()):
+                # Only the beam is new: keep the port results, add its columns
+                if self._port_snapshots_available():
+                    return self._solve_beam_only(store_snapshots, solver_type,
+                                                 self._merge_iterative_opts(iterative_opts),
+                                                 compute_s_params)
+                pr.info("  The port solutions were not stored (store_snapshots=False): "
+                        "the beam needs them, so everything is solved again.")
             recompute = rerun is True or bool(diffs)
             if rerun is None and diffs and self._has_valid_results():
                 pr.info("  The request differs from the stored results -> "
@@ -2265,6 +2427,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 # (_compute_s_from_z rescales TEM ports to the line reference).
                 self._Z_global_coupled = self._Z_matrix
                 self._S_global_coupled = self._S_matrix
+            if self._beam_raw:
+                self._compute_beam_tilde(compute_s_params)
+                self._beam_fingerprint = self.beam_setup.fingerprint()
 
             self._invalidate_cache()
 
@@ -2299,10 +2464,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         store_snapshots: bool,
         solver_type: str = 'auto',
         iter_opts: Optional[Dict] = None,
+        beam_only: bool = False,
     ) -> None:
-        """Solve each domain independently using NGSolve with fast Z-extraction."""
-        import time
+        """Solve each domain on its own: its faces to other domains are ports.
 
+        ``beam_only``: the port results are stored; solve the beam columns
+        only, with the stored port solutions for h_Z.
+        """
         iter_opts = iter_opts or self._merge_iterative_opts(None)
 
         for domain in self.domains:
@@ -2316,122 +2484,26 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             mesh_mats = self._get_domain_mesh_materials(domain)
             domain_materials = [(mm, *self._material_props(mm)) for mm in mesh_mats]
 
-            # Resolve solver type for this domain
-            st = self._resolve_solver_type(solver_type, fes)
+            st = self._resolve_solver_type(solver_type, fes, nnz=_nnz(self.K.get(domain)))
             pr.debug(f"  Solver type: {st}")
-
-            # Prepare multigrid if iterative
             if st == 'iterative':
                 fes = self._prepare_iterative(fes, iter_opts)
                 self._fes[domain] = fes
 
-            # Get pre-assembled B matrix for fast Z extraction
-            B = self.B[domain]
-            x_dtype = complex if fes.is_complex else float
-
-            # Build excitation ordering
+            # Excitation order: the domain's ports, each with its modes
             excitation_keys = []
             for pm, port_m in enumerate(domain_ports):
                 if port_m not in self.port_modes:
                     continue
                 for mode_m in sorted(self.port_modes[port_m].keys()):
                     excitation_keys.append((pm, port_m, mode_m))
-
             n_excitations = len(excitation_keys)
             n_freqs = len(self.frequencies)
 
             u, v = fes.TnT()
 
-            # ============================================================
-            # PRE-ASSEMBLE: Frequency-independent RHS vectors (NGSolve native)
-            # We store as list of BaseVectors for efficient NGSolve operations
-            # ============================================================
-            pr.debug(f"  Pre-assembling {n_excitations} RHS vectors...")
-            
-            # Create a template vector for cloning
-            template_vec = LinearForm(fes)
-            with TaskManager():
-                template_vec.Assemble()
-            template_vec = template_vec.vec
-            
-            # Store base RHS vectors (without omega scaling)
-            rhs_base_vectors = []
-            # for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-            #     f = LinearForm(fes)
-            #     f += InnerProduct(
-            #         self.port_modes[port_m][mode_m], v.Trace()
-            #     ) * ds(port_m)
-            #     with TaskManager():
-            #         f.Assemble()
-                
-            #     # Clone the vector (not just reference)
-            #     vec = template_vec.CreateVector()
-            #     vec.data = f.vec
-            #     rhs_base_vectors.append(vec)
-
-            for col in range(n_excitations):
-                vec = template_vec.CreateVector()
-                vec.FV().NumPy()[:] = B[:, col]   # ← direct copy, no integration
-                rhs_base_vectors.append(vec)
-
-            # ============================================================
-            # PRE-COMPUTE: Free DOF indices (once per domain)
-            # ============================================================
-            freedofs = fes.FreeDofs()
-            free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]], dtype=np.int64)
-            n_free = len(free_idx)
-            pr.debug(f"  DOFs: {fes.ndof} total, {n_free} free")
-
-            # Samples an interrupted solve of this same sweep already computed
-            ckpt, restored = self._open_sweep_checkpoint(domain, fes, n_free, B,
-                                                         store_snapshots)
-
-            # Pre-allocate results
-            Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-            # snapshots: one column per (sample, excitation), filled in place
-            snaps = (np.empty((fes.ndof, n_freqs * n_excitations), dtype=x_dtype, order='F')
-                     if store_snapshots else None)
-
-            total_iter_steps = 0
-            freq_iters = []
-            freq_residuals = []
-
-            # Pre-allocate reusable vectors for the solve loop
-            rhs_scaled = template_vec.CreateVector()
-            sol_vec = template_vec.CreateVector()
-
-            # ============================================================
-            # FREQUENCY LOOP
-            # ============================================================
-            batch = max(1, n_freqs // 10)
-            t_batch, n_restored = time.time(), 0
-            x_prev = None          # previous sample's solutions: GMRES start vectors
-            for kk, freq in enumerate(self.frequencies):
-                if kk % batch == 0:
-                    pr.debug(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
-
-                if kk in restored:
-                    r = restored[kk]
-                    Z_matrix[kk] = r['Z']
-                    freq_iters.extend(r['iters'].tolist())
-                    freq_residuals.extend(r['res'].tolist())
-                    if store_snapshots:
-                        snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = r['x']
-                    x_prev = r['x']
-                    n_restored += 1
-                    if (kk + 1) % batch == 0 or kk == n_freqs - 1:
-                        self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
-                                           freq_residuals, n_excitations, st, iter_opts,
-                                           restored=n_restored)
-                        t_batch, n_restored = time.time(), 0
-                    continue
-
-                t_freq_start = time.time()
-                omega = 2 * np.pi * freq
-
-                # Build system matrix: A(w) = K + jwC - w^2 (M - jD)
-                sym = self._store_symmetric(st)
-                a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
+            def add_operator(a_form, omega):
+                # A(w) = K + jwC - w^2 (M - jD), per mesh material of the domain
                 for mm, eps_r, mu_r, sigma, tand in domain_materials:
                     a_form += (1 / (mu0 * mu_r)) * curl(u) * curl(v) * dx(region_pattern([mm]))
                     a_form += -omega ** 2 * (eps0 * eps_r) * u * v * dx(region_pattern([mm]))
@@ -2440,73 +2512,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     if tand:
                         a_form += 1j * omega ** 2 * (eps0 * eps_r * tand) * u * v * dx(region_pattern([mm]))
 
-                # Prepare solver
-                if st == 'direct':
-                    with TaskManager():
-                        a_form.Assemble()
-                        inv_a = a_form.mat.Inverse(
-                            freedofs=freedofs,
-                            inverse=_DIRECT_SOLVER
-                        )
-                else:
-                    precond = self._assemble_with_preconditioner(
-                        a_form, fes, iter_opts['precond'])
+            beam = self._make_beam_system(domain, fes, self.B[domain], excitation_keys,
+                                          region_materials=mesh_mats)
+            out = self._sweep(domain, fes, self.B[domain], add_operator, st, iter_opts,
+                              store_snapshots, beam=beam,
+                              port_x=self.snapshots[domain] if beam_only else None)
+            if beam is not None:
+                self._beam_raw[domain] = out['beam']
+            if beam_only:
+                pr.done(f"  Beam columns of {domain}: {time.time() - t_domain_start:.2f}s")
+                continue
+            Z_matrix = out['Z']
 
-                # ============================================================
-                # SOLVE: All excitations at this frequency
-                # Factorization is done once, each solve reuses it
-                # ============================================================
-                x_all = np.zeros((fes.ndof, n_excitations), dtype=x_dtype)
-
-                for col in range(n_excitations):
-                    # Scale pre-assembled RHS by omega
-                    rhs_scaled.data = omega * rhs_base_vectors[col]
-
-                    if st == 'direct':
-                        # Direct solve (forward/backward substitution only - factorization reused)
-                        sol_vec.data = inv_a * rhs_scaled
-                        freq_iters.append(0)
-                        freq_residuals.append(0.0)
-                    else:
-                        # start from the same excitation's solution at the
-                        # previous sample (fewer GMRES steps than a zero start)
-                        sol_vec, iters, res = self._solve_system(
-                            fes, a_form, rhs_scaled, precond, iter_opts,
-                            None if x_prev is None else x_prev[:, col], free_idx
-                        )
-                        total_iter_steps += iters
-                        freq_iters.append(iters)
-                        freq_residuals.append(res)
-
-                    # Store solution
-                    x_all[:, col] = sol_vec.FV().NumPy()
-
-                # release this sample's factorization / preconditioner before the
-                # next one is built (otherwise both are held at once)
-                inv_a = precond = None
-
-                # ============================================================
-                # Fast Z extraction: Z = 1j * B^H @ X
-                # ============================================================
-                Z_matrix[kk, :, :] = 1j * (B.T @ x_all)
-
-                # Store snapshots if requested
-                if store_snapshots:
-                    snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = x_all
-                x_prev = x_all
-
-                ckpt.write(kk, Z_matrix[kk], x_all if store_snapshots else None,
-                           freq_iters[-n_excitations:], freq_residuals[-n_excitations:],
-                           time.time() - t_freq_start)
-                if (kk + 1) % batch == 0 or kk == n_freqs - 1:
-                    self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
-                                       freq_residuals, n_excitations, st, iter_opts,
-                                       restored=n_restored)
-                    t_batch, n_restored = time.time(), 0
-
-            # ============================================================
-            # POST-PROCESS: Convert Z_matrix to dict format
-            # ============================================================
+            # Z as the solver's internal row-first dict
             self._Z_per_domain[domain] = {}
             for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
                 for row, (pn, port_n, mode_n) in enumerate(excitation_keys):
@@ -2514,12 +2532,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     self._Z_per_domain[domain][key] = Z_matrix[:, row, col]
 
             if store_snapshots and n_excitations:
-                self.snapshots[domain] = snaps
+                self.snapshots[domain] = out['snapshots']
 
             t_elapsed = time.time() - t_domain_start
             msg = f"  Completed: {len(domain_ports)} ports, {n_freqs} frequencies in {t_elapsed:.2f}s"
             if st == 'iterative':
-                msg += f" (total iteration steps: {total_iter_steps})"
+                msg += f" (total iteration steps: {out['total_iters']})"
             pr.done(f"  {msg}")
 
             from cavsim3d.utils.timing import get_timing_registry
@@ -2529,17 +2547,21 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 solver_type=st,
             )
 
-            self._store_residuals(domain, n_freqs, freq_iters, freq_residuals, st, iter_opts)
+            self._store_residuals(domain, n_freqs, out['iters'], out['residuals'], st,
+                                  iter_opts, out['methods'])
 
     def _solve_global_coupled(
         self,
         store_snapshots: bool,
         solver_type: str = 'auto',
         iter_opts: Optional[Dict] = None,
+        beam_only: bool = False,
         ) -> None:
-        """Solve entire structure as one coupled system with fast Z-extraction."""
-        import time
+        """Solve the entire structure as one coupled system.
 
+        ``beam_only``: the port results are stored; solve the beam columns
+        only, with the stored port solutions for h_Z.
+        """
         t_start = time.time()
 
         if iter_opts is None:
@@ -2547,14 +2569,17 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         if self._fes_global is None:
             self._assemble_global_matrices()
+        elif bool(self._fes_global.is_complex) != self._is_lossy():
+            # a space rebuilt on reopening is real; losses need a complex one
+            self._fes_global = HCurl(self.mesh, order=self.order, **hcurl_flags(self.nedelec),
+                                     complex=self._is_lossy(), dirichlet=self.bc)
 
         fes = self._fes_global
-        st = self._resolve_solver_type(solver_type, fes)
+        st = self._resolve_solver_type(solver_type, fes, nnz=_nnz(self.K_global))
 
         # Build spatially-varying material CoefficientFunctions
         eps_r_cf, mu_r_cf = self._build_material_cfs()
         sigma_cf, eps_tand_cf = self._build_loss_cfs()
-        x_dtype = complex if fes.is_complex else float
 
         if st == 'iterative':
             fes = self._prepare_iterative(fes, iter_opts)
@@ -2570,7 +2595,6 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 continue
             for mode_m in sorted(self.port_modes[port_m].keys()):
                 excitation_keys.append((pm, port_m, mode_m))
-
         n_excitations = len(excitation_keys)
         n_freqs = len(self.frequencies)
 
@@ -2579,101 +2603,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # different numbers of modes.
         self._port_mode_order = [(p, m) for (_pm, p, m) in excitation_keys]
 
-        # Get global B matrix
-        B = self.B_global
-
         u, v = fes.TnT()
 
-        # ============================================================
-        # PRE-ASSEMBLE: Frequency-independent RHS vectors
-        # ============================================================
-        pr.debug(f"  Pre-assembling {n_excitations} RHS vectors...")
-        
-        template_vec = LinearForm(fes)
-        with TaskManager():
-            template_vec.Assemble()
-        template_vec = template_vec.vec
-        rhs_base_vectors = []
-        
-        # for col, (pm, port_m, mode_m) in enumerate(excitation_keys):
-        #     f = LinearForm(fes)
-        #     f += InnerProduct(
-        #         self.port_modes[port_m][mode_m], v.Trace()
-        #     ) * ds(port_m)
-            
-        #     with TaskManager():
-        #         f.Assemble()
-            
-        #     vec = template_vec.CreateVector()
-        #     vec.data = f.vec
-        #     rhs_base_vectors.append(vec)
-
-        for col in range(n_excitations):
-            vec = template_vec.CreateVector()
-            vec.FV().NumPy()[:] = B[:, col]   # ← direct copy, no integration
-            rhs_base_vectors.append(vec)
-
-        # ============================================================
-        # PRE-COMPUTE: Free DOF indices
-        # ============================================================
-        freedofs = fes.FreeDofs()
-        free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]], dtype=np.int64)
-        n_free = len(free_idx)
-        pr.debug(f"  DOFs: {fes.ndof} total, {n_free} free")
-
-        # Samples an interrupted solve of this same sweep already computed
-        ckpt, restored = self._open_sweep_checkpoint('global', fes, n_free, B,
-                                                     store_snapshots)
-
-        # Pre-allocate results
-        self._Z_matrix = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
-        # snapshots: one column per (sample, excitation), filled in place
-        snaps = (np.empty((fes.ndof, n_freqs * n_excitations), dtype=x_dtype, order='F')
-                 if store_snapshots else None)
-
-        total_iter_steps = 0
-        freq_iters = []
-        freq_residuals = []
-        freq_solve_times = []          # per-frequency wall time (all excitations)
-
-        # Pre-allocate reusable vectors
-        rhs_scaled = template_vec.CreateVector()
-        sol_vec = template_vec.CreateVector()
-
-        # ============================================================
-        # FREQUENCY LOOP
-        # ============================================================
-        batch = max(1, n_freqs // 10)
-        t_batch, n_restored = time.time(), 0
-        x_prev = None          # previous sample's solutions: GMRES start vectors
-        for kk, freq in enumerate(self.frequencies):
-            if kk % batch == 0:
-                pr.debug(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
-
-            if kk in restored:
-                r = restored[kk]
-                self._Z_matrix[kk] = r['Z']
-                freq_iters.extend(r['iters'].tolist())
-                freq_residuals.extend(r['res'].tolist())
-                freq_solve_times.append(r['time'])
-                if store_snapshots:
-                    snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = r['x']
-                x_prev = r['x']
-                n_restored += 1
-                if (kk + 1) % batch == 0 or kk == n_freqs - 1:
-                    self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
-                                       freq_residuals, n_excitations, st, iter_opts,
-                                       restored=n_restored)
-                    t_batch, n_restored = time.time(), 0
-                continue
-
-            t_freq_start = time.time()
-            omega = 2 * np.pi * freq
-
-            # Build system matrix A(w) = K + jwC - w^2 (M - jD) -- exactly the
-            # K/M/C/D _global matrices that the ROM and eigen solvers use.
-            sym = self._store_symmetric(st)
-            a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
+        def add_operator(a_form, omega):
+            # A(w) = K + jwC - w^2 (M - jD) -- exactly the K/M/C/D _global
+            # matrices that the ROM and eigen solvers use
             a_form += (1 / (mu0 * mu_r_cf)) * curl(u) * curl(v) * dx
             a_form += -omega ** 2 * (eps0 * eps_r_cf) * u * v * dx
             if sigma_cf is not None:
@@ -2681,73 +2615,29 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             if eps_tand_cf is not None:
                 a_form += 1j * omega ** 2 * eps0 * eps_tand_cf * u * v * dx
 
-            # Prepare solver
-            if st == 'direct':
-                with TaskManager():
-                    a_form.Assemble()
-                    inv_a = a_form.mat.Inverse(
-                        freedofs=freedofs,
-                        inverse=_DIRECT_SOLVER
-                    )
-            else:
-                precond = self._assemble_with_preconditioner(
-                    a_form, fes, iter_opts['precond'])
-            # Solve for all excitations
-            x_all = np.zeros((fes.ndof, n_excitations), dtype=x_dtype)
-
-            for col in range(n_excitations):
-                rhs_scaled.data = omega * rhs_base_vectors[col]
-
-                if st == 'direct':
-                    sol_vec.data = inv_a * rhs_scaled
-                    freq_iters.append(0)
-                    freq_residuals.append(0.0)
-                else:
-                    # start from the same excitation's solution at the previous
-                    # sample (fewer GMRES steps than a zero start)
-                    sol_vec, iters, res = self._solve_system(
-                        fes, a_form, rhs_scaled, precond, iter_opts,
-                        None if x_prev is None else x_prev[:, col], free_idx
-                    )
-                    total_iter_steps += iters
-                    freq_iters.append(iters)
-                    freq_residuals.append(res)
-
-                x_all[:, col] = sol_vec.FV().NumPy()
-
-            # release this sample's factorization / preconditioner before the
-            # next one is built (otherwise both are held at once)
-            inv_a = precond = None
-
-            # Fast Z extraction
-            self._Z_matrix[kk, :, :] = 1j * (B.T @ x_all)
-
-            if store_snapshots:
-                snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = x_all
-            x_prev = x_all
-
-            freq_solve_times.append(time.time() - t_freq_start)
-            ckpt.write(kk, self._Z_matrix[kk], x_all if store_snapshots else None,
-                       freq_iters[-n_excitations:], freq_residuals[-n_excitations:],
-                       freq_solve_times[-1])
-            if (kk + 1) % batch == 0 or kk == n_freqs - 1:
-                self._report_batch(kk - kk % batch, kk, t_batch, freq_iters,
-                                   freq_residuals, n_excitations, st, iter_opts,
-                                   restored=n_restored)
-                t_batch, n_restored = time.time(), 0
+        beam = self._make_beam_system('global', fes, self.B_global, excitation_keys)
+        out = self._sweep('global', fes, self.B_global, add_operator, st, iter_opts,
+                          store_snapshots, beam=beam,
+                          port_x=self.snapshots['global'] if beam_only else None)
+        if beam is not None:
+            self._beam_raw['global'] = out['beam']
+        if beam_only:
+            pr.done(f"  Beam columns: {time.time() - t_start:.2f}s")
+            return
+        self._Z_matrix = out['Z']
 
         if store_snapshots and n_excitations:
-            self.snapshots["global"] = snaps
+            self.snapshots["global"] = out['snapshots']
 
         self._Z_global_coupled = self._Z_matrix.copy()
         # Expose per-frequency solve times (freq[Hz], seconds) for reporting.
         self._freq_solve_times = list(zip([float(f) for f in self.frequencies],
-                                          freq_solve_times))
+                                          out['times']))
 
         t_elapsed = time.time() - t_start
         msg = f"\nCoupled solve complete: {len(target_ports)} external ports in {t_elapsed:.2f}s"
         if st == 'iterative':
-            msg += f" (total iteration steps: {total_iter_steps})"
+            msg += f" (total iteration steps: {out['total_iters']})"
         pr.done(f"  {msg}")
 
         from cavsim3d.utils.timing import get_timing_registry
@@ -2757,7 +2647,233 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             solver_type=st,
         )
 
-        self._store_residuals('global', n_freqs, freq_iters, freq_residuals, st, iter_opts)
+        self._store_residuals('global', n_freqs, out['iters'], out['residuals'], st,
+                              iter_opts, out['methods'])
+
+    def _sweep(self, key: str, fes, B: np.ndarray, add_operator, st: str,
+               iter_opts: Dict, store_snapshots: bool, beam=None,
+               port_x: Optional[np.ndarray] = None) -> Dict:
+        """Frequency sweep of one system:  A(w) x = w b  for every column b of B.
+
+        ``add_operator(a_form, omega)`` adds A(w) to an empty BilinearForm on
+        ``fes``.  Per sample, one factorisation (``st='direct'``) or one
+        preconditioner (``'iterative'``) serves every column; an iterative
+        solve starts from the same column's solution at the previous sample.
+        Samples of an interrupted sweep are read back from its checkpoint.
+
+        ``beam`` (a :class:`~cavsim3d.solvers.beam.BeamSystem`, or None) adds
+        one column per beam with the same factorisation / preconditioner: the
+        load f - A g for the free unknowns, then e_s = x + g (two real columns,
+        Re and Im, when the system is real).  ``port_x`` (the stored port
+        solutions, one column per sample and excitation) skips the port
+        solves: only the beam columns are solved, and ``Z`` stays zero.
+
+        Returns a dict: ``Z`` (n_freqs, n, n) with Z = j B^T X; ``snapshots``
+        (ndof, n_freqs * n) or None; per solve ``iters``, ``residuals`` and
+        ``methods``; per sample ``times``; ``total_iters`` of the solves run;
+        with a beam, ``beam``: ``kZ`` (n_freqs, n, S), ``hZ`` (n_freqs, L, n),
+        ``zoc`` (n_freqs, L, S), ``snapshots`` (ndof, n_freqs * S) or None and
+        the beam solves' ``iters`` and ``residuals``.
+        """
+        n_excitations = B.shape[1]
+        n_freqs = len(self.frequencies)
+        x_dtype = complex if fes.is_complex else float
+
+        # Frequency-independent right-hand sides: the columns of B
+        pr.debug(f"  Pre-assembling {n_excitations} RHS vectors...")
+        template_vec = LinearForm(fes)
+        with TaskManager():
+            template_vec.Assemble()
+        template_vec = template_vec.vec
+        rhs_base_vectors = []
+        for col in range(n_excitations):
+            vec = template_vec.CreateVector()
+            vec.FV().NumPy()[:] = B[:, col]   # the assembled port load, no integration
+            rhs_base_vectors.append(vec)
+
+        freedofs = fes.FreeDofs()
+        free_idx = np.array([i for i in range(fes.ndof) if freedofs[i]], dtype=np.int64)
+        n_free = len(free_idx)
+        pr.debug(f"  DOFs: {fes.ndof} total, {n_free} free")
+
+        # Samples an interrupted solve of this same sweep already computed
+        ckpt, restored = self._open_sweep_checkpoint(
+            key if port_x is None else f"{key}_beam", fes, n_free, B,
+            store_snapshots, beam=beam, port_solves=port_x is None)
+
+        Z = np.zeros((n_freqs, n_excitations, n_excitations), dtype=complex)
+        # snapshots: one column per (sample, excitation), filled in place
+        snaps = (np.empty((fes.ndof, n_freqs * n_excitations), dtype=x_dtype, order='F')
+                 if store_snapshots else None)
+
+        n_src = beam.n_sources if beam is not None else 0
+        if beam is not None:
+            n_path = beam.n_paths
+            kZ = np.zeros((n_freqs, n_excitations, n_src), dtype=complex)
+            hZ = np.zeros((n_freqs, n_path, n_excitations), dtype=complex)
+            zoc = np.zeros((n_freqs, n_path, n_src), dtype=complex)
+            beam_snaps = (np.empty((fes.ndof, n_freqs * n_src), dtype=complex, order='F')
+                          if store_snapshots else None)
+            beam_iters, beam_res = [], []
+            rhs_beam = template_vec.CreateVector()
+            xb_prev = None     # previous sample's free parts, per beam and part
+
+        total_iters = 0
+        iters, residuals, methods, times = [], [], [], []
+        rhs_scaled = template_vec.CreateVector()
+        sol_vec = template_vec.CreateVector()
+
+        batch = max(1, n_freqs // 10)
+        t_batch, n_restored = time.time(), 0
+        x_prev = None          # previous sample's solutions: Krylov start vectors
+        for kk, freq in enumerate(self.frequencies):
+            if kk % batch == 0:
+                pr.debug(f"  Frequency {kk + 1}/{n_freqs}: {freq / 1e9:.4f} GHz")
+
+            if kk in restored and port_x is not None:
+                r = restored[kk]
+                kZ[kk], hZ[kk], zoc[kk] = r['beam_kZ'], r['beam_hZ'], r['beam_zoc']
+                if store_snapshots:
+                    beam_snaps[:, kk * n_src:(kk + 1) * n_src] = r['beam_x']
+                xb_prev = None
+                times.append(r['time'])
+                continue
+            if kk in restored:
+                r = restored[kk]
+                Z[kk] = r['Z']
+                iters.extend(r['iters'].tolist())
+                residuals.extend(r['res'].tolist())
+                methods.extend(['restored'] * n_excitations)
+                times.append(r['time'])
+                if store_snapshots:
+                    snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = r['x']
+                x_prev = r['x']
+                if beam is not None:
+                    kZ[kk], hZ[kk], zoc[kk] = r['beam_kZ'], r['beam_hZ'], r['beam_zoc']
+                    if store_snapshots:
+                        beam_snaps[:, kk * n_src:(kk + 1) * n_src] = r['beam_x']
+                    xb_prev = None
+                n_restored += 1
+                if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                    self._report_batch(kk - kk % batch, kk, t_batch, iters, residuals,
+                                       n_excitations, st, iter_opts, restored=n_restored,
+                                       methods=methods)
+                    t_batch, n_restored = time.time(), 0
+                continue
+
+            t_freq_start = time.time()
+            omega = 2 * np.pi * freq
+
+            sym = self._store_symmetric(st)
+            a_form = BilinearForm(fes, symmetric=sym, symmetric_storage=sym)
+            add_operator(a_form, omega)
+            if st == 'direct':
+                with TaskManager():
+                    a_form.Assemble()
+                    inv_a = a_form.mat.Inverse(freedofs=freedofs, inverse=_DIRECT_SOLVER)
+            else:
+                precond = self._assemble_with_preconditioner(
+                    a_form, fes, iter_opts['precond'])
+
+            # All excitations of this sample with the one factorisation /
+            # preconditioner
+            x_all = np.zeros((fes.ndof, n_excitations), dtype=x_dtype)
+            if port_x is not None:
+                x_all[:] = port_x[:, kk * n_excitations:(kk + 1) * n_excitations]
+            for col in (range(n_excitations) if port_x is None else ()):
+                rhs_scaled.data = omega * rhs_base_vectors[col]
+                if st == 'direct':
+                    # forward/backward substitution only: the factorisation is reused
+                    sol_vec.data = inv_a * rhs_scaled
+                    iters.append(0)
+                    residuals.append(0.0)
+                    methods.append('direct')
+                else:
+                    # start from the same excitation's solution at the previous
+                    # sample (fewer steps than a zero start)
+                    sol_vec, n_it, res, used = self._solve_system(
+                        fes, a_form, rhs_scaled, precond, iter_opts,
+                        None if x_prev is None else x_prev[:, col], free_idx)
+                    total_iters += n_it
+                    iters.append(n_it)
+                    residuals.append(res)
+                    methods.append(used)
+                x_all[:, col] = sol_vec.FV().NumPy()
+
+            beam_x = None
+            if beam is not None:
+                # the beam columns: A x = f - A g on the free unknowns, e_s = x + g
+                beam_x = np.zeros((fes.ndof, n_src), dtype=complex)
+                xb_now = []
+                for j in range(n_src):
+                    parts = []
+                    for part, (g, f_vec) in enumerate(beam.lift_and_load(j, omega)):
+                        rhs_beam.FV().NumPy()[:] = f_vec
+                        rhs_beam.data -= a_form.mat * g.vec
+                        if st == 'direct':
+                            sol_vec.data = inv_a * rhs_beam
+                            beam_iters.append(0)
+                            beam_res.append(0.0)
+                        else:
+                            sol_vec, n_it, res, _used = self._solve_system(
+                                fes, a_form, rhs_beam, precond, iter_opts,
+                                None if xb_prev is None else xb_prev[j][part], free_idx)
+                            total_iters += n_it
+                            beam_iters.append(n_it)
+                            beam_res.append(res)
+                        x_free = sol_vec.FV().NumPy().copy()
+                        parts.append(x_free)
+                        e_part = x_free + g.vec.FV().NumPy()
+                        beam_x[:, j] += e_part if part == 0 else 1j * e_part
+                    xb_now.append(parts)
+                xb_prev = xb_now
+                for j in range(n_src):
+                    kZ[kk, :, j] = beam.port_voltages(j, omega, beam_x[:, j])
+                zoc[kk] = beam.voltages(omega, beam_x)
+                hZ[kk] = 1j * beam.voltages(omega, x_all)
+                if store_snapshots:
+                    beam_snaps[:, kk * n_src:(kk + 1) * n_src] = beam_x
+
+            # release this sample's factorization / preconditioner before the
+            # next one is built (otherwise both are held at once)
+            inv_a = precond = None
+
+            if port_x is not None:
+                times.append(time.time() - t_freq_start)
+                ckpt.write(kk, Z[kk], None, [], [], times[-1],
+                           extra=dict(beam_kZ=kZ[kk], beam_hZ=hZ[kk], beam_zoc=zoc[kk],
+                                      **({'beam_x': beam_x} if store_snapshots else {})))
+                pr.debug(f"  \tsample {kk + 1}: beam columns {times[-1]:.1f} s")
+                continue
+
+            # Z = j B^T X
+            Z[kk, :, :] = 1j * (B.T @ x_all)
+
+            if store_snapshots:
+                snaps[:, kk * n_excitations:(kk + 1) * n_excitations] = x_all
+            x_prev = x_all
+
+            times.append(time.time() - t_freq_start)
+            extra = None
+            if beam is not None:
+                extra = dict(beam_kZ=kZ[kk], beam_hZ=hZ[kk], beam_zoc=zoc[kk])
+                if store_snapshots:
+                    extra['beam_x'] = beam_x
+            ckpt.write(kk, Z[kk], x_all if store_snapshots else None,
+                       iters[-n_excitations:], residuals[-n_excitations:], times[-1],
+                       extra=extra)
+            if (kk + 1) % batch == 0 or kk == n_freqs - 1:
+                self._report_batch(kk - kk % batch, kk, t_batch, iters, residuals,
+                                   n_excitations, st, iter_opts, restored=n_restored,
+                                   methods=methods)
+                t_batch, n_restored = time.time(), 0
+
+        out = dict(Z=Z, snapshots=snaps, iters=iters, residuals=residuals,
+                   methods=methods, times=times, total_iters=total_iters)
+        if beam is not None:
+            out['beam'] = dict(kZ=kZ, hZ=hZ, zoc=zoc, snapshots=beam_snaps,
+                               iters=beam_iters, residuals=beam_res)
+        return out
 
     _PRECONDITIONERS = {
         'local': lambda a: preconditioners.Local(a),
@@ -2799,14 +2915,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     @staticmethod
     def _report_batch(first, last, t_start, freq_iters, freq_residuals,
-                      n_excitations, solver_type, opts, restored=0):
+                      n_excitations, solver_type, opts, restored=0, methods=None):
         """Print the wall time of samples ``first``..``last`` (0-based).
 
         Indented one tab deeper than the ``Frequency k/N`` line that opens the
-        batch.  For the iterative solver it adds the GMRES steps per solve,
-        the largest relative residual and how many solves reached ``maxsteps``
-        without converging.  ``restored`` samples came from the checkpoint of
-        an interrupted solve and are not timed.
+        batch.  For the iterative solver it adds the Krylov method and its
+        steps per solve, the largest relative residual, how many solves
+        reached ``maxsteps`` without converging and how many COCG solves were
+        finished by GMRES (``methods``, one entry per solve).  ``restored``
+        samples came from the checkpoint of an interrupted solve and are not
+        timed.
         """
         n = last - first + 1 - restored
         span = f"  \tsamples {first + 1}-{last + 1}: "
@@ -2820,11 +2938,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         its = np.asarray(freq_iters[first * n_excitations:(last + 1) * n_excitations])
         res = np.asarray(freq_residuals[first * n_excitations:(last + 1) * n_excitations])
         if solver_type == 'iterative' and its.size:
-            msg += (f", GMRES {its.mean():.0f} steps/solve (max {its.max()}), "
+            name = str(opts.get('method', 'gmres')).upper()
+            msg += (f", {name} {its.mean():.0f} steps/solve (max {its.max()}), "
                     f"residual <= {res.max():.1e}")
             stalled = int(np.sum(its >= opts['maxsteps']))
             if stalled:
                 msg += f", {stalled} solve(s) stopped at maxsteps={opts['maxsteps']}"
+            used = (methods or [])[first * n_excitations:(last + 1) * n_excitations]
+            fallbacks = sum(m == 'cocg+gmres' for m in used)
+            if fallbacks:
+                msg += f", {fallbacks} solve(s) finished by GMRES"
         pr.debug(msg)
 
     def _checkpoint_root(self) -> Optional[Path]:
@@ -2839,11 +2962,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         root = getattr(self, '_project_path', None)
         return Path(root) / "fds" / "checkpoint" if root else None
 
-    def _open_sweep_checkpoint(self, key, fes, n_free, rhs, store_snapshots):
+    def _open_sweep_checkpoint(self, key, fes, n_free, rhs, store_snapshots, beam=None,
+                               port_solves: bool = True):
         """The checkpoint of this sweep and the samples it already holds.
 
         Samples without stored solutions do not count when snapshots are
         wanted (they were written by a solve with ``store_snapshots=False``).
+        With a beam the sweep's identity includes the beam definition, and a
+        sample counts only with its beam outputs.
         """
         from cavsim3d.solvers.sweep_checkpoint import (SweepCheckpoint, rhs_signature,
                                                        sweep_fingerprint)
@@ -2853,11 +2979,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         ckpt = SweepCheckpoint(
             folder, key,
             sweep_fingerprint(self.frequencies, fes.ndof, n_free, np.shape(rhs)[1],
-                              self._material_signature()),
+                              self._material_signature(),
+                              beam=beam.setup.fingerprint() if beam is not None else None),
             rhs_signature(rhs))
+        need = ('beam_kZ', 'beam_hZ', 'beam_zoc') if beam is not None else ()
         restored = {k: r for k, r in ckpt.load().items()
                     if 0 <= k < len(self.frequencies)
-                    and (r['x'] is not None or not store_snapshots)}
+                    and (not port_solves or r['x'] is not None or not store_snapshots)
+                    and all(r.get(n) is not None for n in need)
+                    and (beam is None or not store_snapshots
+                         or r.get('beam_x') is not None)}
         if restored:
             pr.milestone(f"  Resuming an interrupted sweep ({key}): {len(restored)} of "
                          f"{len(self.frequencies)} samples read from {ckpt.folder}")
@@ -2865,46 +2996,75 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     def _solve_system(self, fes, a_form, f_vec, precond, opts: Dict, x0=None,
                       free_idx=None):
-        """Solve ``a_form.mat * x = f_vec`` with preconditioned GMRES.
+        """Solve ``a_form.mat * x = f_vec`` with a preconditioned Krylov method.
 
-        ``opts['tol']`` is the absolute tolerance on the preconditioned
-        residual (NGSolve's ``atol``); ``opts['maxsteps']`` caps the Krylov
-        space.  ``x0`` (a numpy vector) is the start vector; zero if None.
+        ``opts['method']`` is ``'cocg'`` (conjugate gradients with the
+        unconjugated product, for complex symmetric matrices -- the default)
+        or ``'gmres'``.  ``opts['tol']`` is relative to the right-hand side:
+        the solve stops when the preconditioned residual is ``tol`` times that
+        of the zero start vector, so a warm start ``x0`` (a numpy vector; zero
+        if None) saves steps without tightening the tolerance.  A COCG solve
+        that breaks down or stops at ``opts['maxsteps']`` without reaching the
+        tolerance is continued by GMRES from its iterate.
 
         Returns
         -------
         x : BaseVector
             Solution.
         iters : int
-            GMRES (Arnoldi) steps.
+            Krylov steps, of both methods when GMRES finished a COCG solve.
         residual : float
             True relative residual ||Ax - b|| / ||b|| on the free DOFs.
+        method : str
+            ``'cocg'``, ``'gmres'`` or ``'cocg+gmres'``.
         """
-        # The GMResSolver object counts its own steps: an iteration callback
-        # would make NGSolve rebuild the solution at every step.
-        solver = GMResSolver(
-            mat=a_form.mat,
-            # a Preconditioner exposes .mat; the 'direct' option already is one
-            pre=getattr(precond, 'mat', precond),
-            maxiter=opts['maxsteps'],
-            atol=opts['tol'],
-            printrates=opts['printrates'],
-        )
+        mat = a_form.mat
+        # a Preconditioner exposes .mat; the 'direct' option already is one
+        pre = getattr(precond, 'mat', precond)
         sol = f_vec.CreateVector()
         if x0 is None:
             sol[:] = 0
         else:
             sol.FV().NumPy()[:] = x0
+        pf = f_vec.CreateVector()
+        r = f_vec.CreateVector()
         with TaskManager():
-            # initialize=False keeps the start vector (GMRes() would zero it)
-            sol = solver.Solve(rhs=f_vec, sol=sol, initialize=False)
-            if opts['printrates']:
-                print('=' * 50)
-            # the first residual check is the start vector, not a step
+            pf.data = pre * f_vec
+        tol = float(opts['tol'])
+        iters, method = 0, opts.get('method', 'cocg')
+        # The solver objects count their own steps: an iteration callback would
+        # make NGSolve rebuild the solution at every step.  initialize=False
+        # keeps the start vector; the first residual check is the start vector,
+        # not a step.
+        if method == 'cocg':
+            # COCG's residual measure is sqrt|r^T P r|; relative to the zero start
+            ref = np.sqrt(abs(pf.InnerProduct(f_vec, conjugate=False)))
+            solver = CGSolver(mat=mat, pre=pre, conjugate=False, maxiter=opts['maxsteps'],
+                              atol=max(tol * ref, 1e-300), printrates=opts['printrates'])
+            with TaskManager():
+                solver.Solve(rhs=f_vec, sol=sol, initialize=False)
             iters = max(solver.iterations - 1, 0)
-
-            r = sol.CreateVector()
-            r.data = a_form.mat * sol - f_vec
+            last = solver.residuals[-1] if solver.residuals else np.inf
+            if not (np.isfinite(last) and last <= solver._final_residual):
+                # broke down or stopped at maxsteps: GMRES continues from the
+                # iterate (from the start vector if the iterate is not finite)
+                if not np.all(np.isfinite(sol.FV().NumPy())):
+                    if x0 is None:
+                        sol[:] = 0
+                    else:
+                        sol.FV().NumPy()[:] = x0
+                method = 'cocg+gmres'
+        if method != 'cocg':
+            solver = GMResSolver(mat=mat, pre=pre, maxiter=opts['maxsteps'],
+                                 atol=max(tol * Norm(pf), 1e-300),
+                                 printrates=opts['printrates'])
+            with TaskManager():
+                solver.Solve(rhs=f_vec, sol=sol, initialize=False)
+            iters += max(solver.iterations - 1, 0)
+        if opts['printrates']:
+            print('=' * 50)
+        with TaskManager():
+            r.data = mat * sol - f_vec
 
         # Norms on the free DOFs only (Dirichlet rows are not solved for)
         if free_idx is None:
@@ -2914,7 +3074,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         b_norm = np.linalg.norm(f_vec.FV().NumPy()[free_idx])
         rel_res = r_norm / b_norm if b_norm > 0 else r_norm
 
-        return sol, iters, rel_res
+        return sol, iters, rel_res, method
 
     def _ensure_matrices_assembled(
         self,
@@ -3089,6 +3249,10 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             ),
             "solver_history": self._solver_history,
             "geometry_history": getattr(self.geometry, '_history', []),
+            # the beam definition the stored beam results belong to
+            "beam": ({"fingerprint": self._beam_fingerprint,
+                      "setup": next(iter(self._beam_tilde.values())).get('setup')}
+                     if self._beam_tilde else None),
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -3105,6 +3269,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             ps.save_to_file(port_file)
         elif port_file.exists():
             port_file.unlink()
+
+        # Beam: the electrostatic port solutions Phi_reg (own file: the port
+        # modes do not depend on the beam)
+        beam_file = fds_path / "port_modes" / "beam_port_fields.pkl"
+        if self._beam_systems:
+            import pickle
+            from cavsim3d.solvers.beam import port_fields
+            beam_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(beam_file, "wb") as fh:
+                pickle.dump({"fingerprint": self._beam_fingerprint,
+                             "systems": {k: port_fields(b)
+                                         for k, b in self._beam_systems.items()}}, fh)
+        elif not self._beam_tilde and beam_file.exists():
+            beam_file.unlink()
 
         # 3. FOMs & ROMs (Hierarchical Persistence)
         if self._fom_cache is not None or self._Z_global_coupled is not None:
@@ -3204,6 +3382,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._global_matrices_assembled = config.get("global_matrices_assembled", False)
         self._per_domain_matrices_assembled = config.get("per_domain_matrices_assembled", False)
         self._current_global_method = config.get("current_global_method", None)
+        self._beam_fingerprint = (config.get("beam") or {}).get("fingerprint")
         
         # Robustly reconstitute frequencies from metadata right away
         f_min, f_max, n_samp = config.get("fmin"), config.get("fmax"), config.get("nsamples")
@@ -3372,6 +3551,161 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         self._foms_cache = None
         # Clear resonant modes
         self._resonant_mode_cache = {}
+        # Beam outputs belong to the port results they were solved with
+        self._clear_beam_results()
+
+    #: _beam_diffs() reasons that leave the port results valid
+    BEAM_DIFFS = ("a beam was added", "the beam definition changed")
+
+    def _port_snapshots_available(self) -> bool:
+        """True if every solved system kept its port solutions (h_Z needs them)."""
+        keys = list(self._Z_per_domain) or (['global'] if self._Z_matrix is not None else [])
+        return bool(keys) and all(
+            self.snapshots.get(k) is not None
+            and np.shape(self.snapshots[k])[1] == len(self.frequencies) * self._n_port_modes_of(k)
+            for k in keys)
+
+    def _n_port_modes_of(self, key: str) -> int:
+        if key == 'global':
+            return 0 if self._Z_matrix is None else int(self._Z_matrix.shape[1])
+        return len(self._domain_port_mode_order(key))
+
+    def _solve_beam_only(self, store_snapshots: bool, solver_type: str, iter_opts: Dict,
+                         compute_s_params: bool) -> Dict:
+        """Add the beam columns to stored port results.
+
+        A(w) is assembled and factorised (or preconditioned) again per
+        sample for the beam's right-hand sides; h_Z comes from the stored port
+        solutions.  The port results themselves are not touched.
+        """
+        self._sync_and_validate_mesh()
+        pr.milestone("Beam added to solved port results: solving the beam columns only "
+                     "(the port results are kept).")
+        self._beam_raw, self._beam_systems, self._beam_tilde = {}, {}, {}
+        if self._Z_per_domain:
+            self._solve_per_domain(store_snapshots, solver_type=solver_type,
+                                   iter_opts=iter_opts, beam_only=True)
+        else:
+            self._solve_global_coupled(store_snapshots, solver_type=solver_type,
+                                       iter_opts=iter_opts, beam_only=True)
+        self._compute_beam_tilde(compute_s_params)
+        self._beam_fingerprint = self.beam_setup.fingerprint()
+        # the result objects in memory get the beam (their ROMs stay)
+        if self._fom_cache is not None:
+            self._fom_cache._beam = self._beam_tilde.get(self._fom_cache.domain)
+        if self._foms_cache is not None:
+            for fom in self._foms_cache:
+                fom._beam = self._beam_tilde.get(fom.domain)
+        self._persist()
+        if getattr(self, '_checkpoint_dir', None) is None:
+            from cavsim3d.solvers.sweep_checkpoint import clear_checkpoints
+            clear_checkpoints(self._checkpoint_root())
+        return self._build_results_dict(compute_s_params, bool(self._Z_per_domain),
+                                        None if self._Z_per_domain else 'coupled')
+
+    def _clear_beam_results(self) -> None:
+        """Drop the beam outputs (in memory; save() removes their files)."""
+        self._beam_raw = {}
+        self._beam_systems = {}
+        self._beam_tilde = {}
+        self._beam_fingerprint = None
+
+    def _beam_diffs(self) -> List[str]:
+        """Why the stored beam results do not answer the request (empty: they do).
+
+        A beam added, changed or removed since the results were solved; the
+        port results themselves are unaffected by the beam.
+        """
+        setup = self.beam_setup
+        stored = self._beam_fingerprint
+        if setup is None:
+            if stored is not None or self._beam_tilde:
+                pr.info("  The beam was removed: its results are dropped "
+                        "(the port results stay).")
+                self._clear_beam_results()
+                for fom in ([self._fom_cache] if self._fom_cache is not None else []) + \
+                        (list(self._foms_cache) if self._foms_cache is not None else []):
+                    fom._beam = None
+                joined = getattr(self._foms_cache, '_concat_cache', None)
+                if joined is not None and getattr(joined, '_scattering_join', False):
+                    # joined through the parts' S~: meaningless without the beam
+                    self._foms_cache._concat_cache = None
+                    if self._project_path:
+                        import shutil
+                        shutil.rmtree(Path(self._project_path) / "fds" / "foms" / "concat",
+                                      ignore_errors=True)
+                self._persist()          # removes the beam files
+            return []
+        if not self._has_valid_results():
+            return []
+        if stored is None:
+            return ["a beam was added"]
+        if stored != setup.fingerprint():
+            return ["the beam definition changed"]
+        return []
+
+    def _compute_beam_tilde(self, compute_s_params: bool) -> None:
+        """Generalised matrices of every system solved with a beam.
+
+        Z~ = [[Z, k_Z], [h_Z, z_oc]] in the normalisation of the reported Z;
+        S~ = [[S, k], [h, z_b]] with the same reference impedances as S.  TEM
+        ports are rescaled to the line reference exactly as Z is
+        (k_Z -> D k_Z, h_Z -> h_Z D); S~ does not depend on that scaling.
+        """
+        from cavsim3d.solvers import beam as bm
+        setup = self.beam_setup
+        self._beam_tilde = {}
+        for key, raw in self._beam_raw.items():
+            kZ, hZ, zoc = raw['kZ'], raw['hZ'], raw['zoc']
+            n_f = len(self.frequencies)
+            if key == 'global':
+                Z = self._Z_matrix
+                n = Z.shape[1]
+                labels = [f"{p}({m})" for p, m in
+                          self._matrix_index_labels(n, self._n_modes_per_port or 1)]
+                scale = self._reference_rescale_factors() if compute_s_params else None
+                if scale is not None:
+                    d = np.sqrt(scale)
+                    kZ = d[None, :, None] * kZ
+                    hZ = hZ * d[None, None, :]
+                Zt = bm.z_tilde(Z, kZ, hZ, zoc)
+                St = None
+                if compute_s_params:
+                    Zref = np.array([self._get_impedance_matrix(f) for f in self.frequencies])
+                    St = bm.s_tilde(Z, kZ, hZ, zoc, Zref)
+            else:
+                order = self._domain_port_mode_order(key)
+                Z = self._domain_dict_to_matrix(key, self._Z_per_domain[key])
+                labels = [f"{pi + 1}({m + 1})" for (pi, _pn, m) in order]
+                # the per-domain Z is reported in the modes' own normalisation;
+                # S~ uses the line reference of TEM ports, as the per-domain S
+                Zt = bm.z_tilde(Z, kZ, hZ, zoc)
+                St = None
+                if compute_s_params:
+                    scale = np.ones(len(order))
+                    for ri, (_pi, pn, m) in enumerate(order):
+                        zt = self._get_port_impedance(pn, m, self.frequencies[0])
+                        zw = self._port_wave_impedance(pn, m, self.frequencies[0])
+                        if zw is not None and abs(zw) > 1e-12:
+                            scale[ri] = abs(zt) / abs(zw)
+                    d = np.sqrt(scale)
+                    Zs = Z * np.outer(d, d)[None]
+                    Zref = np.array([np.diag([self._get_port_impedance(pn, m, f)
+                                              for (_pi, pn, m) in order])
+                                     for f in self.frequencies])
+                    St = bm.s_tilde(Zs, d[None, :, None] * kZ, hZ * d[None, None, :], zoc,
+                                    Zref)
+            rows, cols = bm.matrix_labels(labels, setup)
+            system = self._beam_systems.get(key)
+            self._beam_tilde[key] = {
+                'Z_tilde': Zt, 'S_tilde': St, 'rows': rows, 'cols': cols,
+                'frequencies': np.asarray(self.frequencies).copy(),
+                'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
+                'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
+                'summary': system.summary() if system is not None else raw.get('summary'),
+            }
+            if n_f and not np.all(np.isfinite(Zt)):
+                pr.warning(f"  Beam ({key}): the generalised matrix has non-finite entries.")
 
     def _print_solve_config(
         self,
@@ -3401,11 +3735,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         freq_residuals: List[float],
         solver_type: str,
         opts: Optional[Dict] = None,
+        methods: Optional[List[str]] = None,
     ) -> None:
-        """Store the per-sample GMRES steps and residuals of one solve.
+        """Store the per-sample Krylov steps and residuals of one solve.
 
-        ``opts`` (the iterative options) adds ``maxsteps`` and ``tol``, so a
-        plot can show which solves stopped at the step limit.
+        ``opts`` (the iterative options) adds ``method``, ``maxsteps`` and
+        ``tol``, so a plot can show which solves stopped at the step limit;
+        ``methods`` (one entry per solve) counts the COCG solves that GMRES
+        finished.
         """
         if not hasattr(self, '_residuals'):
             self._residuals = {}
@@ -3427,8 +3764,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             'solver_type': solver_type,
         }
         if solver_type == 'iterative' and opts:
+            self._residuals[key]['method'] = str(opts.get('method', 'gmres'))
             self._residuals[key]['maxsteps'] = int(opts['maxsteps'])
             self._residuals[key]['tol'] = float(opts['tol'])
+            self._residuals[key]['gmres_fallbacks'] = int(
+                sum(m == 'cocg+gmres' for m in (methods or [])))
 
     def _domain_port_mode_order(self, domain: str):
         """Ordered ``(local_port_idx, port_name, mode_idx)`` for a domain.
@@ -3542,6 +3882,19 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             results['Z_per_domain'] = self._Z_per_domain.copy()
             results['S_per_domain'] = self._S_per_domain.copy() if compute_s_params else None
             results['domain_port_map'] = self.domain_port_map.copy()
+
+        # Beam: generalised matrices (with labels) per system
+        if self._beam_tilde:
+            if 'global' in self._beam_tilde and global_method is not None:
+                t = self._beam_tilde['global']
+                results['Z_tilde'] = t['Z_tilde']
+                results['S_tilde'] = t['S_tilde'] if compute_s_params else None
+                results['tilde_labels'] = (t['rows'], t['cols'])
+            if per_domain:
+                results['Z_tilde_per_domain'] = {
+                    d: t['Z_tilde'] for d, t in self._beam_tilde.items() if d != 'global'}
+                results['S_tilde_per_domain'] = {
+                    d: t['S_tilde'] for d, t in self._beam_tilde.items() if d != 'global'}
 
         # Snapshots
         results['snapshots'] = self.snapshots.copy()

@@ -57,8 +57,31 @@ No version has been released yet. The entries compare with the code published on
 - `Assembly.add(..., attach_port=...)` names the port of the neighbouring part to join.
 - `CITATION.cff`, issue and pull-request templates, a release workflow and pre-commit
   hooks.
+- **Beam excitation.** `proj.add_beam(name, x=, y=)` adds a beam (a line current of 1 A
+  at the speed of light along the main axis) and `proj.add_beam_path(name, ...)` a voltage
+  path without current; both are saved in `project.json`. A full-order solve then also
+  returns the generalised matrices `fom.s_tilde = [[S, k], [h, z_b]]` and
+  `fom.z_tilde = [[Z, k_Z], [h_Z, z_oc]]` (labels `b(1)`, ...),
+  `fom.beam_impedance()` (Z_par = -z_b), `fom.beam_field(i)` and the plots
+  `plot_s_tilde()`, `plot_z_tilde()`, `plot_beam_impedance()`. The scattered field is
+  solved with the same factorisation as the port modes; the beam line need not be part of
+  the mesh; materials off the beam line add a contrast load. Single parts and glued
+  parts (per part or in one piece); `foms.concatenate()` joins the parts' S~ at the faces
+  between them. A beam added to a solved project solves only the beam columns. Without
+  a beam the port results are unchanged. Files: `z_tilde/`, `s_tilde/`, `snapshots_beam/`,
+  `matrices/beam_<part>.h5`, `port_modes/beam_port_fields.pkl`. `beta = 1` and a beam in
+  vacuum only; reduced models do not carry the beam yet.
+- The solve warns when a beam runs past curved walls meshed with `curve_order` below 4.
 
 ### Changed
+
+- `solve(solver_type='auto')` is the default: a direct factorisation when it fits in 60 %
+  of the free memory (estimated from the number of unknowns and matrix entries), the
+  iterative solver otherwise. The default used to be `'iterative'`.
+- The iterative solver is COCG (conjugate gradients for complex-symmetric systems) with a
+  BDDC preconditioner; a solve that stalls is finished by GMRES.
+  `iterative_opts={'method': 'gmres'}` uses GMRES throughout. `tol` (default `1e-8`) is
+  relative to the right-hand side; it used to be an absolute `1e-6`.
 
 - `solve()` raises `TypeError` for an option it does not know, and suggests the closest
   one (`n_port_modes=2` → "did you mean 'nportmodes'?"). Unknown options used to be

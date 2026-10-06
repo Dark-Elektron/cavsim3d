@@ -27,6 +27,8 @@ Recipes for specific jobs, for readers who already know the basics from the
 - [Build a reliable reduced model](reduce_well.md): samples, tolerance, checks, spikes.
 - [Get the figures of merit of resonances](resonance_figures.md): loaded and external Q per
   port, R/Q, wall Q and geometry factor, peak fields, transverse kick, field flatness.
+- [Compute the beam impedance](beam_impedance.md): a beam through the structure, its
+  impedance and coupling to the port modes, parts joined.
 
 ## Results and projects
 

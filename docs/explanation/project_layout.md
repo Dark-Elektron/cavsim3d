@@ -48,7 +48,9 @@ Three rules keep the layout predictable:
 
 - **Every stage folder has the same five subfolders**: `matrices/`, `eigenmodes/`, `s/`,
   `z/`, `snapshots/`, plus the folder of the next stage nested inside it
-  (`fom/rom/`, `foms/roms/concat/`). What a stage is can be read from its path.
+  (`fom/rom/`, `foms/roms/concat/`). What a stage is can be read from its path. A beam
+  adds `z_tilde/`, `s_tilde/` and `snapshots_beam/` next to them, and leaves the port
+  files as they are.
 - **Parts are told apart by file name, not by folder.** A model of several parts keeps one
   `foms/` tree, with a file per part and quantity: `matrices/K_inlet.h5`,
   `s/s_slab.h5`, and so on. There are no per-part subfolders.

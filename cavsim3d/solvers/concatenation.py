@@ -30,6 +30,7 @@ from cavsim3d.solvers.eigen_mixin import ConcatEigenMixin
 from cavsim3d.core.constants import Z0, mu0, MIN_EIGENVALUE
 from cavsim3d.solvers.base import BaseEMSolver
 from cavsim3d.utils.plot_mixin import PlotMixin
+from cavsim3d.solvers.beam import BeamResultMixin
 from cavsim3d.rom.structures import ReducedStructure
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
 from cavsim3d.utils.names import region_pattern
@@ -146,7 +147,7 @@ def _warn_unresolved_join_modes(structures, connections) -> None:
                     UserWarning, stacklevel=3)
 
 
-class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
+class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMixin):
     """
     Unified structure formed by coupling multiple reduced-order models.
 
@@ -1193,13 +1194,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         mat_path = path / "matrices"
         mat_path.mkdir(parents=True, exist_ok=True)
         
-        with h5py.File(mat_path / "A.h5", "a") as fa, \
-             h5py.File(mat_path / "B.h5", "a") as fb, \
-             h5py.File(mat_path / "W.h5", "a") as fw:
-            H5Serializer.save_dataset(fa, "data", self.A_coupled)
-            H5Serializer.save_dataset(fb, "data", self.B_coupled)
-            if self.W_coupled is not None:
-                H5Serializer.save_dataset(fw, "data", self.W_coupled)
+        if self.A_coupled is not None:
+            with h5py.File(mat_path / "A.h5", "a") as fa, \
+                 h5py.File(mat_path / "B.h5", "a") as fb, \
+                 h5py.File(mat_path / "W.h5", "a") as fw:
+                H5Serializer.save_dataset(fa, "data", self.A_coupled)
+                H5Serializer.save_dataset(fb, "data", self.B_coupled)
+                if self.W_coupled is not None:
+                    H5Serializer.save_dataset(fw, "data", self.W_coupled)
         for name, mat in (("C", getattr(self, 'C_coupled', None)),
                           ("D", getattr(self, 'D_coupled', None))):
             if mat is not None:
@@ -1226,6 +1228,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         # 4. Save eigenmodes
         self.save_eigenmodes()
 
+        # 5. Beam: S~ of the joined model (FOM-level join only)
+        from cavsim3d.solvers import beam as _bm
+        tilde_file = path / "s_tilde" / "s_tilde.h5"
+        if getattr(self, '_beam', None):
+            _bm.save_tilde(tilde_file, self._beam, 'S')
+        elif tilde_file.exists():
+            tilde_file.unlink()
+
         metadata = {
             "n_structures": self.n_structures,
             "domains": self.domains,
@@ -1233,6 +1243,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             "n_internal": self._n_internal,
             "n_external": self._n_external,
             "n_modes_per_port": self._n_modes_per_port,
+            # joined through the parts' S~ (beam): no matrices
+            "scattering_join": bool(getattr(self, '_scattering_join', False)),
             "timestamp": datetime.now().isoformat()
         }
         ProjectManager.save_json(path, metadata)
@@ -1269,7 +1281,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         
         # 1. Load matrices from modular files or legacy matrices.h5
         mat_path = path / "matrices"
-        if mat_path.exists():
+        cs.A_coupled = cs.B_coupled = cs.W_coupled = None
+        cs._scattering_join = bool(metadata.get("scattering_join", False))
+        if mat_path.exists() and (mat_path / "A.h5").exists():
             with h5py.File(mat_path / "A.h5", "r") as f:
                 cs.A_coupled = H5Serializer.load_dataset(f["data"])
             with h5py.File(mat_path / "B.h5", "r") as f:
@@ -1331,6 +1345,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
             if log_file.exists():
                 cs._log_path = str(log_file)
 
+        # Beam: S~ of the joined model
+        from cavsim3d.solvers import beam as _bm
+        t = _bm.load_tilde(path / "s_tilde" / "s_tilde.h5")
+        cs._beam = (None if t is None else
+                    {'S_tilde': t['data'], 'Z_tilde': None, 'rows': t['rows'],
+                     'cols': t['cols'], 'frequencies': t['frequencies'],
+                     'names': t['names'], 'setup': t['setup'],
+                     'fingerprint': t['fingerprint'], 'summary': t['summary']})
+
         return cs
 
     def load_results(self, path: Union[str, Path]) -> bool:
@@ -1385,6 +1408,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
         """
         Solve the unified coupled system over a frequency range.
         """
+        if getattr(self, '_scattering_join', False):
+            raise RuntimeError(
+                "This model was joined through the parts' generalised scattering "
+                "matrices (beam): its results are those at the full-order "
+                f"frequencies ({len(self.frequencies)} samples, concat.frequencies). "
+                "Other frequencies need reduced models of the parts, which do not "
+                "carry the beam yet: solve the parts (proj.fds.solve) at the "
+                "frequencies you need.")
         # 1. Merge config and kwargs (a full-order config may be reused: its
         # full-order options are accepted and have no effect here)
         cfg = (config or {}).copy()
@@ -2973,6 +3004,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin):
     # =========================================================================
 
     def reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> 'ReducedConcatenatedSystem':
+        if getattr(self, '_scattering_join', False):
+            raise RuntimeError("A model joined through scattering matrices (beam) has no "
+                               "operator to reduce.")
+        return self._reduce(tol, max_rank)
+
+    def _reduce(self, tol: float = 1e-6, max_rank: Optional[int] = None) -> 'ReducedConcatenatedSystem':
         """
         Further reduce this system via POD on solution snapshots.
 

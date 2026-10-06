@@ -190,6 +190,8 @@ class EMProject:
         # name of the part while the project holds a single geometry.
         self._main_axis: Optional[str] = None
         self._part_name: Optional[str] = None
+        # Beams along the main axis (solvers/beam.py); saved in project.json
+        self._beam = None
         
         # Automatic Loading or Creation
         say = pr.milestone if self._announce else pr.debug
@@ -269,6 +271,9 @@ class EMProject:
         self._n_port_modes = metadata.get("n_port_modes", self._n_port_modes)
         self._main_axis = metadata.get("main_axis")
         self._part_name = metadata.get("part_name")
+        if metadata.get("beam"):
+            from cavsim3d.solvers.beam import BeamSetup
+            self._beam = BeamSetup.from_dict(metadata["beam"])
 
         # 1. Load Geometry FIRST
         has_geo = metadata.get("has_geometry", False)
@@ -391,11 +396,114 @@ class EMProject:
         axis = str(axis).upper()
         if axis not in ('X', 'Y', 'Z'):
             raise ValueError(f"main axis must be 'X', 'Y' or 'Z', got {axis!r}")
+        if self._beam is not None and self._beam.paths and self._beam.axis != axis:
+            raise ValueError(
+                f"The beams run along {self._beam.axis}: remove them "
+                "(remove_beam / remove_beam_path) before changing the main axis.")
         self._main_axis = axis
         if isinstance(self.geometry, Assembly):
             self.geometry.set_main_axis(axis)
         if not self._loading:
             self.save()
+
+    # =========================================================================
+    # Beams: lines parallel to the main axis (docs/theory/beam.md)
+    # =========================================================================
+    #
+    # A beam is a line current of 1 A travelling along +main_axis at the speed
+    # of light; the solve adds one column per beam and one row per voltage
+    # path to the generalised matrices s_tilde / z_tilde.  Every beam is also a
+    # path; add_beam_path adds paths without current.  The same name replaces.
+
+    def _beam_point(self, where: str, **position) -> tuple:
+        from cavsim3d.solvers.beam import transverse_names
+        axis = self.main_axis
+        allowed = transverse_names(axis)
+        unknown = sorted(set(position) - set(allowed))
+        if unknown:
+            raise TypeError(
+                f"{where}: unknown position keyword(s) {unknown}; with main_axis={axis!r} "
+                f"the beam's position is given by {allowed[0]}= and {allowed[1]}= (metres).")
+        point = [0.0, 0.0, 0.0]
+        for name in allowed:
+            point['xyz'.index(name)] = float(position.get(name, 0.0))
+        return tuple(point)
+
+    def _beam_definition(self):
+        from cavsim3d.solvers.beam import BeamSetup
+        if self._beam is None or not self._beam.paths:
+            self._beam = BeamSetup(axis=self.main_axis)
+        return self._beam
+
+    def add_beam(self, name: str = 'beam', *, beta: float = 1.0, **position):
+        """Add a beam: a line current of 1 A along ``main_axis`` at the speed of light.
+
+        The position is given by the two coordinates across the main axis, in
+        metres (``x=``, ``y=`` for the default main axis Z); left out, they
+        are 0 (the axis).  A beam of the same name is replaced.  ``beta`` must
+        be 1 for now.  The next ``proj.fds.solve()`` adds the beam's column
+        and its voltage row to ``s_tilde`` / ``z_tilde`` (labels ``b(1)``,
+        ...); ``fom.beam_impedance(name)`` gives Z_par.  Returns the beam.
+
+        >>> proj.add_beam('beam')                 # on the axis
+        >>> proj.add_beam('offset', x=2e-3)       # a second beam, 2 mm off
+        """
+        from cavsim3d.solvers.beam import BeamLine
+        line = BeamLine(name=str(name), point=self._beam_point('add_beam', **position),
+                        beta=float(beta), current=True)
+        setup = self._beam_definition()
+        if any(l.name == line.name and not l.current for l in setup.paths):
+            raise ValueError(f"{name!r} is a beam path; remove_beam_path({name!r}) first.")
+        setup.add(line)
+        self.save()
+        return line
+
+    def add_beam_path(self, name: str, *, beta: float = 1.0, **position):
+        """Add a voltage path: a line along ``main_axis`` without current.
+
+        Its voltage v = int E_a exp(j k_b s) ds adds a row to ``s_tilde`` /
+        ``z_tilde`` (e.g. to read the field of a beam away from its own
+        line).  Position keywords as in :meth:`add_beam`.  Returns the path.
+        """
+        from cavsim3d.solvers.beam import BeamLine
+        line = BeamLine(name=str(name), point=self._beam_point('add_beam_path', **position),
+                        beta=float(beta), current=False)
+        setup = self._beam_definition()
+        if any(l.name == line.name and l.current for l in setup.paths):
+            raise ValueError(f"{name!r} is a beam; remove_beam({name!r}) first.")
+        setup.add(line)
+        self.save()
+        return line
+
+    def remove_beam(self, name: str) -> None:
+        """Remove a beam (its own voltage path goes with it)."""
+        if self._beam is None:
+            raise KeyError(f"no beam named {name!r}")
+        self._beam.remove(name, current=True)
+        self.save()
+
+    def remove_beam_path(self, name: str) -> None:
+        """Remove a voltage path added with :meth:`add_beam_path`."""
+        if self._beam is None:
+            raise KeyError(f"no beam path named {name!r}")
+        self._beam.remove(name, current=False)
+        self.save()
+
+    @property
+    def beams(self) -> dict:
+        """The beams, ``{name: BeamLine}`` in label order (``b(1)``, ...)."""
+        return {l.name: l for l in self._beam.sources} if self._beam is not None else {}
+
+    @property
+    def beam_paths(self) -> dict:
+        """Every voltage path, ``{name: BeamLine}``: the beams' own lines first,
+        then the paths without current, in label order."""
+        return {l.name: l for l in self._beam.paths} if self._beam is not None else {}
+
+    @property
+    def beam_setup(self):
+        """The beam definition the solvers read (a ``BeamSetup``), or None."""
+        return self._beam if self._beam is not None and self._beam.paths else None
 
     @property
     def parts(self) -> dict:
@@ -853,6 +961,7 @@ class EMProject:
             "bc": self.bc,
             "main_axis": self._main_axis,
             "part_name": self._part_name,
+            "beam": self._beam.to_dict() if self._beam is not None and self._beam.paths else None,
         }
         ProjectManager.save_json(self.project_path, metadata, filename="project.json")
 

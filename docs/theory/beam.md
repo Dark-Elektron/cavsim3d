@@ -7,10 +7,17 @@ generalised scattering matrix $\tilde{\mathbf{S}}$ of the CSC-BEAM method (T. Fl
 *Phys. Rev. Accel. Beams* **23**, 034601 (2020)), through which segments are concatenated. Equation
 numbers in parentheses, such as (eq. 4), refer to that paper.
 
-!!! note "Formulation only"
-    The solver API does not include the beam excitation; this section derives its formulation.
-    The materials are those of [§1](maxwell.md): $\mu = \mu_0\mu_r$ and the complex permittivity
-    $\varepsilon_c$ with conductivity and loss tangent. The walls are perfect conductors.
+!!! note "What the code implements"
+    `proj.add_beam()` adds a beam to the full-order solve with the scattered-field
+    formulation of [§9.6](#96-scattered-field-formulation), for $\beta = 1$ and a beam line in
+    vacuum ($v_b^2\mu_b\varepsilon_b = 1$), with the contrast load wherever the material
+    differs. The outputs are $\tilde{\mathbf{Z}}$ ([§9.7](#97-port-voltages-and-currents-with-the-beam))
+    and $\tilde{\mathbf{S}}$ ([§9.8](#98-generalised-scattering-matrix)); full-order parts
+    are joined as in [§9.9](#99-concatenation-of-segments), all parts sharing one beam phase,
+    so $\mathbf{d} = (1, 1)$. The reduction of [§9.10](#910-model-order-reduction-with-the-beam)
+    is not implemented yet. The materials are those of [§1](maxwell.md):
+    $\mu = \mu_0\mu_r$ and the complex permittivity $\varepsilon_c$ with conductivity and
+    loss tangent. The walls are perfect conductors.
 
 ## 9.1 Beam Current
 

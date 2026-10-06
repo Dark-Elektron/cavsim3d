@@ -32,13 +32,18 @@ import numpy as np
 import cavsim3d.utils.printing as pr
 
 
-def sweep_fingerprint(frequencies, ndof: int, n_free: int, n_rhs: int, materials) -> str:
-    """Exact part of a sweep's identity."""
-    return hashlib.sha1(json.dumps({
+def sweep_fingerprint(frequencies, ndof: int, n_free: int, n_rhs: int, materials,
+                      beam: Optional[str] = None) -> str:
+    """Exact part of a sweep's identity (``beam``: the beam definition's
+    fingerprint, for a sweep with beam columns)."""
+    payload = {
         "frequencies_hz": [round(float(f)) for f in frequencies],
         "ndof": int(ndof), "n_free": int(n_free), "n_rhs": int(n_rhs),
         "materials": repr(materials),
-    }, sort_keys=True).encode()).hexdigest()
+    }
+    if beam is not None:
+        payload["beam"] = str(beam)
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def rhs_signature(rhs: np.ndarray) -> np.ndarray:
@@ -87,11 +92,15 @@ class SweepCheckpoint:
                     if not self._matches(d):
                         stale.append(f)
                         continue
-                    done[int(d["index"])] = {
+                    rec = {
                         "Z": d["Z"], "iters": d["iters"], "res": d["res"],
                         "time": float(d["time"]),
                         "x": d["x"] if "x" in d.files else None,
                     }
+                    for name in d.files:                 # beam outputs, if any
+                        if name.startswith("beam_"):
+                            rec[name] = d[name]
+                    done[int(d["index"])] = rec
             except Exception as e:                      # unreadable: recompute it
                 pr.warning(f"Ignoring unreadable checkpoint sample {f.name}: {e}")
                 stale.append(f)
@@ -103,8 +112,9 @@ class SweepCheckpoint:
         return done
 
     def write(self, k: int, Z: np.ndarray, x: Optional[np.ndarray], iters, res,
-              time_s: float) -> None:
-        """Store sample ``k`` (``x``: its solutions, one column per excitation)."""
+              time_s: float, extra: Optional[Dict[str, np.ndarray]] = None) -> None:
+        """Store sample ``k`` (``x``: its solutions, one column per excitation;
+        ``extra``: further arrays, e.g. the beam outputs ``beam_*``)."""
         if self.folder is None:
             return
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -115,6 +125,8 @@ class SweepCheckpoint:
                       res=np.asarray(res), time=np.array(time_s))
         if x is not None:
             arrays["x"] = np.asarray(x)
+        for name, value in (extra or {}).items():
+            arrays[name] = np.asarray(value)
         np.savez(tmp, **arrays)
         os.replace(tmp, self._file(k))
 

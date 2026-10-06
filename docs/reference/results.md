@@ -30,6 +30,47 @@ instead of `S` and `Z` (`Z_per_domain`, `S_per_domain`, `domain_port_map`); for 
 `rom.solve()`, `roms.solve()` and `concat.solve()` return `frequencies`, `S`, `Z`, `S_dict`,
 `Z_dict` with the same layout.
 
+With a beam (`proj.add_beam()`), the dictionary also holds:
+
+| Key | Type | Content |
+|---|---|---|
+| `S_tilde` | complex array `[n_f, n_pm + n_path, n_pm + n_beam]` | generalised scattering matrix $\tilde{S} = [[S, k], [h, z_b]]$ |
+| `Z_tilde` | complex array, same layout | $\tilde{Z} = [[Z, k_Z], [h_Z, z_{oc}]]$ |
+| `tilde_labels` | (list, list) | row and column labels of both |
+| `S_tilde_per_domain`, `Z_tilde_per_domain` | dict | the same per part, for a model solved part by part |
+
+## Beams
+
+A beam is a line current of 1 A; every beam quantity is per ampere. The rows of
+$\tilde{S}$ and $\tilde{Z}$ are the port modes and then the voltage paths, the columns the
+port modes and then the beams. Every beam is also a path, and comes first:
+
+| Block | Meaning | Unit |
+|---|---|---|
+| $k$ (port-mode rows, beam columns) | wave the beam sends into each port mode, every port mode matched | $\sqrt{\Omega}$ |
+| $h$ (path rows, port-mode columns) | beam voltage of a unit incoming wave | $\sqrt{\Omega}$ |
+| $z_b$ (path rows, beam columns) | beam voltage per beam current, every port mode matched | Ω |
+| $k_Z$, $h_Z$, $z_{oc}$ | the same in $\tilde{Z}$, every port mode open (magnetic walls) | Ω |
+
+The longitudinal impedance is $Z_\parallel = -v/i = -z_b$.
+
+Accessors of a full-order result solved with a beam (`proj.fds.fom`, `proj.fds.foms[i]`)
+and of a model joined from such results (`proj.fds.foms.concatenate()`):
+
+| Accessor | Returns |
+|---|---|
+| `has_beam` | True if the result has beam rows and columns |
+| `s_tilde`, `z_tilde` | the arrays above (a joined model derives $\tilde{Z}$ from $\tilde{S}$) |
+| `s_tilde_dict`, `z_tilde_dict` | the same keyed by label, plus `'frequencies'` |
+| `tilde_labels`, `beam_names` | (rows, columns); label → beam or path name |
+| `beam_impedance(beam=None, path=None, ports='matched')` | $Z_\parallel$ per frequency, Ω: `-z_b`; `ports='open'`: `-z_oc`. `beam`, `path`: name or label; defaults: the first beam, read on its own line |
+| `beam_field(i, beam=None, total=True)` | the beam's field at sample `i`: $E_s + E^{free}$ as a CoefficientFunction, or (`total=False`) the scattered field $E_s$ as a GridFunction (full-order results) |
+| `plot_s_tilde()`, `plot_z_tilde()`, `plot_beam_impedance()` | plots, arguments as `plot_s()` |
+
+Labels: port modes as below, beams and paths `'b(1)'`, `'b(2)'`, ... in the order of
+`proj.beam_paths`. Keys are excitation first: `'b(1)b(1)'` is $z_b$, `'b(1)2(1)'` is $k$ from
+beam 1 into port 2 mode 1, `'1(1)b(2)'` is $h$ from port 1 mode 1 onto path 2.
+
 ## Result objects
 
 | Object | Holds | Created by |
@@ -117,6 +158,7 @@ in %.
 | `fmin`, `fmax` (inputs) | GHz |
 | `frequencies` (outputs), `get_resonant_frequencies()`, `get_external_q()`, `get_rq()` | Hz |
 | `get_rq()`: `RQ`, `V`, `U` | ohm, V, J (the mode scaled to U = 1 J) |
+| beam: current, $z_b$, $z_{oc}$, $Z_\parallel$, $k$, $h$ | 1 A; ohm; $\sqrt{\Omega}$ |
 | `get_figures_of_merit()` | the unit in each key |
 | `chain_eigenfrequencies()`, `RWGAnalytical` / `CWGAnalytical` inputs and outputs | GHz |
 | Z | ohm |

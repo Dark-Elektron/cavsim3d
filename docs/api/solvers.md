@@ -245,3 +245,21 @@
         - save_to_file
         - load_from_file
       show_root_heading: true
+
+## Beam excitation
+
+A beam added with `proj.add_beam()` is held as a `BeamSetup` of `BeamLine`s; the results of
+a solve with a beam carry the accessors of `BeamResultMixin` (see
+[Results](../reference/results.md#beams)).
+
+::: cavsim3d.solvers.beam.BeamResultMixin
+    options:
+      show_root_heading: true
+
+::: cavsim3d.solvers.beam.BeamSetup
+    options:
+      show_root_heading: true
+
+::: cavsim3d.solvers.beam.BeamLine
+    options:
+      show_root_heading: true
