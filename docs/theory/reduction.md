@@ -1,6 +1,6 @@
 # 6. Model Order Reduction (POD)
 
-Solving the full system at every frequency point is expensive. **Proper Orthogonal Decomposition (POD)** creates a compact basis from a few sampled solutions.
+Solving the full system at every frequency point is expensive. **Proper Orthogonal Decomposition (POD)**[^sirovich][^benner] creates a compact basis from a few sampled solutions.
 
 ## Step-by-Step:
 
@@ -46,7 +46,7 @@ Solving the full system at every frequency point is expensive. **Proper Orthogon
 
 !!! tip "Mass-weighted spectral transformation"
 
-    1. Eigendecompose the reduced mass matrix: $\tilde{\mathbf{M}} = \mathbf{Q} \mathbf{\Lambda} \mathbf{Q}^T$
+    1. Eigendecompose the reduced mass matrix[^gvl]: $\tilde{\mathbf{M}} = \mathbf{Q} \mathbf{\Lambda} \mathbf{Q}^T$
        (eigenvalues that are numerically zero are dropped)
     2. Compute $\mathbf{Q}_L^{-1} = \mathbf{Q} \mathbf{\Lambda}^{-1/2}$, so that $(\mathbf{Q}_L^{-1})^T\tilde{\mathbf{M}}\,\mathbf{Q}_L^{-1} = \mathbf{I}$
     3. Transform: $\hat{\mathbf{A}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{K}} \, \mathbf{Q}_L^{-1}$, $\;\hat{\mathbf{B}} = (\mathbf{Q}_L^{-1})^T \tilde{\mathbf{B}}$,
@@ -81,6 +81,19 @@ graph LR
     A reduced model is accurate only over the frequency range its snapshots covered.
     Sweeping outside that band extrapolates, and its resonances are listed only near the
     band ([§8](resonances.md)).
+
+## References
+
+///Footnotes Go Here///
+
+[^sirovich]: L. Sirovich, "Turbulence and the dynamics of coherent structures. Part I:
+    Coherent structures," *Q. Appl. Math.* **45**(3), 561–571 (1987).
+    [doi:10.1090/qam/910462](https://doi.org/10.1090/qam/910462)
+[^benner]: P. Benner, S. Gugercin and K. Willcox, "A survey of projection-based model
+    reduction methods for parametric dynamical systems," *SIAM Rev.* **57**(4), 483–531 (2015).
+    [doi:10.1137/130932715](https://doi.org/10.1137/130932715)
+[^gvl]: G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed. (Johns Hopkins
+    University Press, Baltimore, 2013), ch. 8.
 
 ---
 

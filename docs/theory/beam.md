@@ -1,11 +1,11 @@
 # 9. Beam Excitation
 
 A charged particle beam travelling through the structure excites it through a source term in
-the field equation, next to the port modes. Its response gives the **beam impedance** and the
-coupling between the beam and the port modes. Together with the S-matrix they form the
-generalised scattering matrix $\tilde{\mathbf{S}}$ of the CSC-BEAM method (T. Flisgen et al.,
-*Phys. Rev. Accel. Beams* **23**, 034601 (2020)), through which segments are concatenated. Equation
-numbers in parentheses, such as (eq. 4), refer to that paper.
+the field equation, next to the port modes. Its response gives the **beam impedance**[^chao][^zotter]
+and the coupling between the beam and the port modes. Together with the S-matrix they form the
+generalised scattering matrix $\tilde{\mathbf{S}}$ of the CSC-BEAM method of Flisgen et
+al.[^csc], through which segments are concatenated. Equation numbers in parentheses, such as
+(eq. 4), refer to that paper.
 
 !!! note "What the code implements"
     `proj.add_beam()` adds a beam to the full-order solve with the scattered-field
@@ -125,7 +125,8 @@ the line integral of the load vector with the opposite phase.
 The **reference medium** is the homogeneous material around the beam line, with complex
 permittivity $\varepsilon_b$ and permeability $\mu_b$; the beam's own field is its field in this
 medium, unbounded. When the beam moves with the speed of light of that medium, $v_b^2\mu_b\varepsilon_b = 1$ ($\beta = 1$
-in vacuum), this is the field of the line charge $i/v_b$, carried along with the beam's phase:
+in vacuum), this is the field of the line charge $i/v_b$, carried along with the beam's
+phase[^jackson11][^chao]:
 
 $$
 \mathbf{E}^{free} = \frac{i}{2\pi v_b\varepsilon_b}\,\frac{\hat{\mathbf{e}}_\rho}{\rho}\,e^{-jk_bz},
@@ -145,7 +146,7 @@ field equation of [§9.2](#92-field-equation-with-the-beam) with the beam curren
 **2D lemma.** $\hat{\mathbf{e}}_\rho/\rho = \nabla_t\ln\rho$ is a gradient, so it is curl-free. Away from
 the line its divergence is zero, and its flux through any circle around the line is
 $\oint(\hat{\mathbf{e}}_\rho/\rho)\cdot\hat{\mathbf{e}}_\rho\,\rho\,\mathrm{d}\varphi = 2\pi$, whatever the
-radius. As distributions,
+radius. As distributions[^evans],
 
 $$
 \nabla_t\cdot\frac{\hat{\mathbf{e}}_\rho}{\rho} = 2\pi\,\delta_b, \qquad
@@ -206,8 +207,8 @@ $$
 \qquad \mathrm{Re}\,\kappa_b \ge 0 .
 $$
 
-The $1/\rho$ field is then not a solution. The free field has a modified-Bessel profile instead
-(it follows from the potentials in the Lorenz gauge, with
+The $1/\rho$ field is then not a solution. The free field has a modified-Bessel profile
+instead[^jackson13] (it follows from the potentials in the Lorenz gauge, with
 $\Phi^{free} = \frac{i}{2\pi v_b\varepsilon_b}K_0(\kappa_b\rho)$):
 
 $$
@@ -221,7 +222,7 @@ $$
 $E^{free}_z \propto K_0(\kappa_b\rho)$ no longer vanishes: it is logarithmically singular on the line
 and proportional to $1 - v_b^2\mu_b\varepsilon_b$ ($1/\gamma^2$ in vacuum). If the beam outruns light in
 the medium, $v_b^2\mu_b\,\mathrm{Re}\,\varepsilon_b > 1$, $\kappa_b$ is (nearly) imaginary and $K_0$
-describes the outgoing Cherenkov wave. For $\kappa_b \to 0$ these expressions return the $1/\rho$
+describes the outgoing Cherenkov wave[^jackson13]. For $\kappa_b \to 0$ these expressions return the $1/\rho$
 field above. Like that field, the Bessel field satisfies the field equation of the reference
 medium with the beam current as its source, which is all that
 [§9.6](#96-scattered-field-formulation) uses.
@@ -672,6 +673,28 @@ $\mathbf{Z} = j\hat{\mathbf{B}}^T\mathbf{Y}$ is that of [§6](reduction.md), and
 | $\mathbf{G}$, $\mathbf{F}$, $\mathbf{d}$, $\mathbf{T}$ | permuted block matrix, cut connection, beam delay, beam projection (concatenation) |
 | $\hat{\mathbf{b}}(\omega)$, $\mathbf{y}_b$ | reduced beam load and reduced beam column |
 | $\mathbf{f}_p$, $\mathbf{p}_k$, $\hat{\mathbf{c}}_k$ | port load per face at unit phase, beam-line values at a Gauss point, their reduced form |
+
+## References
+
+///Footnotes Go Here///
+
+[^chao]: A. W. Chao, *Physics of Collective Beam Instabilities in High Energy Accelerators*
+    (Wiley, New York, 1993).
+[^zotter]: B. W. Zotter and S. A. Kheifets, *Impedances and Wakes in High-Energy Particle
+    Accelerators* (World Scientific, Singapore, 1998).
+[^csc]: T. Flisgen, E. Gjonaj, H.-W. Glock and A. Tsakanian, "Generalization of coupled
+    S-parameter calculation to compute beam impedances in particle accelerators," *Phys. Rev.
+    Accel. Beams* **23**, 034601 (2020).
+    [doi:10.1103/PhysRevAccelBeams.23.034601](https://doi.org/10.1103/PhysRevAccelBeams.23.034601)
+[^jackson11]: J. D. Jackson, *Classical Electrodynamics*, 3rd ed. (Wiley, New York, 1999), ch. 11:
+    the field of a uniformly moving charge, which for $\beta \to 1$ is confined to the plane
+    transverse to its motion.
+[^evans]: L. C. Evans, *Partial Differential Equations*, 2nd ed. (American Mathematical Society,
+    Providence, RI, 2010), §2.2.1: $-\frac{1}{2\pi}\ln\rho$ is the fundamental solution of
+    $-\nabla_t^2$ in two dimensions, so $\nabla_t^2\ln\rho = 2\pi\,\delta_b$.
+[^jackson13]: J. D. Jackson, *Classical Electrodynamics*, 3rd ed. (Wiley, New York, 1999),
+    §13.3–13.4: the fields of a charge moving uniformly through a dielectric, and Cherenkov
+    radiation.
 
 ---
 

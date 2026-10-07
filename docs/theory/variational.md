@@ -1,7 +1,7 @@
 # 2. Variational Formulation
 
 To solve numerically via FEM, we multiply by a test function $\mathbf{v} \in H(\text{curl})$ and
-integrate over the volume $\Omega$. Using 
+integrate over the volume $\Omega$[^monk][^jin]. Using 
 
 $$\int_\Omega (\nabla\times\mathbf{A})\cdot\mathbf{v} = \int_\Omega \mathbf{A}\cdot(\nabla\times\mathbf{v})
 + \oint_{\partial\Omega}(\mathbf{n}\times\mathbf{A})\cdot\mathbf{v}$$ 
@@ -35,7 +35,8 @@ The boundary conditions are applied using the surface integral term:
 
 ## Discretisation
 
-We expand the electric field in terms of Nédélec (edge) basis functions:
+We expand the electric field in terms of Nédélec (edge) basis functions[^nedelec80][^nedelec86],
+here the high-order bases of Schöberl and Zaglmayr[^sz05] as implemented in NGSolve[^ngsolve]:
 
 
 $$
@@ -96,7 +97,7 @@ $$
 
 !!! note "The static null space"
     The curl–curl operator vanishes on gradient fields ($\nabla \times \nabla \phi = \mathbf{0}$), so
-    $\mathbf{K}$ on its own is singular. The system matrix $\mathbf{K} - \omega^2\mathbf{M}$ is not:
+    $\mathbf{K}$ on its own is singular[^boffi]. The system matrix $\mathbf{K} - \omega^2\mathbf{M}$ is not:
     for $\omega > 0$ the mass term is negative definite on those gradients. No regularisation
     is added, so the frequency sweep, the reduced models and the eigenmode analysis all use
     exactly the same $\mathbf{K}$ and $\mathbf{M}$. The gradients reappear only in the
@@ -275,6 +276,27 @@ where:
 
 !!! info "Notation"
     The system is solved one excitation at a time. For each port-mode pair $(p, m)$, the solver constructs a dedicated RHS vector $\mathbf{b}_{p,m}$ assembled in the excitation matrix $\mathbf{B}$ and solves for the corresponding field solution $\mathbf{x}_{p,m}$. The collection of all solutions is assembled into a solution matrix $\mathbf{X} = [\mathbf{x}_{1,1} \mid \mathbf{x}_{1,2} \mid \dots \mid \mathbf{x}_{p,m}]$.
+
+## References
+
+///Footnotes Go Here///
+
+[^monk]: P. Monk, *Finite Element Methods for Maxwell's Equations* (Oxford University Press,
+    Oxford, 2003).
+[^jin]: J.-M. Jin, *The Finite Element Method in Electromagnetics*, 3rd ed. (Wiley–IEEE Press,
+    Hoboken, NJ, 2014).
+[^nedelec80]: J.-C. Nédélec, "Mixed finite elements in $\mathbb{R}^3$," *Numer. Math.* **35**,
+    315–341 (1980). [doi:10.1007/BF01396415](https://doi.org/10.1007/BF01396415). The first-kind
+    elements.
+[^nedelec86]: J.-C. Nédélec, "A new family of mixed finite elements in $\mathbb{R}^3$," *Numer.
+    Math.* **50**, 57–81 (1986). [doi:10.1007/BF01389668](https://doi.org/10.1007/BF01389668).
+    The second-kind elements.
+[^sz05]: J. Schöberl and S. Zaglmayr, "High order Nédélec elements with local complete sequence
+    properties," *COMPEL* **24**(2), 374–384 (2005).
+[^ngsolve]: J. Schöberl, "C++11 implementation of finite elements in NGSolve," ASC Report
+    30/2014, Institute for Analysis and Scientific Computing, TU Wien (2014).
+[^boffi]: D. Boffi, "Finite element approximation of eigenvalue problems," *Acta Numer.* **19**,
+    1–120 (2010).
 
 ---
 

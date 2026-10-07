@@ -6,7 +6,7 @@ electric field patterns in which the port fields are expanded.
 
 ## 3.1 Port Eigenvalue Problems
 
-A homogeneously filled cross-section carries three families of modes. Each is
+A homogeneously filled cross-section carries three families of modes[^pozar][^collin]. Each is
 characterised by its **cutoff wavenumber** $k_{c,m}$, which depends only on the
 cross-section's shape; the filling medium enters only later, through the wave
 impedance and the cutoff frequency ([§5.1](s_parameters.md#51-characteristic-wave-impedance)).
@@ -37,18 +37,18 @@ coaxial line). Their field is the gradient of a potential that is constant on
 each conductor but different from one conductor to the next. Such a potential
 does not vanish on the whole outline, so its gradient survives the projection
 above and appears in the TE problem as a mode with $k_c = 0$. A cross-section
-with $N$ separate conductors has $N - 1$ TEM modes.
+with $N$ separate conductors has $N - 1$ TEM modes[^collin].
 
 **Quasi-TEM modes** of an inhomogeneous cross-section (microstrip: substrate
 and air) have no closed form and no frequency-independent cutoff. They are
 computed at a reference wavenumber $k_0$ from the coupled problem for the
 transverse field and the axial field (a mixed $H(\mathrm{curl}) \times H^1$
-formulation), whose eigenvalue is $\beta^2$ directly. The modes are ordered by
+formulation[^lee91]), whose eigenvalue is $\beta^2$ directly. The modes are ordered by
 decreasing $\mathrm{Re}\,\beta$, so the fundamental quasi-TEM mode comes first.
 
 !!! tip "Mode sources"
     For rectangular, circular and coaxial cross-sections, the code can use
-    **analytic mode formulas** (fast, with a phase fixed by the formula). Any
+    **analytic mode formulas**[^pozar][^marcuvitz] (fast, with a phase fixed by the formula). Any
     cross-section can instead be solved **numerically** on the port FE space,
     as described above. Both external and internal ports use the analytic
     formulas by default. Choose per call with
@@ -94,7 +94,7 @@ degrees of freedom on the port.
 The discrete problems below are the Galerkin forms of the continuous problems of
 [§3.1](#31-port-eigenvalue-problems). Besides the traced Nédélec functions $\mathbf{N}_i$, they use scalar ($H^1$)
 basis functions $L_i$ on the port, one polynomial order higher, so that every
-gradient $\nabla_t L_i$ lies in the span of the $\mathbf{N}_i$. On the conductor
+gradient $\nabla_t L_i$ lies in the span of the $\mathbf{N}_i$[^sz05]. On the conductor
 edges of the port outline the tangential field and the scalar field are zero.
 
 **TE modes.** Testing the transverse curl–curl equation with each
@@ -157,7 +157,7 @@ $$
 removes the gradient part of a vector (it is the $\mathbf{M}_{\text{port}}$-orthogonal
 projection onto the complement of the range of $\mathbf{G}$). A port face of up to 600 free
 unknowns is solved directly, as a dense generalised eigenvalue problem whose null space holds
-the gradients. A larger face is solved by preconditioned inverse iteration (PINVIT) with the
+the gradients. A larger face is solved by preconditioned inverse iteration (PINVIT)[^pinvit] with the
 preconditioner $\mathbf{P}\,(\mathbf{K}_{\text{port}} + \mathbf{M}_{\text{port}})^{-1}$, so the
 iteration never enters the gradient space. Either way, a vector whose gradient-free part
 $\mathbf{P}\hat{\mathbf{e}}$ holds less than a quarter of its norm is round-off, not a mode,
@@ -166,7 +166,7 @@ finer mesh or a higher element order, or analytic modes.
 
 **TEM modes.** After the projection, $\mathbf{K}_{\text{port}}\hat{\mathbf{e}} = \mathbf{0}$
 still holds for curl-free fields that are *not* gradients of functions vanishing on the
-outline: the discrete harmonic fields. Such a field is the gradient of a potential that
+outline: the discrete harmonic fields[^hiptmair]. Such a field is the gradient of a potential that
 is constant on each conductor, which is the electrostatic field of the line. There is one
 for each conductor beyond the first, i.e. one per hole in the port face. The direct solve
 takes them from its null space, as the null vectors $\mathbf{M}_{\text{port}}$-orthogonal to
@@ -208,7 +208,7 @@ requested polarisation angle. Each mode then gets the sign fixed by the port's t
 frame and is normalised as in [§3.2](#32-building-the-right-hand-side-b), and the lowest $m_p$ modes are kept.
 
 **Quasi-TEM modes.** On an inhomogeneous cross-section the transverse and axial fields
-are coupled and have to be solved together. With
+are coupled and have to be solved together[^lee91][^jin]. With
 $\mathbf{E} = (\mathbf{e}_t + \hat{\mathbf{z}}\,e_z)\,e^{-j\beta z}$ and non-magnetic media
 ($\mu_r = 1$), the wave equation
 $\nabla\times\nabla\times\mathbf{E} - k_0^2\varepsilon_r\mathbf{E} = 0$ splits into
@@ -265,7 +265,7 @@ $$
 
 The eigenvalue is $\beta^2$ itself, and a propagating mode has
 $k_0^2 \le \beta^2 \le k_0^2\,\varepsilon_{r,\max}$, between air and the densest filling.
-The problem is solved by shift-and-invert Arnoldi with the shift
+The problem is solved by shift-and-invert Arnoldi[^saad] with the shift
 $1.15\,k_0^2\,\varepsilon_{r,\max}$, just above that range. An eigenpair is kept as a
 physical propagating mode when $\mathrm{Re}\,\beta > 0$,
 $|\mathrm{Im}\,\beta| < 0.3\,\mathrm{Re}\,\beta$ and
@@ -403,6 +403,29 @@ $$
     this keeps $\mathbf{K}$, $\mathbf{M}$, $\mathbf{B}$ and $\mathbf{X}$ real, which is what
     makes the POD basis of [Section 6](reduction.md) real as well. Every
     subsequent section carries the $\omega\,\mathbf{B}$ form.
+
+## References
+
+///Footnotes Go Here///
+
+[^pozar]: D. M. Pozar, *Microwave Engineering*, 4th ed. (Wiley, Hoboken, NJ, 2012), ch. 3.
+[^collin]: R. E. Collin, *Field Theory of Guided Waves*, 2nd ed. (IEEE Press, New York, 1991).
+[^lee91]: J.-F. Lee, D.-K. Sun and Z. J. Cendes, "Full-wave analysis of dielectric waveguides
+    using tangential vector finite elements," *IEEE Trans. Microw. Theory Techn.* **39**(8),
+    1262–1271 (1991).
+[^marcuvitz]: N. Marcuvitz, *Waveguide Handbook*, MIT Radiation Laboratory Series vol. 10
+    (McGraw-Hill, New York, 1951).
+[^sz05]: J. Schöberl and S. Zaglmayr, "High order Nédélec elements with local complete sequence
+    properties," *COMPEL* **24**(2), 374–384 (2005).
+[^pinvit]: A. V. Knyazev and K. Neymeyr, "A geometric theory for preconditioned inverse
+    iteration III: A short and sharp convergence estimate for generalized eigenvalue problems,"
+    *Linear Algebra Appl.* **358**, 95–114 (2003).
+[^hiptmair]: R. Hiptmair, "Finite elements in computational electromagnetism," *Acta Numer.*
+    **11**, 237–339 (2002).
+[^jin]: J.-M. Jin, *The Finite Element Method in Electromagnetics*, 3rd ed. (Wiley–IEEE Press,
+    Hoboken, NJ, 2014).
+[^saad]: Y. Saad, *Numerical Methods for Large Eigenvalue Problems*, revised ed. (SIAM,
+    Philadelphia, 2011).
 
 ---
 

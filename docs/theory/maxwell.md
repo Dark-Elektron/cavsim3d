@@ -1,6 +1,6 @@
 # 1. Maxwell's Equations
 
-In the frequency domain, assuming an $e^{j\omega t}$ time dependence:
+In the frequency domain, assuming an $e^{j\omega t}$ time dependence[^pozar]:
 
 $$
 \nabla \times \mathbf{E} = -j\omega \mu \mathbf{H}
@@ -18,7 +18,7 @@ where:
 - $\sigma$ is the electrical conductivity of the filling medium (zero for a lossless material)
 
 A dielectric loss tangent $\tan\delta$ and the conductivity are combined into one **complex
-permittivity**,
+permittivity**[^pozar],
 
 $$
 \varepsilon_c = \varepsilon_0\varepsilon_r\,(1 - j\tan\delta) - j\,\frac{\sigma}{\omega},
@@ -29,7 +29,7 @@ conductors; $\sigma$ and $\tan\delta$ describe losses in the volume.
 
 ## Vector Wave Equation
 
-Taking the curl of the first equation and substituting the second yields the second-order equation for $\mathbf{E}$:
+Taking the curl of the first equation and substituting the second yields the second-order equation for $\mathbf{E}$[^jin]:
 
 $$
 \nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right) - k_0^2 \frac{\varepsilon_c}{\varepsilon_0} \mathbf{E} = \mathbf{0}
@@ -37,6 +37,14 @@ $$
 
 where $k_0 = \omega\sqrt{\mu_0\varepsilon_0}$ is the free-space wavenumber. For a lossless material
 $\varepsilon_c/\varepsilon_0 = \varepsilon_r$. This is the core equation solved by **FrequencyDomainSolver**.
+
+## References
+
+///Footnotes Go Here///
+
+[^pozar]: D. M. Pozar, *Microwave Engineering*, 4th ed. (Wiley, Hoboken, NJ, 2012), §1.2–1.3.
+[^jin]: J.-M. Jin, *The Finite Element Method in Electromagnetics*, 3rd ed. (Wiley–IEEE Press,
+    Hoboken, NJ, 2014).
 
 ---
 

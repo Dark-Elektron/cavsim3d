@@ -1,6 +1,6 @@
 # 7. Concatenation
 
-For multi-domain structures, the per-domain **system matrices** ($\hat{\mathbf{A}}_d, \hat{\mathbf{B}}_d$, and $\hat{\mathbf{C}}_d, \hat{\mathbf{D}}_d$ for lossy domains) are concatenated into a single coupled system via **Kirchhoff constraints** at shared interfaces. The coupled system is then solved directly for the global Z-parameters, from which the S-parameters are derived.
+For multi-domain structures, the per-domain **system matrices** ($\hat{\mathbf{A}}_d, \hat{\mathbf{B}}_d$, and $\hat{\mathbf{C}}_d, \hat{\mathbf{D}}_d$ for lossy domains) are concatenated into a single coupled system via **Kirchhoff constraints** at shared interfaces, as in the state-space concatenation method[^flisgen13][^flisgen15]. The coupled system is then solved directly for the global Z-parameters, from which the S-parameters are derived.
 
 !!! note "System-level coupling, not S-parameter cascading"
     The concatenation operates on the reduced system matrices, **not** on S-parameters. The per-domain matrices are assembled into a block-diagonal system and then projected onto a constraint-satisfying subspace that enforces field continuity at internal ports. The S-parameters are only computed at the very end from the Z-parameters of the coupled system.
@@ -166,6 +166,18 @@ graph LR
 ```
 
 The internal port DOFs are eliminated, leaving a coupled system with only external ports.
+
+## References
+
+///Footnotes Go Here///
+
+[^flisgen13]: T. Flisgen, H.-W. Glock and U. van Rienen, "Compact time-domain models of
+    complex RF structures based on the real eigenmodes of segments," *IEEE Trans. Microw.
+    Theory Techn.* **61**(6) (2013).
+[^flisgen15]: T. Flisgen, *Compact State-Space Models for Complex Superconducting
+    Radio-Frequency Structures Based on Model Order Reduction and Concatenation Methods*,
+    doctoral thesis, Universität Rostock (2015).
+    [rosdok_disshab_0000001633](https://rosdok.uni-rostock.de/resolve/id/rosdok_disshab_0000001633)
 
 ---
 

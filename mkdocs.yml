@@ -35,6 +35,7 @@ theme:
     - navigation.top
     - content.code.copy
     - content.code.annotate
+    - content.footnote.tooltips
 
 plugins:
   - search
@@ -119,6 +120,7 @@ nav:
           - "Add a beam to a solved cavity": tutorials/beam/beam_on_solved_cavity.ipynb
           - "Beam past a lossy absorber": tutorials/beam/lossy_absorber.ipynb
           - "Join parts with a beam": tutorials/beam/beam_through_parts.ipynb
+          - "Beam impedance of the TESLA cavity": tutorials/beam/tesla_beam_impedance.ipynb
       - Applications:
           - tutorials/applications/index.md
           - "TESLA 9-cell cavity chain": tutorials/tesla_cavity_chain.ipynb

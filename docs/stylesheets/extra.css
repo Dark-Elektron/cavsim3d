@@ -233,3 +233,8 @@
 .cell_output .jp-RenderedText:has(+ .jp-RenderedHTMLCommon .webgui-fallback) {
     display: none;
 }
+
+/* ── Reference lists: the "References" heading replaces the footnote rule ── */
+.md-typeset h2#references + .footnote > hr {
+    display: none;
+}

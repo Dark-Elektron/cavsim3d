@@ -3,7 +3,7 @@
 ## 5.1 Characteristic (Wave) Impedance
 Each port mode has a frequency-dependent characteristic impedance. With the propagation
 constant $\gamma_m = \sqrt{k_{c,m}^2 - \varepsilon_r\mu_r k_0^2}$ (taken with
-$\mathrm{Re}\,\gamma_m \ge 0$), the TE, TM and TEM wave impedances are
+$\mathrm{Re}\,\gamma_m \ge 0$), the TE, TM and TEM wave impedances[^pozar] are
 
 $$
 Z_\mathrm{TE} = \frac{j\omega\mu}{\gamma_m}, \qquad
@@ -28,7 +28,7 @@ cross-section. A dielectric filling therefore lowers the cutoff as well as the i
 
 With the modes normalised as in [§3.2](ports.md#32-building-the-right-hand-side-b), a single forward-travelling mode has
 $I_m = V_m / Z_{w,m}$ and carries the power $\tfrac12 V_m I_m^*$: the modal $V$ and $I$ are
-normalised to the **wave impedance** $Z_{w,m}$, which is therefore the natural reference.
+normalised to the **wave impedance** $Z_{w,m}$, which is therefore the natural reference[^marks].
 The reference impedance matrix is:
 
 $$ \mathbf{Z}_{\mathrm{ref}} = \begin{bmatrix}
@@ -58,9 +58,9 @@ Three further impedances therefore exist,
 
 $$ Z_{PV} = \frac{|V|^2}{2P}, \qquad Z_{PI} = \frac{2P}{|I|^2}, \qquad Z_{VI} = \frac{V}{I} $$
 
-with $P$ the time-averaged power crossing the port. For a lossless, homogeneously filled TEM
+with $P$ the time-averaged power crossing the port[^bianco]. For a lossless, homogeneously filled TEM
 line the three agree and reduce to the classical line impedance. For a coaxial cross-section
-of inner radius $a$ and outer radius $b$,
+of inner radius $a$ and outer radius $b$[^pozar],
 
 $$ Z_0 = \frac{\eta}{2\pi}\ln\frac{b}{a} , \qquad \eta = \eta_0\sqrt{\mu_r/\varepsilon_r} $$
 
@@ -97,8 +97,8 @@ per-port factor on $Z$ -- a discrepancy that no S-parameter comparison can detec
 
 ## 5.3 Z-to-S Conversion
 The S-parameters are obtained from the Z-parameters using the generalised **pseudo-wave**
-conversion (Marks & Williams) -- the convention used by CST and HFSS for multimode
-S-parameters. Unlike Kurokawa power-waves it does not require $\mathrm{Re}(Z_0) > 0$, so it
+conversion of Marks and Williams[^marks] -- the convention used by CST and HFSS for multimode
+S-parameters. Unlike Kurokawa's power waves[^kurokawa] it does not require $\mathrm{Re}(Z_0) > 0$, so it
 stays valid for the purely reactive $Z_0$ of a mode below cutoff:
 
 $$ \mathbf{S} = \mathbf{Z}_{\mathrm{ref}}^{-1/2} (\mathbf{Z} - \mathbf{Z}_{\mathrm{ref}})(\mathbf{Z} + \mathbf{Z}_{\mathrm{ref}})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
@@ -108,6 +108,21 @@ $$ \mathbf{S} = \mathbf{Z}_{\mathrm{ref}}^{-1/2} (\mathbf{Z} - \mathbf{Z}_{\math
 The impedance matrix can be recovered from the S-matrix via:
 
 $$ \mathbf{Z} = \mathbf{Z}_{\mathrm{ref}}^{1/2} (\mathbf{I} + \mathbf{S})(\mathbf{I} - \mathbf{S})^{-1} \mathbf{Z}_{\mathrm{ref}}^{1/2} $$
+
+## References
+
+///Footnotes Go Here///
+
+[^pozar]: D. M. Pozar, *Microwave Engineering*, 4th ed. (Wiley, Hoboken, NJ, 2012), ch. 2–3.
+[^marks]: R. B. Marks and D. F. Williams, "A general waveguide circuit theory," *J. Res.
+    Natl. Inst. Stand. Technol.* **97**(5), 533–562 (1992).
+    [doi:10.6028/jres.097.024](https://doi.org/10.6028/jres.097.024)
+[^bianco]: B. Bianco, L. Panini, M. Parodi and S. Ridella, "Some considerations about the
+    frequency dependence of the characteristic impedance of uniform microstrips," *IEEE Trans.
+    Microw. Theory Techn.* **26**(3), 182–185 (1978).
+[^kurokawa]: K. Kurokawa, "Power waves and the scattering matrix," *IEEE Trans. Microw.
+    Theory Techn.* **13**(2), 194–202 (1965).
+    [doi:10.1109/TMTT.1965.1125964](https://doi.org/10.1109/TMTT.1965.1125964)
 
 ---
 
