@@ -20,7 +20,9 @@ resonances. The time convention is $e^{j\omega t}$ throughout.
 7. [Concatenation](concatenation.md): joining reduced models through their port modes.
 8. [Resonant modes](resonances.md): the eigenvalue problems, and the loaded and external Q.
 9. [Beam excitation](beam.md): the beam as a source, its own field, the scattered-field
-   formulation, the generalised scattering matrix with the beam, and its model order reduction.
+   formulation, and the generalised scattering matrix with the beam.
+10. [Model order reduction with the beam](beam_reduction.md): the wall lift in the reduced
+    model, and the beam's load and outputs in affine form.
 
 ## Summary of the Solve Pipeline
 

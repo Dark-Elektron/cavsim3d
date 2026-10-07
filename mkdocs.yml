@@ -160,6 +160,7 @@ nav:
       - "7. Concatenation": theory/concatenation.md
       - "8. Resonant modes": theory/resonances.md
       - "9. Beam excitation": theory/beam.md
+      - "10. Model order reduction with the beam": theory/beam_reduction.md
   - Reference:
       - reference/index.md
       - solve() options: reference/solve_options.md
