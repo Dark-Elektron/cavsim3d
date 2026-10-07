@@ -54,9 +54,10 @@ port modes and then the beams. Every beam is also a path, and comes first:
 
 The longitudinal impedance is $Z_\parallel = -v/i = -z_b$.
 
-Accessors of a full-order result solved with a beam (`proj.fds.fom`, `proj.fds.foms[i]`)
-and of a model joined from such results (`proj.fds.foms.concatenate()`, for glued parts and
-for repeated or imported ones):
+Accessors of a full-order result solved with a beam (`proj.fds.fom`, `proj.fds.foms[i]`),
+of a model joined from such results (`proj.fds.foms.concatenate()`, for glued parts and
+for repeated or imported ones), of a reduced model with the beam (`proj.fds.fom.rom`) and
+of reduced parts joined with it (`proj.fds.foms.roms.concat`), after their `solve()`:
 
 | Accessor | Returns |
 |---|---|
@@ -65,7 +66,7 @@ for repeated or imported ones):
 | `s_tilde_dict`, `z_tilde_dict` | the same keyed by label, plus `'frequencies'` |
 | `tilde_labels`, `beam_names` | (rows, columns); label → beam or path name |
 | `beam_impedance(beam=None, path=None, ports='matched')` | $Z_\parallel$ per frequency, Ω: `-z_b`; `ports='open'`: `-z_oc`. `beam`, `path`: name or label; defaults: the first beam, read on its own line |
-| `beam_field(i, beam=None, total=True)` | the beam's field at sample `i`: $E_s + E^{free}$ as a CoefficientFunction, or (`total=False`) the scattered field $E_s$ as a GridFunction (full-order results) |
+| `beam_field(i, beam=None, total=True)` | the beam's field at sample `i`: $E_s + E^{free}$ as a CoefficientFunction, or (`total=False`) the scattered field $E_s$ as a GridFunction (full-order results only) |
 | `plot_s_tilde()`, `plot_z_tilde()`, `plot_beam_impedance()` | plots, arguments as `plot_s()` |
 
 Labels: port modes as below, beams and paths `'b(1)'`, `'b(2)'`, ... in the order of

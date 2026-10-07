@@ -10,8 +10,16 @@ matrices, and it can be reloaded without the mesh. The beam column puts both at 
    beam's phase $e^{-jk_bz}$ ([§10.4](#104-frequency-dependence-in-affine-form)).
 
 !!! note "What the code implements"
-    The code does not reduce the beam column yet. This page gives the formulation, for
-    $v_b^2\mu_b\varepsilon_b = 1$ as in [§9](beam.md).
+    `fom.reduce(tol)` and `foms.reduce(tol)` reduce the beam column together with the port
+    columns when the full-order sweep kept its field snapshots (`store_snapshots=True`), for
+    $v_b^2\mu_b\varepsilon_b = 1$ as in [§9](beam.md). The phase integrals of a section share
+    one set of Chebyshev points, with $z_c$ and $L$ taken from the whole section. Their band is
+    that of the full-order sweep, widened by 10 % of its width on each side, and $m$ is the
+    smallest number of points with $\epsilon_m \le 10^{-13}$. A reduced model refuses a sweep
+    outside that band. `roms.concatenate()` joins the reduced parts through their
+    $\tilde{\mathbf{S}}$ ([§10.7](#107-joining-reduced-segments)) at the frequencies of every
+    `concat.solve()`: repeated and imported parts with the beam's phase at their position,
+    glued parts in one frame.
 
 ## 10.1 The Full-Order Beam Column
 

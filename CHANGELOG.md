@@ -70,7 +70,7 @@ No version has been released yet. The entries compare with the code published on
   between them. A beam added to a solved project solves only the beam columns. Without
   a beam the port results are unchanged. Files: `z_tilde/`, `s_tilde/`, `snapshots_beam/`,
   `matrices/beam_<part>.h5`, `port_modes/beam_port_fields.pkl`. `beta = 1` and a beam in
-  vacuum only; reduced models do not carry the beam yet.
+  vacuum only.
 - **Beams through repeated or imported parts.** Each unique part of a chain is solved
   once with the beam where it runs through it, in the part's own frame (the beam is given
   in the first part's frame; each next part sits with its joined face centred on the face
@@ -78,6 +78,14 @@ No version has been released yet. The entries compare with the code published on
   the beam's phase at its position. A part imported from a project solved without a beam
   gets its beam columns computed in the importing project from its stored port
   solutions; that project is never written.
+- **Reduced models with the beam.** `fom.reduce(tol)` and `foms.reduce(tol)` reduce the
+  beam column with the port columns when the full-order sweep kept its field snapshots:
+  `rom.s_tilde`, `rom.beam_impedance()` at any frequency of the band, without the mesh.
+  The PEC walls carry the beam's data as a lift; the beam's load and outputs, whose phase
+  runs along the structure, are interpolated in frequency at Chebyshev points of the band
+  widened by 10 % on each side (docs/theory/beam_reduction.md). `roms.concatenate()`
+  joins reduced parts with the beam (repeated, imported or glued) at the frequencies of
+  every `concat.solve()`.
 - With a beam defined, `generate_mesh()` curves the mesh to order 4 unless `curve_order`
   is given. The solve warns when a beam runs past curved walls meshed to a lower order.
 

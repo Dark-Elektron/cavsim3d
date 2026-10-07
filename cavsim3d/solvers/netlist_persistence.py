@@ -180,11 +180,14 @@ def stage_rom(source_project: Path, domain: str, project_root: Path) -> dict:
     src_domain = sm["domain"]
 
     (roms_dir / "matrices").mkdir(parents=True, exist_ok=True)
-    for base in ROM_MATS:
+    for base in ROM_MATS + ("beam",):
         f = _pick(rom / "matrices", base, src_domain)
+        dst = roms_dir / "matrices" / f"{base}_{domain}.h5"
         if f is not None:
-            shutil.copy2(f, roms_dir / "matrices" / f"{base}_{domain}.h5")
-    for rd in RESULT_DIRS:
+            shutil.copy2(f, dst)
+        elif base == "beam" and dst.exists():
+            dst.unlink()                     # of an earlier staging
+    for rd in RESULT_DIRS + BEAM_DIRS:
         _copy_result_dir(rom / rd, roms_dir / rd, src_domain, domain)
 
     # Fold shared metadata INTO the structure entry, rekeyed to this domain.
@@ -296,6 +299,7 @@ def reduce_source_into(source_project: Path, work: Path, tol: float,
     if getattr(fds, "is_compound", False):
         raise ValueError(f"Cannot reduce '{source_project}' as one part: it is a "
                          "multi-solid project. Import its solids individually.")
+    fds._read_root = str(source_project)   # its results are read where they are
     fds._project_path = str(work)          # all writes go to the scratch folder
     fds._project_ref = None
     (Path(work) / "fds" / "fom").mkdir(parents=True, exist_ok=True)
@@ -595,6 +599,14 @@ def reduce_staged_section(project_root: Path, domain: str, template: dict,
                 "(store_snapshots=False), so it cannot be reduced. Solve again "
                 "with store_snapshots=True.")
         snapshots = H5Serializer.load_dataset(fh["field_snapshots"])
+    # with a beam: one basis for the port and the beam columns
+    # (docs/theory/beam_reduction.md §10.3)
+    from cavsim3d.rom import beam_reduction as brom
+    beam_in = brom.staged_beam_inputs(foms, domain)
+    n_snapshots = int(np.shape(snapshots)[1])
+    if beam_in is not None:
+        snapshots = brom.pod_snapshots(snapshots, beam_in['snapshots'],
+                                       beam_in['data']['affine']['free'])
     red = pod_reduce(mats["K"], mats["M"], mats["B"], snapshots,
                      C=mats.get("C"), D=mats.get("D"), tol=tol, max_rank=max_rank)
     out = root / "fds" / "foms" / "roms" / "matrices"
@@ -607,12 +619,20 @@ def reduce_staged_section(project_root: Path, domain: str, template: dict,
             continue
         with h5py.File(f, "w") as fh:
             H5Serializer.save_dataset(fh, "data", np.asarray(red[name]))
+    beam_file = out / f"beam_{domain}.h5"
+    if beam_in is not None:
+        brom.reduce_beam(red["W"] @ red["Q_L_inv"], mats["K"], mats["M"], beam_in['data'],
+                         beam_in['port_modes'], C=mats.get("C"), D=mats.get("D"),
+                         meta=beam_in['meta']).save(beam_file)
+    elif beam_file.exists():
+        beam_file.unlink()
     entry = dict(template)
     entry.update(domain=domain, r=int(red["r"]), n_full=int(red["W"].shape[0]),
                  is_full_order=False, tol=float(tol),
                  max_rank=None if max_rank is None else int(max_rank))
-    entry["reduction"] = {"r_pod": int(red["r_pod"]),
-                          "n_snapshots": int(np.shape(snapshots)[1])}
+    entry["reduction"] = {"r_pod": int(red["r_pod"]), "n_snapshots": n_snapshots,
+                          # the beams (fingerprint) its reduced model carries
+                          "beam": beam_in['data'].get('fingerprint') if beam_in else None}
     return entry
 
 

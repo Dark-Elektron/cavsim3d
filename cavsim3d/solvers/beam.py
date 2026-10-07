@@ -426,6 +426,9 @@ class BeamSystem:
         self.walls = fds.bc
         self.region_materials = region_materials
         self.n_gauss = int(fds.order) + 2
+        # the beam data of a reduced model (affine_data), set by a sweep that
+        # keeps its field snapshots
+        self.affine: Optional[Dict] = None
 
         mats = list(self.mesh.GetMaterials())
         if region_materials is None:
@@ -583,13 +586,21 @@ class BeamSystem:
             return exp(-1j * k * s)
         return cos(k * s), -sin(k * s)
 
-    def lift_and_load(self, j: int, omega: float):
+    def lift_and_load(self, j: int, omega: float, k: Optional[float] = None,
+                      crossed: bool = True):
         """For beam ``j`` at ``omega``: ``[(g, f)]`` -- one pair for a complex
         system, (Re, Im) for a real one.  ``g`` is the wall lift (an NGSolve
         vector), ``f`` the load from the port faces and the contrast regions
-        (a numpy vector, before subtracting A g)."""
+        (a numpy vector, before subtracting A g).
+
+        ``k``: the wavenumber of the beam's phase exp(-j k s) (default
+        omega / v_b); ``omega`` then sets only the factors omega, omega^2 of
+        the loads.  ``crossed=False`` leaves out the load of the faces the
+        beam crosses (the separable part, docs/theory/beam_reduction.md §10.4).
+        """
         line = self.setup.sources[j]
-        k = omega / (line.beta * c0)
+        if k is None:
+            k = omega / (line.beta * c0)
         prof = free_field_profile(line.point, self.a)
         hprof = free_h_profile(line.point, self.a)
         n = specialcf.normal(3)
@@ -606,6 +617,8 @@ class BeamSystem:
             lf = None
             for face in self.faces:
                 if face.f_unit[j] is not None:
+                    if not crossed:
+                        continue
                     fac = 1j * omega * np.exp(-1j * k * face.s_face)
                     if self.complex:
                         f += fac * face.f_unit[j]
@@ -683,6 +696,70 @@ class BeamSystem:
                          np.zeros(fields.shape[1:], dtype=complex)
                          for p in self.paths])
 
+    # -- frequency-separable form (reduced models) ----------------------------
+    def affine_data(self, frequencies) -> Dict:
+        """The beam data a reduced model needs, in a form evaluated without the
+        mesh at any frequency of the band (docs/theory/beam_reduction.md §10.4).
+
+        The wall lift g(w), the loads of the contrast regions and of the faces
+        the beam does not cross, and their share of k_Z and z_oc carry the
+        beam's phase over a region: they are evaluated at the Chebyshev points
+        w_l of the band of ``frequencies`` [Hz] (widened by
+        :data:`PHASE_BAND_MARGIN` on each side), each with the phase of the
+        centre z_c taken out.  The loads are split into their factors of w and
+        w^2.  Returns ``band`` [rad/s], ``zc``, ``nodes`` and per beam
+        ``G`` (ndof x m, sparse), ``F1``, ``F2`` (sparse or None), ``Q``
+        (port modes x m) and ``Pg`` (per path: Gauss points x m); ``free``
+        marks the free unknowns.
+        """
+        w_lo, w_hi = phase_band(frequencies)
+        s_all = np.asarray(self.mesh.ngmesh.Coordinates())[:, self.a]
+        zc = 0.5 * (float(s_all.min()) + float(s_all.max()))
+        length = float(s_all.max() - s_all.min())
+        v_min = min(line.beta * c0 for line in self.setup.sources)
+        m = chebyshev_count(0.25 * (w_hi - w_lo) * length / v_min)
+        nodes = chebyshev_nodes(w_lo, w_hi, m)
+        free = np.array([bool(v) for v in self.fes.FreeDofs()], dtype=bool)
+        sources = []
+        for j, line in enumerate(self.setup.sources):
+            k_over_w = 1.0 / (line.beta * c0)
+            G, F1, F2, Q = [], [], [], []
+            Pg = [[] for _ in self.paths]
+            has_load = False
+            for wl in nodes:
+                kl = wl * k_over_w
+                shift = np.exp(1j * kl * zc)
+                g, f1 = _combine(self.lift_and_load(j, 1.0, k=kl, crossed=False))
+                if np.any(f1):
+                    # loads w a1 + w^2 a2: from w = 1 and w = 2 at the same phase
+                    _g, f2 = _combine(self.lift_and_load(j, 2.0, k=kl, crossed=False))
+                    a2 = 0.5 * (f2 - 2.0 * f1)
+                    a1 = f1 - a2
+                    has_load = True
+                else:
+                    a1 = a2 = np.zeros_like(g)
+                q = self.port_voltages(j, wl, g)
+                for face in self.faces:
+                    if face.b_reg[j] is not None:
+                        q = q + np.exp(-1j * kl * face.s_face) * face.b_reg[j]
+                G.append(shift * g)
+                F1.append(shift * a1)
+                F2.append(shift * a2)
+                Q.append(shift * q)
+                for i, p in enumerate(self.paths):
+                    Pg[i].append(shift * (p.P.T @ g) if p.P.shape[1] else
+                                 np.zeros(0, dtype=complex))
+            sources.append({
+                'G': _sparse_columns(G),
+                'F1': _sparse_columns(F1) if has_load else None,
+                'F2': _sparse_columns(F2) if has_load else None,
+                'Q': np.array(Q).T,
+                'Pg': [np.array(c).T if c and len(c[0]) else np.zeros((0, m), dtype=complex)
+                       for c in Pg],
+            })
+        return {'band': [float(w_lo), float(w_hi)], 'zc': zc, 'length': length,
+                'nodes': nodes, 'free': free, 'sources': sources}
+
     # -- fingerprints ---------------------------------------------------------
     def summary(self) -> Dict:
         """What the beam data were built from (stored with the results)."""
@@ -720,6 +797,79 @@ def _potential_reg(mesh, region: str, walls: str, point, a: int, order: int):
         phi.vec.data -= am.mat.Inverse(fes_p.FreeDofs(), inverse='sparsecholesky') \
             * (am.mat * phi.vec)
     return phi
+
+
+# =============================================================================
+# Interpolation of the beam's phase in frequency (docs/theory/beam_reduction.md)
+# =============================================================================
+
+#: bound on the relative error of the phase interpolation (§10.4)
+PHASE_INTERP_TOL = 1e-13
+
+#: the interpolation band reaches this fraction of the solved band's width
+#: beyond each of its ends, so a reduced model can be evaluated a little
+#: outside its snapshots' band
+PHASE_BAND_MARGIN = 0.1
+
+
+def phase_band(frequencies) -> Tuple[float, float]:
+    """The interpolation band [rad/s] of a sweep over ``frequencies`` [Hz]."""
+    f = np.asarray(frequencies, dtype=float)
+    lo, hi = float(f.min()), float(f.max())
+    span = max(hi - lo, 1e-3 * hi)
+    return 2 * np.pi * max(lo - PHASE_BAND_MARGIN * span, 0.0), \
+        2 * np.pi * (hi + PHASE_BAND_MARGIN * span)
+
+
+def chebyshev_count(c: float, tol: float = PHASE_INTERP_TOL) -> int:
+    """Fewest Chebyshev points m (> c) that interpolate exp(-j c x) on [-1, 1]
+    to ``tol``: the bound 4 sum_{n >= m} |J_n(c)| (§10.4)."""
+    from scipy.special import jv
+    m = max(3, int(np.ceil(c)) + 1)
+    while 4.0 * np.sum(np.abs(jv(np.arange(m, m + 60), c))) > tol:
+        m += 1
+    return m
+
+
+def chebyshev_nodes(w_lo: float, w_hi: float, m: int) -> np.ndarray:
+    """The m Chebyshev points (second kind) of [w_lo, w_hi], ascending."""
+    return 0.5 * (w_lo + w_hi) - 0.5 * (w_hi - w_lo) * np.cos(np.pi * np.arange(m) / (m - 1))
+
+
+def lagrange_values(omega: float, nodes: np.ndarray) -> np.ndarray:
+    """l_k(omega) of the Chebyshev points ``nodes`` (barycentric formula)."""
+    m = len(nodes)
+    wts = (-1.0) ** np.arange(m)
+    wts[0] *= 0.5
+    wts[-1] *= 0.5
+    d = omega - nodes
+    hit = np.flatnonzero(np.abs(d) <= 1e-14 * max(abs(omega), 1.0))
+    if len(hit):
+        out = np.zeros(m)
+        out[hit[0]] = 1.0
+        return out
+    t = wts / d
+    return t / t.sum()
+
+
+def _combine(parts) -> Tuple[np.ndarray, np.ndarray]:
+    """(g, f) of :meth:`BeamSystem.lift_and_load` as complex numpy vectors: one
+    pair, or the (Re, Im) pairs of a real system."""
+    g = np.asarray(parts[0][0].vec.FV().NumPy(), dtype=complex).copy()
+    f = np.asarray(parts[0][1], dtype=complex).copy()
+    if len(parts) > 1:
+        g = g + 1j * np.asarray(parts[1][0].vec.FV().NumPy())
+        f = f + 1j * np.asarray(parts[1][1])
+    return g, f
+
+
+def _sparse_columns(cols, rel_tol: float = 1e-15) -> sp.csc_matrix:
+    """The vectors ``cols`` as the columns of a sparse matrix (entries below
+    ``rel_tol`` times the largest dropped: a lift lives on the walls only)."""
+    X = np.array(cols).T
+    scale = np.abs(X).max() if X.size else 0.0
+    X[np.abs(X) <= rel_tol * scale] = 0.0
+    return sp.csc_matrix(X)
 
 
 # =============================================================================
@@ -859,6 +1009,7 @@ def save_beam_data(path, system: "BeamSystem") -> None:
             g.create_dataset("s", data=p.s)
             g.create_dataset("w", data=p.w)
             H5Serializer.save_sparse_csr(g, "P", p.P.tocsr())
+        f.attrs["faces"] = json.dumps([face.port for face in system.faces])
         for face in system.faces:
             g = f.create_group(f"face_{face.port}")
             g.attrs["s_face"] = face.s_face
@@ -868,6 +1019,85 @@ def save_beam_data(path, system: "BeamSystem") -> None:
                 if fu is not None:
                     g.create_dataset(f"f_unit_{j + 1}", data=np.real(fu))
                     g.create_dataset(f"b_reg_{j + 1}", data=np.real(br))
+        aff = system.affine
+        if aff is not None:
+            g = f.create_group("affine")
+            g.create_dataset("band", data=np.asarray(aff['band']))
+            g.attrs["zc"] = float(aff['zc'])
+            g.attrs["length"] = float(aff['length'])
+            g.create_dataset("nodes", data=np.asarray(aff['nodes']))
+            g.create_dataset("free", data=np.asarray(aff['free'], dtype=bool))
+            for j, src in enumerate(aff['sources']):
+                gs = g.create_group(f"source_{j + 1}")
+                for name in ("G", "F1", "F2"):
+                    if src[name] is not None:
+                        H5Serializer.save_sparse_csr(gs, name, src[name].tocsr())
+                H5Serializer.save_dataset(gs, "Q", np.asarray(src['Q']))
+                for i, pg in enumerate(src['Pg']):
+                    H5Serializer.save_dataset(gs, f"Pg_{i + 1}", np.asarray(pg))
+
+
+def beam_data_of(system: "BeamSystem") -> Dict:
+    """The data of a live system in the form of :func:`load_beam_data`."""
+    return {
+        'setup': system.setup.to_dict(), 'fingerprint': system.setup.fingerprint(),
+        'version': BEAM_DATA_VERSION,
+        'paths': [{'s': p.s, 'w': p.w, 'P': p.P} for p in system.paths],
+        'faces': [{'port': face.port, 's_face': face.s_face, 'crossed': list(face.crossed),
+                   'f_unit': [None if v is None else np.real(v) for v in face.f_unit],
+                   'b_reg': [None if v is None else np.real(v) for v in face.b_reg]}
+                  for face in system.faces],
+        'affine': system.affine,
+    }
+
+
+def load_beam_data(path) -> Optional[Dict]:
+    """Read :func:`save_beam_data` (None if absent): ``setup``, ``fingerprint``,
+    ``paths`` (s, w, P), ``faces`` (s_face, crossed, f_unit, b_reg per beam)
+    and ``affine`` (None if the sweep kept no field snapshots)."""
+    import h5py
+    from cavsim3d.core.persistence import H5Serializer
+    if path is None or not path.exists():
+        return None
+    with h5py.File(path, "r") as f:
+        setup = json.loads(f.attrs.get("setup", "{}"))
+        n_src = len(BeamSetup.from_dict(setup).sources)
+        out = {'setup': setup, 'fingerprint': str(f.attrs.get("fingerprint", "")),
+               'version': int(f.attrs.get("version", 0)), 'paths': [], 'faces': [],
+               'affine': None}
+        i = 1
+        while f"path_{i}" in f:
+            g = f[f"path_{i}"]
+            out['paths'].append({'s': g["s"][()], 'w': g["w"][()],
+                                 'P': H5Serializer.load_sparse_csr(g["P"]).tocsc()})
+            i += 1
+        ports = (json.loads(f.attrs["faces"]) if "faces" in f.attrs else
+                 [k[len("face_"):] for k in f.keys() if k.startswith("face_")])
+        for port in ports:
+            g = f[f"face_{port}"]
+            out['faces'].append({
+                'port': port, 's_face': float(g.attrs["s_face"]),
+                'crossed': [bool(v) for v in g["crossed"][()]],
+                'f_unit': [g[f"f_unit_{j + 1}"][()] if f"f_unit_{j + 1}" in g else None
+                           for j in range(n_src)],
+                'b_reg': [g[f"b_reg_{j + 1}"][()] if f"b_reg_{j + 1}" in g else None
+                          for j in range(n_src)]})
+        if "affine" in f:
+            g = f["affine"]
+            aff = {'band': list(g["band"][()]), 'zc': float(g.attrs["zc"]),
+                   'length': float(g.attrs.get("length", 0.0)),
+                   'nodes': g["nodes"][()], 'free': g["free"][()].astype(bool),
+                   'sources': []}
+            for j in range(n_src):
+                gs = g[f"source_{j + 1}"]
+                src = {name: (H5Serializer.load_sparse_csr(gs[name]).tocsc()
+                              if name in gs else None) for name in ("G", "F1", "F2")}
+                src['Q'] = H5Serializer.load_dataset(gs["Q"])
+                src['Pg'] = [H5Serializer.load_dataset(gs[f"Pg_{i + 1}"])
+                             for i in range(len(out['paths']))]
+                aff['sources'].append(src)
+            out['affine'] = aff
+    return out
 
 
 def port_fields(system: "BeamSystem") -> Dict:

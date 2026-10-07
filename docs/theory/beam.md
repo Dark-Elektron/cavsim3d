@@ -16,8 +16,8 @@ al.[^csc], through which segments are concatenated. Equation numbers in parenthe
     are joined as in [§9.9](#99-concatenation-of-segments). Glued parts share one beam phase,
     so $\mathbf{d} = (1, 1)$. Repeated or imported parts are solved in their own frames: the
     copy whose frame sits at $z_i$ in the frame of the first part enters with
-    $d_i = e^{-jk_b z_i}$. The reduction with the beam ([§10](beam_reduction.md)) is not
-    implemented yet. The materials are those of [§1](maxwell.md):
+    $d_i = e^{-jk_b z_i}$. Reduced models carry the beam as described in
+    [§10](beam_reduction.md). The materials are those of [§1](maxwell.md):
     $\mu = \mu_0\mu_r$ and the complex permittivity $\varepsilon_c$ with conductivity and
     loss tangent. The walls are perfect conductors.
 

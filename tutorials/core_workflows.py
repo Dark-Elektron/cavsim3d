@@ -7,11 +7,12 @@ THIS FILE IS THE ALWAYS-CURRENT REFERENCE FOR HOW THE CORE PIECES CONNECT.
 It MUST be updated whenever core functionality changes or a new core feature
 is added (solver stages, ROM, concatenation, assembly/netlist, import/reuse).
 Helper functions (plotting utilities etc.) do not require updates here.
-Last updated: 2026-10-06 (beam excitation: proj.add_beam(), fom.s_tilde,
-a beam added to a solved project, the parts' S~ joined by foms.concatenate()
--- also coupled parts, repeated or imported (6d); generate_mesh() curves to
-order 4 when a beam is defined -- section 6; solve(solver_type='auto') is the
-default).  What changed: CHANGELOG.md.
+Last updated: 2026-10-07 (reduced models with the beam: fom.reduce() /
+foms.reduce() carry the beam, roms.concatenate() joins reduced parts with it
+at any frequency -- 6e; beam excitation: proj.add_beam(), fom.s_tilde, a beam
+added to a solved project, the parts' S~ joined by foms.concatenate() -- also
+coupled parts, repeated or imported (6d); generate_mesh() curves to order 4
+when a beam is defined -- section 6).  What changed: CHANGELOG.md.
 =============================================================================
 
 Operation philosophy
@@ -594,8 +595,8 @@ print(f"   beam added to single_rwg: S unchanged "
 # other are ports), each with its S~; foms.concatenate() joins them at the cut
 # (CSC-BEAM): the waves leaving one face enter the other, the beam current is
 # the same in both parts, their beam voltages add.  No full-order matrices are
-# built; the join holds the full-order frequencies (reduced models do not
-# carry the beam yet).
+# built; the join holds the full-order frequencies (other frequencies: join
+# reduced models, 6e).
 proj6p = EMProject(name="beam_step_parts", base_dir=str(WORK), overwrite=True)
 proj6p.geometry = SteppedGuide()
 proj6p.generate_mesh(maxh=0.012)
@@ -615,7 +616,6 @@ print(f"   parts joined vs one piece: Z_par differs by {rel.max():.1%} "
 # imported part solved without a beam gets its beam columns computed HERE from
 # its stored port solutions (its project is read, never written); its samples
 # must be the requested ones, or it is solved again here (rerun=True).
-# Reduced models do not carry the beam yet: roms.concatenate() warns.
 
 
 class Cell(BaseGeometry):
@@ -652,6 +652,28 @@ rel = np.abs(chain6.beam_impedance() - z_whole) / np.abs(z_whole)
 print(f"   two copies joined vs one piece: Z_par differs by {rel.max():.1%}")
 #   proj.import_project(path, name="cell", n=2) instead of proj.add(...): the
 #   solve plan says "beam columns computed here from its port solutions".
+
+# 6e. FOM -> ROM -> Concatenation WITH the beam.  A sweep that keeps its field
+# snapshots (store_snapshots=True, the default) is reduced with the beam: one
+# basis for the port and the beam columns (each family scaled by its largest
+# singular value; only the beam field's free part -- its wall values are the
+# lift of -E_free, added back).  The beam's phase runs along the structure, so
+# its load and outputs are stored at Chebyshev points of the band and
+# interpolated: the reduced model gives S~ at any frequency of its band (+10 %
+# on each side; further raises) without the mesh.  roms.concatenate() joins the
+# reduced parts' S~ at every concat.solve(), each copy with the phase of its
+# position.  Sample finer than v_b / (2 L) for a structure of length L.
+# A single part: proj.fds.fom.reduce(tol) -> rom.solve(...) -> rom.s_tilde,
+# rom.beam_impedance().  docs/theory/beam_reduction.md (section 10).
+proj6c.fds.solve(config=dict(CELL_CFG, nsamples=9))      # snapshots for the reduction
+fom_join6 = proj6c.fds.foms.concatenate()                 # at the 9 full-order samples
+concat6 = proj6c.fds.foms.reduce(tol=1e-8).concatenate()
+concat6.solve(fmin=2.6, fmax=3.4, nsamples=9)
+rel = (np.abs(concat6.beam_impedance() - fom_join6.beam_impedance())
+       / np.abs(fom_join6.beam_impedance()))
+print(f"   reduced copies joined vs full-order join: Z_par differs by {rel.max():.1e}")
+concat6.solve(fmin=2.6, fmax=3.4, nsamples=401)           # any frequencies of the band
+print(f"   reduced join, 401 frequencies: S~ {concat6.s_tilde.shape}")
 
 print(f"All tutorial artifacts under: {WORK}")
 banner("DONE")

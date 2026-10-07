@@ -110,8 +110,39 @@ zpar = chain.beam_impedance()
   this project, from the port solutions stored there; that project is never written. Its
   sweep must have the requested frequencies; otherwise the part is solved again here
   (`rerun=True` in a script), and the solve plan says so.
-- The joined model holds the frequencies of the full-order solve. Reduced models do not
-  carry the beam yet: `roms.concatenate()` joins the port results only, and warns.
+- The joined model holds the frequencies of the full-order solve. For other frequencies,
+  join reduced models (next section).
+
+## Reduce a model with the beam
+
+A reduced model carries the beam when the full-order sweep kept its field snapshots
+(`store_snapshots=True`, the default). It then gives $\tilde{S}$ and the beam impedance at
+any frequency of its band, in milliseconds:
+
+```python
+proj.fds.solve(fmin=1.0, fmax=2.9, nsamples=39, nportmodes=3, order=3)
+rom = proj.fds.fom.reduce(tol=1e-6)
+rom.solve(fmin=1.0, fmax=2.9, nsamples=1901)
+zpar = rom.beam_impedance()
+```
+
+Parts joined with the beam work the same way, at any frequencies:
+
+```python
+concat = proj.fds.foms.reduce(tol=1e-6).concatenate()
+concat.solve(fmin=1.0, fmax=2.9, nsamples=1901)
+zpar = concat.beam_impedance()
+```
+
+- The beam's phase runs along the structure, so the beam column changes with frequency at
+  least every $v_b/L$ for a structure of length $L$. Sample the full-order sweep more
+  finely than $v_b/(2L)$: about 120 MHz for a 1.3 m long cavity.
+- A reduced model holds from 10 % of its band's width below the band to 10 % above it, and
+  refuses a sweep that goes further.
+- Judge the rank by the beam impedance, not by the singular values alone: the field near
+  the walls dominates the snapshots, while the beam reads $E_z$ on its own line.
+- An imported part needs a reduced model with the beam in its own project:
+  `proj.fds.fom.reduce(tol)` there, after a solve with the beam.
 
 ## Get accurate beam results
 
@@ -135,7 +166,16 @@ zpar = chain.beam_impedance()
   than the beam, keeps exchanging energy with it along the pipe up to the port planes, so
   `z_b` of a model depends on the length of its pipes. Compare models with the same pipes.
 - **`RuntimeError` from `joined.solve()`**: a model joined through scattering matrices
-  holds the full-order frequencies only; solve the parts at the frequencies you need.
+  holds the full-order frequencies only; join reduced models
+  (`proj.fds.foms.reduce(tol).concatenate()`) for other frequencies.
+- **`ValueError: The reduced model's beam data hold from ... to ... GHz`**: the sweep
+  reaches beyond the band of the snapshots plus 10 % on each side. Solve the full-order
+  model over a band that covers it, and reduce again.
+- **A warning that the reduced model carries no beam**: the full-order sweep kept no field
+  snapshots (`store_snapshots=False`); solve again with them.
+- **A warning that parts have no reduced beam column**, and no beam in the joined model: a
+  part's reduced model was made without the beam (or, for an imported part, its project
+  has none); solve with the beam and reduce again.
 - **`NotImplementedError: The copies of part ... see the beams at different places`**: the
   copies of a part are shifted across the axis against each other (their joined faces are
   not centred on one line), so each copy would need a solve of its own. Align the parts'
@@ -144,4 +184,5 @@ zpar = chain.beam_impedance()
   the beam was added; run `proj.fds.solve(...)` again.
 
 **See also:** [Results](../reference/results.md#beams) for every beam quantity and label;
-[§9 Beam excitation](../theory/beam.md) for the formulation.
+[§9 Beam excitation](../theory/beam.md) for the formulation;
+[§10](../theory/beam_reduction.md) for reduced models with the beam.

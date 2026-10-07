@@ -121,6 +121,7 @@ nav:
           - "Beam past a lossy absorber": tutorials/beam/lossy_absorber.ipynb
           - "Join parts with a beam": tutorials/beam/beam_through_parts.ipynb
           - "Beam impedance of the TESLA cavity": tutorials/beam/tesla_beam_impedance.ipynb
+          - "A module of two TESLA cavities": tutorials/beam/tesla_module.ipynb
       - Applications:
           - tutorials/applications/index.md
           - "TESLA 9-cell cavity chain": tutorials/tesla_cavity_chain.ipynb

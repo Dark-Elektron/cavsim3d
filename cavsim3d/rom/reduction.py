@@ -28,6 +28,8 @@ import warnings
 import time
 import matplotlib.pyplot as plt
 from cavsim3d.geometry.base import _display_webgui_fallback
+from cavsim3d.solvers.beam import BeamResultMixin
+from cavsim3d.rom import beam_reduction as _brom
 
 if TYPE_CHECKING:
     from cavsim3d.solvers.concatenation import ConcatenatedSystem
@@ -226,7 +228,7 @@ def _band_record(frequencies) -> Optional[dict]:
     }
 
 
-class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
+class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixin):
     """
     POD-based Model Order Reduction for electromagnetic structures.
 
@@ -371,6 +373,15 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
         # Snapshot storage for field reconstruction
         self._x_r_snapshots: Optional[Dict[str, np.ndarray]] = None
+
+        # Beam (docs/theory/beam_reduction.md): the reduced beam column per
+        # domain, the generalised matrices of the last sweep (single domain:
+        # self._beam, read by BeamResultMixin; per domain) and the reduced
+        # beam columns of that sweep
+        self._reduced_beam: Dict[str, '_brom.ReducedBeam'] = {}
+        self._beam: Optional[Dict] = None
+        self._beam_per_domain: Dict[str, Dict] = {}
+        self._beam_snapshots: Dict[str, np.ndarray] = {}
 
         # Load data from solver
         self._load_from_solver()
@@ -794,6 +805,52 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
     # Model Reduction
     # =========================================================================
 
+    def _beam_inputs(self, domain: str) -> Optional[Dict]:
+        """The full-order beam column of ``domain`` that the reduction needs:
+        its field snapshots, its beam data with the interpolation part, the
+        (port, mode) of the columns of B and the metadata of its S~.  None
+        without a beam; a beam whose sweep kept no field snapshots is reported
+        and left out."""
+        from cavsim3d.solvers import beam as _bm
+        fds = self.solver
+        tilde = (getattr(fds, '_beam_tilde', None) or {}).get(domain)
+        if not tilde:
+            return None
+        raw = (getattr(fds, '_beam_raw', None) or {}).get(domain) or {}
+        snaps = raw.get('snapshots')
+        system = (getattr(fds, '_beam_systems', None) or {}).get(domain)
+        data = (_bm.beam_data_of(system)
+                if system is not None and system.affine is not None else None)
+        # a project reduced read-only (an imported part) writes elsewhere but
+        # keeps its files where they are
+        root = (getattr(fds, '_read_root', None) or getattr(fds, '_project_path', None))
+        if root is not None and (snaps is None or data is None):
+            sub = "fom" if self.n_domains == 1 else "foms"
+            tag = "global" if self.n_domains == 1 else domain.replace('/', '_')
+            base = Path(root) / "fds" / sub
+            if snaps is None:
+                f = base / "snapshots_beam" / f"snapshots_beam_{tag}.h5"
+                if f.exists():
+                    with h5py.File(f, "r") as fh:
+                        if "field_snapshots" in fh:
+                            snaps = H5Serializer.load_dataset(fh["field_snapshots"])
+            if data is None:
+                data = _bm.load_beam_data(base / "matrices" / f"beam_{tag}.h5")
+        if snaps is None or data is None or data.get('affine') is None:
+            pr.warning(f"  Beam ({domain}): " + _brom.missing_beam_reason(snaps, data))
+            return None
+        if data.get('fingerprint') and data['fingerprint'] != tilde.get('fingerprint'):
+            pr.warning(f"  Beam ({domain}): the stored beam data belong to another beam "
+                       "definition; this reduced model carries no beam. Solve again.")
+            return None
+        port_modes = tilde.get('port_modes')
+        if port_modes is None:
+            port_modes = [(p, m) for (_i, p, m) in
+                          self._domain_port_mode_pairs(domain, self._n_modes_per_port or 1)]
+        return {'snapshots': snaps, 'data': data, 'port_modes': port_modes,
+                'meta': {'names': tilde.get('names'), 'ports': tilde.get('ports'),
+                         'fingerprints': tilde.get('fingerprints')}}
+
     def reduce(
         self,
         tol: float = 1e-6,
@@ -837,6 +894,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
 
             # Validate snapshots
             self._validate_snapshots_for_reduction()
+            # results of an earlier reduction no longer apply
+            self._beam, self._beam_per_domain, self._beam_snapshots = None, {}, {}
 
             _t_reduce_start = time.time()
             total_full = 0
@@ -878,11 +937,26 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 if ranks is not None and domain in ranks:
                     domain_max_rank = ranks[domain]
 
+                # With a beam: one basis for the port and the beam columns
+                # (docs/theory/beam_reduction.md §10.3)
+                beam_in = self._beam_inputs(domain)
+                if beam_in is not None:
+                    snapshots = _brom.pod_snapshots(snapshots, beam_in['snapshots'],
+                                                    beam_in['data']['affine']['free'])
+
                 # POD basis (real, also for complex lossy snapshots) and the
                 # mass-normalised reduced operators
                 red = pod_reduce(K, M, B, snapshots,
                                  C=self._C.get(domain), D=self._D.get(domain),
                                  tol=tol, max_rank=domain_max_rank)
+                self._reduced_beam.pop(domain, None)
+                if beam_in is not None:
+                    self._reduced_beam[domain] = _brom.reduce_beam(
+                        red["W"] @ red["Q_L_inv"], K, M, beam_in['data'],
+                        beam_in['port_modes'], C=self._C.get(domain),
+                        D=self._D.get(domain), meta=beam_in['meta'])
+                    pr.info(f"  Beam: {len(beam_in['data']['affine']['nodes'])} "
+                            "interpolation frequencies of its phase")
                 S, r, r_pod = red["S"], red["r"], red["r_pod"]
                 self._singular_values[domain] = S
                 self._W[domain] = red["W"]
@@ -1079,6 +1153,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 if rerun is False or _same_grid(self.frequencies, new_freqs):
                     pr.milestone("  Returning existing ROM results for this sweep. "
                                  "(Use rerun=True to force a re-solve)")
+                    if self.n_domains == 1 and self._reduced_beam and not self._beam:
+                        self._single_domain_beam()
                     return self._build_results_dict()
                 # A reduced solve costs milliseconds: re-solve rather than hand
                 # back results for a different band.
@@ -1087,7 +1163,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             if not self._is_reduced:
                 raise ValueError("Must call reduce() first")
 
-            pr.running(f"\nROM Solve: {fmin} - {fmax} GHz, {nsamples} samples")
+            pr.running(f"\nROM Solve: {fmin:.4f} - {fmax:.4f} GHz, {nsamples} samples")
 
             self.frequencies = new_freqs
 
@@ -1128,7 +1204,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 'S_dict': self.S_dict,
                 'x_r': getattr(self, '_x_r_snapshots', None),
             }
-        return {
+        out = {
             'frequencies': self.frequencies,
             'Z': self._Z_matrix,
             'S': self._S_matrix,
@@ -1136,6 +1212,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
             'S_dict': self.S_dict,
             'x_r': getattr(self, '_x_r_snapshots', None),
         }
+        if getattr(self, '_beam', None):
+            out['Z_tilde'] = self._beam.get('Z_tilde')
+            out['S_tilde'] = self._beam.get('S_tilde')
+        return out
 
     # =========================================================================
     # Persistence
@@ -1207,6 +1287,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     if res.get('S') is not None:
                         with h5py.File(s_path_dir / f"s_{safe_name}.h5", "a") as f:
                             H5Serializer.save_dataset(f, "data", res['S'])
+
+        # 2b. Beam: the reduced beam column of every domain (matrices/), and
+        #     S~, Z~ and the reduced beam columns of the last sweep
+        self._save_beam(path)
 
         # 3. Save snapshots and frequencies
         snap_file = "snapshots.h5"
@@ -1300,6 +1384,69 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         # 6. Save cached concatenation if available
         if self._concatenated is not None:
             self._concatenated.save(path / "concat")
+
+    def _beam_files(self, path: Path, domain: str) -> Dict[str, Path]:
+        tag = domain.replace('/', '_')
+        return {'beam': path / "matrices" / f"beam_{tag}.h5",
+                'Z': path / "z_tilde" / f"z_tilde_{tag}.h5",
+                'S': path / "s_tilde" / f"s_tilde_{tag}.h5",
+                'snapshots': path / "snapshots_beam" / f"snapshots_beam_{tag}.h5"}
+
+    def _save_beam(self, path: Path) -> None:
+        """Write (or, without a beam, remove) the beam files of every domain."""
+        from cavsim3d.solvers import beam as _bm
+        for domain in self.domains:
+            files = self._beam_files(path, domain)
+            rb = getattr(self, '_reduced_beam', {}).get(domain)
+            tilde = (getattr(self, '_beam', None) if self.n_domains == 1
+                     else getattr(self, '_beam_per_domain', {}).get(domain))
+            if rb is not None:
+                rb.save(files['beam'])
+            if tilde and rb is not None:
+                _bm.save_tilde(files['Z'], tilde, 'Z')
+                _bm.save_tilde(files['S'], tilde, 'S')
+                yb = getattr(self, '_beam_snapshots', {}).get(domain)
+                if yb is not None:
+                    files['snapshots'].parent.mkdir(parents=True, exist_ok=True)
+                    with h5py.File(files['snapshots'], "w") as f:
+                        H5Serializer.save_dataset(f, "frequencies", np.asarray(tilde['frequencies']))
+                        H5Serializer.save_dataset(f, "reduced_snapshots", np.asarray(yb))
+                        f.attrs["fingerprint"] = str(tilde.get('fingerprint', ''))
+                continue
+            for key, f in files.items():
+                if f.exists() and (key != 'beam' or rb is None):
+                    f.unlink()
+        for folder in ("z_tilde", "s_tilde", "snapshots_beam"):
+            d = path / folder
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+
+    def _load_beam(self, path: Path) -> None:
+        """Read the beam files :meth:`_save_beam` wrote."""
+        from cavsim3d.solvers import beam as _bm
+        self._reduced_beam, self._beam, self._beam_per_domain = {}, None, {}
+        self._beam_snapshots = {}
+        for domain in self.domains:
+            files = self._beam_files(path, domain)
+            rb = _brom.ReducedBeam.load(files['beam'])
+            if rb is None:
+                continue
+            self._reduced_beam[domain] = rb
+            z, s_ = _bm.load_tilde(files['Z']), _bm.load_tilde(files['S'])
+            meta = z or s_
+            if meta is None:
+                continue
+            tilde = {'Z_tilde': z['data'] if z else None, 'S_tilde': s_['data'] if s_ else None,
+                     'rows': meta['rows'], 'cols': meta['cols'],
+                     'frequencies': meta['frequencies'], 'names': meta['names'],
+                     'setup': meta['setup'], 'fingerprint': meta['fingerprint'],
+                     'summary': meta['summary'], 'port_modes': meta.get('port_modes'),
+                     'ports': meta.get('ports'), 'fingerprints': meta.get('fingerprints'),
+                     'zref': s_.get('zref') if s_ else None}
+            if self.n_domains == 1:
+                self._beam = tilde
+            else:
+                self._beam_per_domain[domain] = tilde
 
     @classmethod
     def load(cls, path: Union[str, Path], solver=None) -> ModelOrderReduction:
@@ -1459,6 +1606,9 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                     if rom._S_matrix is None and "S_matrix" in f:
                         rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
 
+        # 3b. Beam: the reduced beam columns and the last sweep's S~ / Z~
+        rom._load_beam(path)
+
         # 4. Load eigenmodes
         rom.load_eigenmodes()
 
@@ -1579,18 +1729,30 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         self._compute_s_from_z()
         self._invalidate_cache()
 
+        self._single_domain_beam()
+
         # Automatic save after simulation
         if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
             self.solver._project_ref.save()
 
-        return {
-            'frequencies': self.frequencies,
-            'Z': self._Z_matrix,
-            'S': self._S_matrix,
-            'Z_dict': self.Z_dict,
-            'S_dict': self.S_dict,
-            'x_r': self._x_r_snapshots,
-        }
+        return self._build_results_dict()
+
+    def _single_domain_beam(self) -> None:
+        """S~ and Z~ of the single domain at the sweep's frequencies, from its
+        reduced beam column (docs/theory/beam_reduction.md §10.5)."""
+        domain = self.domains[0]
+        self._beam, self._beam_snapshots = None, {}
+        rb = self._reduced_beam.get(domain)
+        if rb is None or self.frequencies is None or domain not in self._A_r:
+            return
+        t0 = time.time()
+        tilde = _brom.section_tilde(rb, self.frequencies, self._A_r[domain],
+                                    self._B_r[domain], self._C_r.get(domain),
+                                    self._D_r.get(domain), zref=self._get_port_impedance,
+                                    zwave=self._port_wave_impedance)
+        self._beam_snapshots = {domain: tilde.pop('y_b')}
+        self._beam = tilde
+        pr.done(f"  Beam columns: {time.time() - t0:.3f}s")
 
     def _solve_multi_domain(self, **kwargs) -> Dict:
         """Solve multi-domain system: per-domain S/Z only."""
@@ -1720,6 +1882,20 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
         )
         concat.define_connections(connections)
         concat.couple()
+        if others is None and self._reduced_beam and all(
+                d in self._reduced_beam for d in self.domains):
+            # the domains' S~ joined at every solve of the coupled system
+            # (one beam frame: the parts are glued); docs/theory/beam_reduction.md §10.7
+            from cavsim3d.solvers.beam import BeamSetup
+            wave = getattr(self, '_port_wave_impedance_func', None)
+            sections = [{'beam': self._reduced_beam[d], 'A': self._A_r[d], 'B': self._B_r[d],
+                         'C': self._C_r.get(d), 'D': self._D_r.get(d),
+                         'zref': self._get_port_impedance, 'zwave': wave, 'key': d}
+                        for d in self.domains]
+            setup = BeamSetup.from_dict(self._reduced_beam[self.domains[0]].setup)
+            concat._beam_join = _brom.ReducedBeamJoin(
+                concat, sections, setup, shifts=None,
+                summary={'joined': list(self.domains)})
 
         self._concatenated = concat
         self._A_r_global = concat.A_coupled
@@ -1915,6 +2091,16 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin):
                 'S_dict': S_dict,
                 'ports': domain_ports
             }
+
+            # The domain's beam column (docs/theory/beam_reduction.md §10.5)
+            self._beam_per_domain.pop(domain, None)
+            rb = self._reduced_beam.get(domain)
+            if rb is not None:
+                tilde = _brom.section_tilde(
+                    rb, frequencies, A_r, B_r, C_r, D_r, zref=self._get_port_impedance,
+                    zwave=getattr(self, '_port_wave_impedance_func', None))
+                self._beam_snapshots[domain] = tilde.pop('y_b')
+                self._beam_per_domain[domain] = tilde
 
         return results
 
@@ -2669,6 +2855,8 @@ def load_reduced_structures(rom_dir, fes=None, mesh=None):
                                  if sm_imp else impedance_func)
         struct.wave_impedance_func = (make_analytic_port_wave_impedance(sm_imp)
                                       if sm_imp else wave_func)
+        # the section's reduced beam column (None: reduced without a beam)
+        struct.reduced_beam = _brom.ReducedBeam.load(_mf("beam"))
         structures.append(struct)
 
     return structures, impedance_func

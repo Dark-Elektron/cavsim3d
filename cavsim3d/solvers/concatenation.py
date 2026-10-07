@@ -365,6 +365,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
 
+        # Beam: the reduced sections' S~, joined at the frequencies of every
+        # solve (docs/theory/beam_reduction.md §10.7); set by concatenate()
+        self._beam_join = None
+        self._beam = None
+
     # =========================================================================
     # Construction from a netlist's flat fds/foms/roms tree
     # =========================================================================
@@ -398,7 +403,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                 Crd=s.Crd, Drd=s.Drd)
             for attr in ("port_fingerprints", "training_band", "impedance_func",
                          "wave_impedance_func", "port_geometry", "port_media",
-                         "mesh_source"):
+                         "mesh_source", "reduced_beam"):
                 if hasattr(s, attr):
                     setattr(c, attr, getattr(s, attr))
             # Keep the SOURCE (base) domain so a per-section field can find its
@@ -1296,6 +1301,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         # Create skeleton
         cs = cls.__new__(cls)
         cs._solver_ref = solver_ref
+        cs._beam_join = None
         cs.C_coupled = cs.D_coupled = None
         cs.n_structures = metadata["n_structures"]
         cs.domains = metadata["domains"]
@@ -1450,9 +1456,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                 "This model was joined through the parts' generalised scattering "
                 "matrices (beam): its results are those at the full-order "
                 f"frequencies ({len(self.frequencies)} samples, concat.frequencies). "
-                "Other frequencies need reduced models of the parts, which do not "
-                "carry the beam yet: solve the parts (proj.fds.solve) at the "
-                "frequencies you need.")
+                "Other frequencies need reduced models of the parts: "
+                "proj.fds.foms.reduce(tol).concatenate(), then solve that.")
         # 1. Merge config and kwargs (a full-order config may be reused: its
         # full-order options are accepted and have no effect here)
         cfg = (config or {}).copy()
@@ -1558,6 +1563,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                         and np.allclose(stored, new_freqs, rtol=1e-9, atol=0.0)):
                     pr.milestone("  Returning existing concatenated results for "
                                  "this sweep. (Use rerun=True to force a re-solve)")
+                    self._update_beam()
                     return {
                         "frequencies": self.frequencies,
                         "Z": self._Z_matrix,
@@ -1573,7 +1579,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             n_ext = self._n_external
             r = self.A_coupled.shape[0]
 
-            pr.running(f"\nConcat Solve: {fmin} - {fmax} GHz, {nsamples} samples, system size {r}")
+            pr.running(f"\nConcat Solve: {fmin:.4f} - {fmax:.4f} GHz, {nsamples} samples, "
+                       f"system size {r}")
 
             if solver_type == 'auto':
                 solver_type = 'iterative' if r >= self.ITERATIVE_SIZE_THRESHOLD else 'direct'
@@ -1605,6 +1612,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             if compute_s_params:
                 self._compute_s_from_z()
             self._invalidate_cache()
+            self._update_beam()
 
             # Automatic save after simulation
             if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
@@ -1625,6 +1633,21 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             pr.pop_verbosity(_prev_verbosity)
             if _file_handler:
                 pr.stop_file_log(_file_handler)
+
+    def _update_beam(self) -> None:
+        """S~ of the joined reduced sections at this sweep's frequencies
+        (docs/theory/beam_reduction.md §10.7), unless it is there already."""
+        join = getattr(self, '_beam_join', None)
+        if join is None or getattr(self, 'frequencies', None) is None:
+            return
+        b = getattr(self, '_beam', None)
+        if (b is not None and len(b['frequencies']) == len(self.frequencies)
+                and np.allclose(b['frequencies'], self.frequencies, rtol=1e-9, atol=0.0)):
+            return
+        t0 = time.time()
+        self._beam = join(self.frequencies)
+        pr.done(f"  Beam: the sections' generalised scattering matrices joined "
+                f"({time.time() - t0:.3f}s)")
 
     def _solve_direct(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
         """Direct eigendecomposition-based solve."""

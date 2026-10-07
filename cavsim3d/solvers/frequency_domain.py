@@ -1228,6 +1228,16 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 f"a few per cent). Mesh with generate_mesh(curve_order="
                 f"{self.BEAM_MIN_CURVE_ORDER}) for beam results.")
 
+    def _beam_affine(self, beam) -> None:
+        """Beam data for reduced models (docs/theory/beam_reduction.md §10.4):
+        the phase integrals at the interpolation frequencies of the sweep's band.
+        Only a sweep that keeps its field snapshots can be reduced."""
+        t0 = time.time()
+        beam.affine = beam.affine_data(self.frequencies)
+        pr.info(f"  Beam data for reduced models ({beam.key}): "
+                f"{len(beam.affine['nodes'])} interpolation frequencies "
+                f"({time.time() - t0:.1f} s)")
+
     def _make_beam_system(self, key: str, fes, B: np.ndarray, excitation_keys,
                           region_materials: Optional[List[str]] = None):
         """Beam data of one system (None without a beam).  ``excitation_keys``
@@ -2748,6 +2758,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                               port_x=self.snapshots[domain] if beam_only else None)
             if beam is not None:
                 self._beam_raw[domain] = out['beam']
+                if store_snapshots:
+                    self._beam_affine(beam)
             if beam_only:
                 pr.done(f"  Beam columns of {domain}: {time.time() - t_domain_start:.2f}s")
                 continue
@@ -2850,6 +2862,8 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                           port_x=self.snapshots['global'] if beam_only else None)
         if beam is not None:
             self._beam_raw['global'] = out['beam']
+            if store_snapshots:
+                self._beam_affine(beam)
         if beam_only:
             pr.done(f"  Beam columns: {time.time() - t_start:.2f}s")
             return

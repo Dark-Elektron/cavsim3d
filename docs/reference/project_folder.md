@@ -52,13 +52,21 @@ single part):
 | `z_tilde/z_tilde_<part>.h5` | $\tilde{Z} = [[Z, k_Z], [h_Z, z_{oc}]]$ with its labels and the beam definition |
 | `s_tilde/s_tilde_<part>.h5` | $\tilde{S} = [[S, k], [h, z_b]]$, the same, with the reference impedance of each port mode and the positions and mode fingerprints of the ports (what a join needs) |
 | `snapshots_beam/snapshots_beam_<part>.h5` | the beam's scattered field per sample |
-| `matrices/beam_<part>.h5` | the beam data that do not depend on frequency: Gauss points, weights and evaluation matrix of each voltage path; the load of each port face |
+| `matrices/beam_<part>.h5` | the beam data that do not depend on frequency: Gauss points, weights and evaluation matrix of each voltage path; the load of each port face. With field snapshots, also the beam's wall lift and loads at the interpolation frequencies, which a reduction needs |
+
+A reduced stage folder holds the same four, for the reduced model:
+
+| Path | Content |
+|---|---|
+| `matrices/beam_<part>.h5` | the reduced beam column: its loads and outputs at the interpolation frequencies, projected on the reduced basis (no mesh needed to evaluate it) |
+| `z_tilde/`, `s_tilde/` | $\tilde{Z}$ and $\tilde{S}$ of the last reduced sweep |
+| `snapshots_beam/snapshots_beam_<part>.h5` | the reduced beam column per sample of that sweep |
 
 The port files (`s/`, `z/`, `snapshots/`) are the same with and without a beam. In a
 chain of repeated or imported parts, each part's beam files sit in `fds/foms/` under the
 part's name, also for a part imported by reference (its beam columns are computed in this
-project). A model joined from full-order parts with a beam (`fds/foms/concat/`) holds
-`s_tilde/s_tilde.h5` and no matrices.
+project). A joined model with a beam (`fds/foms/concat/`, `fds/foms/roms/concat/`) holds
+its $\tilde{S}$ in `s_tilde/s_tilde.h5`.
 
 | Stage | Single part | Several parts |
 |---|---|---|

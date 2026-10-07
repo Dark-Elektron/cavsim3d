@@ -2056,6 +2056,7 @@ class NetlistFOMs:
                 prev = existing.get(base)
                 if (prev is not None and prev.get("tol") == float(tol)
                         and prev.get("max_rank") == max_rank
+                        and (prev.get("reduction") or {}).get("beam") == rec.get("beam")
                         and (roms_dir / "matrices" / f"A_r_{base}.h5").exists()):
                     entries.append(prev)            # reduced so already: reuse
                     continue
@@ -2345,17 +2346,13 @@ class NetlistROMs:
         when it is solved).
         """
         from cavsim3d.solvers.concatenation import ConcatenatedSystem
-        if self._fds_ref is not None and self._fds_ref.beam_setup is not None:
-            import cavsim3d.utils.printing as pr
-            pr.warning("The reduced models carry no beam yet: this joined model has the "
-                       "port results only. The parts joined with the beam: "
-                       "proj.fds.foms.concatenate().")
         concat_dir = self._roms_dir / "concat"
         # results of an earlier coupling must not pass for this one's
         shutil.rmtree(concat_dir, ignore_errors=True)
         self._concat_cache = ConcatenatedSystem.from_flat_roms(
             self._assembly, self._roms_dir)
         self._concat_cache._save_dir = concat_dir
+        self._attach_beam(self._concat_cache)
         try:
             self._concat_cache.save(concat_dir)
         except Exception as e:
@@ -2375,5 +2372,47 @@ class NetlistROMs:
             concat = ConcatenatedSystem.from_flat_roms(self._assembly, self._roms_dir)
             concat._save_dir = concat_dir
             concat.load_results(concat_dir)
+            self._attach_beam(concat)
+            concat._update_beam()
             self._concat_cache = concat
         return self._concat_cache
+
+    def _attach_beam(self, concat) -> None:
+        """With beams: join the parts' reduced beam columns at every solve of
+        ``concat`` (docs/theory/beam_reduction.md §10.7).  Each copy of a part
+        sees the beam's phase at its position along the axis."""
+        fds = self._fds_ref
+        setup = fds.beam_setup if fds is not None else None
+        if setup is None:
+            return
+        from cavsim3d.solvers.concatenation import chain_placement
+        from cavsim3d.rom.beam_reduction import ReducedBeamJoin
+        structures = concat.structures
+        missing = sorted({getattr(s, 'base_domain', s.domain) for s in structures
+                          if getattr(s, 'reduced_beam', None) is None})
+        if missing:
+            import cavsim3d.utils.printing as pr
+            pr.warning(
+                f"Part(s) {', '.join(missing)} have no reduced beam column, so this joined "
+                "model has the port results only. Solve the project with the beam and "
+                "store_snapshots=True (an imported part: in its own project, then reduce it "
+                "there), and reduce again (proj.fds.foms.reduce(tol)).")
+            return
+        a = _beam.axis_index(setup.axis)
+        shifts = chain_placement(structures, concat.connections)
+        for s, shift in zip(structures, shifts):
+            solved = _beam.BeamSetup.from_dict(s.reduced_beam.setup)
+            if not solved.same_lines(setup.shifted(shift)):
+                raise RuntimeError(
+                    f"Part '{getattr(s, 'base_domain', s.domain)}' was reduced with the beams "
+                    f"at other places than copy '{s.domain}' needs: solve the project again "
+                    "(proj.fds.solve()) and reduce again.")
+        sections = [{'beam': s.reduced_beam, 'A': s.Ard, 'B': s.Brd, 'C': s.Crd,
+                     'D': s.Drd, 'zref': getattr(s, 'impedance_func', None),
+                     'zwave': getattr(s, 'wave_impedance_func', None),
+                     'key': getattr(s, 'base_domain', s.domain)} for s in structures]
+        concat._beam_join = ReducedBeamJoin(
+            concat, sections, setup, shifts=[float(sh[a]) for sh in shifts],
+            summary={'joined': [s.domain for s in structures],
+                     'shift': {s.domain: [float(v) for v in sh]
+                               for s, sh in zip(structures, shifts)}})
