@@ -98,6 +98,12 @@ No version has been released yet. The entries compare with the code published on
   BDDC preconditioner; a solve that stalls is finished by GMRES.
   `iterative_opts={'method': 'gmres'}` uses GMRES throughout. `tol` (default `1e-8`) is
   relative to the right-hand side; it used to be an absolute `1e-6`.
+- `rom.solve()`, `roms.solve()` and `concat.solve()` save the sweep's own results (S, Z,
+  snapshots, the beam's S~) and `timing.json`, not the whole project: the full-order
+  results and the reduced or coupled matrices are left as they are. A 13-frequency
+  reduced sweep of the TESLA cavity took 1.1 s, almost all of it rewriting unchanged
+  files; it now takes 0.1 s. The joined model of glued parts reduced per domain
+  (`proj.fds.foms.roms.concat`) now saves its sweep too.
 
 - `solve()` raises `TypeError` for an option it does not know, and suggests the closest
   one (`n_port_modes=2` → "did you mean 'nportmodes'?"). Unknown options used to be

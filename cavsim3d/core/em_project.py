@@ -972,6 +972,13 @@ class EMProject:
         ProjectManager.save_json(self.project_path, metadata, filename="project.json")
 
         # 5. Save timing analysis
+        self.save_timing()
+
+    def save_timing(self) -> None:
+        """Write the timing analysis (``timing.json``).  A reduced or joined
+        solve saves its own results and this, not the whole project."""
+        if self._read_only:
+            return
         try:
             from cavsim3d.utils.timing import get_timing_registry
             reg = get_timing_registry()

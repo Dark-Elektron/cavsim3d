@@ -852,6 +852,27 @@ def lagrange_values(omega: float, nodes: np.ndarray) -> np.ndarray:
     return t / t.sum()
 
 
+def lagrange_matrix(omegas, nodes: np.ndarray) -> np.ndarray:
+    """l_k(omega) for every omega in ``omegas``: (m, n_omega), column by column
+    the values of :func:`lagrange_values`."""
+    omegas = np.atleast_1d(np.asarray(omegas, dtype=float))
+    m = len(nodes)
+    wts = (-1.0) ** np.arange(m)
+    wts[0] *= 0.5
+    wts[-1] *= 0.5
+    d = omegas[None, :] - nodes[:, None]
+    hit = np.abs(d) <= 1e-14 * np.maximum(np.abs(omegas)[None, :], 1.0)
+    on_node = hit.any(axis=0)
+    d[:, on_node] = 1.0                      # replaced below
+    t = wts[:, None] / d
+    out = t / t.sum(axis=0, keepdims=True)
+    if on_node.any():
+        cols = np.flatnonzero(on_node)
+        out[:, cols] = 0.0
+        out[np.argmax(hit[:, cols], axis=0), cols] = 1.0
+    return out
+
+
 def _combine(parts) -> Tuple[np.ndarray, np.ndarray]:
     """(g, f) of :meth:`BeamSystem.lift_and_load` as complex numpy vectors: one
     pair, or the (Re, Im) pairs of a real system."""

@@ -186,51 +186,61 @@ class ReducedBeam:
         r, N = B.shape
         S, L = self.n_sources, self.n_paths
         n_f = len(freqs)
-        Z = np.zeros((n_f, N, N), dtype=complex)
-        kZ = np.zeros((n_f, N, S), dtype=complex)
+        w = 2 * np.pi * freqs
+        Lag = bm.lagrange_matrix(w, self.nodes)                  # (m, n_f)
+
+        # the reduced loads of every beam at every frequency, (n_f, r, S)
+        loads = np.zeros((n_f, r, S), dtype=complex)
+        phase_c = []                                             # exp(-j k_b z_c), per beam
+        for j, src in enumerate(self.sources):
+            k = w * src['k_over_w']
+            phase_c.append(np.exp(-1j * k * self.zc))
+            b = (src['H0'] @ Lag + src['H1'] @ (Lag * w) + src['H2'] @ (Lag * w ** 2)) \
+                * phase_c[j]
+            for s_face, fhat, _breg in src['crossed']:
+                b = b + np.outer(fhat, 1j * w * np.exp(-1j * k * s_face))
+            loads[:, :, j] = b.T
+
+        # the reduced port columns Y (A + jwC - w^2 (I - jD)) Y = w B, and the
+        # beam columns y_b, (n_f, r, N) and (n_f, r, S)
+        if C is None and D is None:
+            lam, Phi = np.linalg.eigh(A)
+            Dg = 1.0 / (lam[None, :] - w[:, None] ** 2)          # (n_f, r)
+            PB = Phi.T @ B
+            Y = w[:, None, None] * np.einsum('rk,fk,kn->frn', Phi, Dg, PB, optimize=True)
+            Pb = np.einsum('rk,frs->fks', Phi, loads, optimize=True)        # Phi^T b
+            y_b = np.einsum('rk,fk,fks->frs', Phi, Dg, Pb, optimize=True)
+        else:
+            I = np.eye(r)
+            Cm = np.zeros((r, r)) if C is None else C
+            Dm = np.zeros((r, r)) if D is None else D
+            Y = np.zeros((n_f, r, N), dtype=complex)
+            y_b = np.zeros((n_f, r, S), dtype=complex)
+            for k, wk in enumerate(w):
+                sol = np.linalg.solve(A + 1j * wk * Cm - wk ** 2 * (I - 1j * Dm),
+                                      np.hstack([wk * B, loads[k]]))
+                Y[k], y_b[k] = sol[:, :N], sol[:, N:]
+
+        Z = 1j * np.einsum('rn,frm->fnm', B, Y, optimize=True)
+        kZ = np.einsum('rn,frs->fns', B, y_b, optimize=True)
+        for j, src in enumerate(self.sources):
+            k = w * src['k_over_w']
+            kZ[:, :, j] += (src['Q'] @ Lag).T * phase_c[j][:, None]
+            for s_face, _fhat, breg in src['crossed']:
+                kZ[:, :, j] -= np.outer(np.exp(-1j * k * s_face), breg)
         hZ = np.zeros((n_f, L, N), dtype=complex)
         zoc = np.zeros((n_f, L, S), dtype=complex)
-        y_b = np.zeros((n_f, r, S), dtype=complex)
-        lossy = C is not None or D is not None
-        if not lossy:
-            lam, Phi = np.linalg.eigh(A)
-            PB = Phi.T @ B
-        I = np.eye(r)
-        Cm = np.zeros((r, r)) if C is None else C
-        Dm = np.zeros((r, r)) if D is None else D
-        for k, f in enumerate(freqs):
-            w = 2 * np.pi * f
-            b = self.loads(w)
-            if lossy:
-                sol = np.linalg.solve(A + 1j * w * Cm - w ** 2 * (I - 1j * Dm),
-                                      np.hstack([w * B, b]))
-                Y, yb = sol[:, :N], sol[:, N:]
-            else:
-                d = 1.0 / (lam - w ** 2)
-                Y = w * (Phi @ (d[:, None] * PB))
-                yb = Phi @ (d[:, None] * (Phi.T @ b))
-            y_b[k] = yb
-            Z[k] = 1j * (B.T @ Y)
-            lag = bm.lagrange_values(w, self.nodes)
-            kz = B.T @ yb
+        for i, path in enumerate(self.paths):
+            if not len(path['s']):
+                continue
+            cw = path['w'][None, :] * np.exp(1j * np.outer(w, path['k_over_w'] * path['s']))
+            cvec = cw @ path['C']                                # (n_f, r)
+            hZ[:, i, :] = 1j * np.einsum('fr,frn->fn', cvec, Y, optimize=True)
+            zoc[:, i, :] = np.einsum('fr,frs->fs', cvec, y_b, optimize=True)
             for j, src in enumerate(self.sources):
-                kb = w * src['k_over_w']
-                kz[:, j] += np.exp(-1j * kb * self.zc) * (src['Q'] @ lag)
-                for s_face, _fhat, breg in src['crossed']:
-                    kz[:, j] -= np.exp(-1j * kb * s_face) * breg
-            kZ[k] = kz
-            for i, path in enumerate(self.paths):
-                if not len(path['s']):
-                    continue
-                cw = path['w'] * np.exp(1j * w * path['k_over_w'] * path['s'])
-                cvec = cw @ path['C']
-                hZ[k, i] = 1j * (cvec @ Y)
-                zoc[k, i] = cvec @ yb
-                for j, src in enumerate(self.sources):
-                    pg = src['Pg'][i]
-                    if pg.size:
-                        kb = w * src['k_over_w']
-                        zoc[k, i, j] += np.exp(-1j * kb * self.zc) * (cw @ (pg @ lag))
+                pg = src['Pg'][i]
+                if pg.size:
+                    zoc[:, i, j] += phase_c[j] * np.einsum('fk,kf->f', cw, pg @ Lag)
         return {'Z': Z, 'kZ': kZ, 'hZ': hZ, 'zoc': zoc, 'y_b': y_b}
 
     # -- persistence ----------------------------------------------------------

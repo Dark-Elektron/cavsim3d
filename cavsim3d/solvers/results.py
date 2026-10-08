@@ -1693,14 +1693,18 @@ class ROMCollection(PlotMixin):
         """
         if self._mor_ref is None:
             raise RuntimeError("Cannot solve: no MOR reference available.")
-        result = self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples, 
+        result = self._mor_ref.solve(fmin=fmin, fmax=fmax, nsamples=nsamples,
                                    config=config, **kwargs)
-        
-        # Explicitly save ROM results (Z, S, snapshots) after solving
+
+        # Save the sweep's results (Z, S, snapshots); the reduced matrices are
+        # those of reduce() and stay as saved
         if hasattr(self._fds_ref, '_project_path') and self._fds_ref._project_path:
             try:
                 roms_path = Path(self._fds_ref._project_path) / "fds" / "foms" / "roms"
-                self.save(roms_path)
+                self._mor_ref.save(roms_path, results_only=True)
+                ref = getattr(self._fds_ref, '_project_ref', None)
+                if ref is not None:
+                    ref.save_timing()
             except Exception as e:
                 warnings.warn(f"Could not save ROM results: {e}", UserWarning, stacklevel=2)
         

@@ -117,7 +117,7 @@ zpar = chain.beam_impedance()
 
 A reduced model carries the beam when the full-order sweep kept its field snapshots
 (`store_snapshots=True`, the default). It then gives $\tilde{S}$ and the beam impedance at
-any frequency of its band, in milliseconds:
+any frequency of its band, in a few milliseconds per frequency:
 
 ```python
 proj.fds.solve(fmin=1.0, fmax=2.9, nsamples=39, nportmodes=3, order=3)

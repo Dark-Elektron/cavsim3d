@@ -1217,12 +1217,19 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
     # Persistence
     # =========================================================================
 
-    def save(self, path: Union[str, Path]):
+    def save(self, path: Union[str, Path], results_only: bool = False):
         """
         Save ConcatenatedSystem data to disk.
+
+        ``results_only=True`` writes what a sweep produced -- S/Z, the
+        snapshots and the beam's S~ -- and leaves the coupled matrices, the
+        eigenmodes and the metadata, which change only with the coupling (a
+        folder without them is saved in full).
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
+        if results_only and not (path / "metadata.json").exists():
+            results_only = False                 # never saved in full: do it now
 
         # Subfolders
         s_path_dir = path / "s"
@@ -1236,7 +1243,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         mat_path = path / "matrices"
         mat_path.mkdir(parents=True, exist_ok=True)
         
-        if self.A_coupled is not None:
+        if self.A_coupled is not None and not results_only:
             with h5py.File(mat_path / "A.h5", "a") as fa, \
                  h5py.File(mat_path / "B.h5", "a") as fb, \
                  h5py.File(mat_path / "W.h5", "a") as fw:
@@ -1246,7 +1253,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                     H5Serializer.save_dataset(fw, "data", self.W_coupled)
         for name, mat in (("C", getattr(self, 'C_coupled', None)),
                           ("D", getattr(self, 'D_coupled', None))):
-            if mat is not None:
+            if mat is not None and not results_only:
                 with h5py.File(mat_path / f"{name}.h5", "a") as fl:
                     H5Serializer.save_dataset(fl, "data", mat)
 
@@ -1268,9 +1275,10 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                 H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
 
         # 4. Save eigenmodes
-        self.save_eigenmodes()
+        if not results_only:
+            self.save_eigenmodes()
 
-        # 5. Beam: S~ of the joined model (FOM-level join only)
+        # 5. Beam: S~ of the joined model
         from cavsim3d.solvers import beam as _bm
         tilde_file = path / "s_tilde" / "s_tilde.h5"
         if getattr(self, '_beam', None):
@@ -1278,6 +1286,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         elif tilde_file.exists():
             tilde_file.unlink()
 
+        if results_only:
+            return
         metadata = {
             "n_structures": self.n_structures,
             "domains": self.domains,
@@ -1614,13 +1624,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             self._invalidate_cache()
             self._update_beam()
 
-            # Automatic save after simulation
-            if hasattr(self, '_solver_ref') and self._solver_ref and hasattr(self._solver_ref, '_project_ref'):
-                if self._solver_ref._project_ref:
-                    self._solver_ref._project_ref.save()
-            elif getattr(self, '_save_dir', None) is not None:
-                # a netlist's joined model has no solver: it saves itself
-                self.save(self._save_dir)
+            # Automatic save after simulation: this sweep's results only
+            self._autosave_results()
 
             return {
                 "frequencies": self.frequencies,
@@ -1633,6 +1638,42 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             pr.pop_verbosity(_prev_verbosity)
             if _file_handler:
                 pr.stop_file_log(_file_handler)
+
+    def _results_dir(self) -> Tuple[Optional[Path], Any]:
+        """(folder, project) where this joined model's sweep is saved: its own
+        folder when it has one (a netlist's), else that of the stage it was
+        joined from -- only for the joined model the project holds.  (None,
+        None) when it is not saved."""
+        if getattr(self, '_save_dir', None) is not None:
+            return Path(self._save_dir), None
+        ref = self._solver_ref
+        if ref is None:
+            return None, None
+        from cavsim3d.rom.reduction import ModelOrderReduction
+        if isinstance(ref, ModelOrderReduction):
+            base = ref._results_dir()
+            fds = getattr(ref, 'solver', None)
+            if base is None or getattr(ref, '_concatenated', None) is not self:
+                return None, None
+            return base / "concat", getattr(fds, '_project_ref', None)
+        project = getattr(ref, '_project_ref', None)
+        root = getattr(ref, '_project_path', None)
+        held = [getattr(getattr(ref, name, None), '_concat_cache', None)
+                for name in ('_foms_cache', '_netlist_foms')]
+        if project is None or root is None or not any(h is self for h in held):
+            return None, None
+        return Path(root) / "fds" / "foms" / "concat", project
+
+    def _autosave_results(self) -> None:
+        """Write a sweep's results into this joined model's folder, and the
+        timing analysis -- not the whole project, which the sweep leaves
+        unchanged."""
+        path, project = self._results_dir()
+        if path is None or getattr(project, '_read_only', False):
+            return
+        self.save(path, results_only=True)
+        if project is not None:
+            project.save_timing()
 
     def _update_beam(self) -> None:
         """S~ of the joined reduced sections at this sweep's frequencies

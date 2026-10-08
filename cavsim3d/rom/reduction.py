@@ -1221,12 +1221,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
     # Persistence
     # =========================================================================
 
-    def save(self, path: Union[str, Path]):
+    def save(self, path: Union[str, Path], results_only: bool = False):
         """
         Save ModelOrderReduction data to disk.
         
         Saves reduced matrices (A_r, B_r, W, Q_L_inv) to separate files in matrices/
         and S/Z parameters, snapshots, and eigenmodes to their respective folders.
+
+        ``results_only=True`` writes what a sweep produced -- S/Z, the reduced
+        snapshots, the beam's S~/Z~ and the metadata -- and leaves the reduced
+        matrices, the structure metadata and the eigenmodes, which change only
+        with :meth:`reduce` (a folder without them is saved in full).
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
@@ -1239,30 +1244,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         for p in [s_path_dir, z_path_dir, snap_path_dir, eig_path_dir]:
             p.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save reduced and projection matrices to modular files
+        # 1. Save reduced and projection matrices to modular files (they
+        #    change only with reduce(); a sweep's save leaves them)
         mat_path = path / "matrices"
         mat_path.mkdir(parents=True, exist_ok=True)
-        
-        with h5py.File(mat_path / "A_r.h5", "a") as fa, \
-             h5py.File(mat_path / "B_r.h5", "a") as fb, \
-             h5py.File(mat_path / "W.h5", "a") as fw, \
-             h5py.File(mat_path / "Q_L_inv.h5", "a") as fq:
-            for domain in self.domains:
-                if domain in self._A_r:
-                    # Save with domain suffix for modularity
-                    H5Serializer.save_dataset(fa, domain, self._A_r.get(domain))
-                    H5Serializer.save_dataset(fb, domain, self._B_r.get(domain))
-                    H5Serializer.save_dataset(fw, domain, self._W.get(domain))
-                    H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
-                    
-                    # Also save individual files for user-friendly access
-                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W),
-                                         ("Q_L_inv", self._Q_L_inv), ("C_r", self._C_r),
-                                         ("D_r", self._D_r)]:
-                        if mdict.get(domain) is None:
-                            continue
-                        with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
-                            H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
+        if results_only and not (mat_path / f"A_r_{self.domains[0]}.h5").exists():
+            results_only = False                 # never saved in full: do it now
+        if not results_only:
+            self._save_matrices(mat_path)
 
         # 2. Save S and Z results
         if self.n_domains == 1:
@@ -1290,7 +1279,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
         # 2b. Beam: the reduced beam column of every domain (matrices/), and
         #     S~, Z~ and the reduced beam columns of the last sweep
-        self._save_beam(path)
+        self._save_beam(path, results_only=results_only)
 
         # 3. Save snapshots and frequencies
         snap_file = "snapshots.h5"
@@ -1328,7 +1317,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         #     reuse across projects).  Requires the solver at save time.
         try:
             solver = getattr(self, 'solver', None)
-            if solver is not None and self._is_reduced:
+            if solver is not None and self._is_reduced and not results_only:
                 ps = getattr(solver, 'port_solver', None)
                 struct_meta = {"structures": []}
                 imp = {"cutoff": {}, "mtype": {}, "eps": {}, "mu": {}, "zpv": {}}
@@ -1376,14 +1365,40 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
             warnings.warn(f"Could not save ROM structure metadata: {e}")
 
         # 5. Save eigenmodes
-        try:
-            self.save_eigenmodes(path=eig_path_dir)
-        except Exception as e:
-            warnings.warn(f"Could not save ROM eigenmodes to {eig_path_dir}: {e}")
-        
-        # 6. Save cached concatenation if available
-        if self._concatenated is not None:
+        if not results_only:
+            try:
+                self.save_eigenmodes(path=eig_path_dir)
+            except Exception as e:
+                warnings.warn(f"Could not save ROM eigenmodes to {eig_path_dir}: {e}")
+
+        # 6. Save cached concatenation if available (a sweep's save: only if
+        #    it was never saved)
+        if self._concatenated is not None and not (
+                results_only and (path / "concat" / "metadata.json").exists()):
             self._concatenated.save(path / "concat")
+
+    def _save_matrices(self, mat_path: Path) -> None:
+        """The reduced and projection matrices of every domain."""
+        with h5py.File(mat_path / "A_r.h5", "a") as fa, \
+             h5py.File(mat_path / "B_r.h5", "a") as fb, \
+             h5py.File(mat_path / "W.h5", "a") as fw, \
+             h5py.File(mat_path / "Q_L_inv.h5", "a") as fq:
+            for domain in self.domains:
+                if domain in self._A_r:
+                    # Save with domain suffix for modularity
+                    H5Serializer.save_dataset(fa, domain, self._A_r.get(domain))
+                    H5Serializer.save_dataset(fb, domain, self._B_r.get(domain))
+                    H5Serializer.save_dataset(fw, domain, self._W.get(domain))
+                    H5Serializer.save_dataset(fq, domain, self._Q_L_inv.get(domain))
+                    
+                    # Also save individual files for user-friendly access
+                    for mname, mdict in [("A_r", self._A_r), ("B_r", self._B_r), ("W", self._W),
+                                         ("Q_L_inv", self._Q_L_inv), ("C_r", self._C_r),
+                                         ("D_r", self._D_r)]:
+                        if mdict.get(domain) is None:
+                            continue
+                        with h5py.File(mat_path / f"{mname}_{domain}.h5", "a") as f_indiv:
+                            H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
     def _beam_files(self, path: Path, domain: str) -> Dict[str, Path]:
         tag = domain.replace('/', '_')
@@ -1392,15 +1407,17 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                 'S': path / "s_tilde" / f"s_tilde_{tag}.h5",
                 'snapshots': path / "snapshots_beam" / f"snapshots_beam_{tag}.h5"}
 
-    def _save_beam(self, path: Path) -> None:
-        """Write (or, without a beam, remove) the beam files of every domain."""
+    def _save_beam(self, path: Path, results_only: bool = False) -> None:
+        """Write (or, without a beam, remove) the beam files of every domain;
+        ``results_only``: not the reduced beam columns (they change with
+        reduce() only)."""
         from cavsim3d.solvers import beam as _bm
         for domain in self.domains:
             files = self._beam_files(path, domain)
             rb = getattr(self, '_reduced_beam', {}).get(domain)
             tilde = (getattr(self, '_beam', None) if self.n_domains == 1
                      else getattr(self, '_beam_per_domain', {}).get(domain))
-            if rb is not None:
+            if rb is not None and not (results_only and files['beam'].exists()):
                 rb.save(files['beam'])
             if tilde and rb is not None:
                 _bm.save_tilde(files['Z'], tilde, 'Z')
@@ -1731,11 +1748,37 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
         self._single_domain_beam()
 
-        # Automatic save after simulation
-        if hasattr(self.solver, '_project_ref') and self.solver._project_ref:
-            self.solver._project_ref.save()
+        # Automatic save after simulation: this sweep's results only
+        self._autosave_results()
 
         return self._build_results_dict()
+
+    def _results_dir(self) -> Optional[Path]:
+        """This reduced model's folder in the project (None without one)."""
+        root = getattr(getattr(self, 'solver', None), '_project_path', None)
+        if root is None:
+            return None
+        return Path(root) / "fds" / ("fom/rom" if self.n_domains == 1 else "foms/roms")
+
+    def _autosave_results(self) -> None:
+        """Write a sweep's results into this reduced model's folder, and the
+        timing analysis -- not the whole project: the full-order results and
+        the reduced matrices did not change.  Only the reduced model the
+        project holds is written (as ``fds.fom.rom`` / ``fds.foms.roms``)."""
+        fds = getattr(self, 'solver', None)
+        ref = getattr(fds, '_project_ref', None)
+        path = self._results_dir()
+        if ref is None or path is None or getattr(ref, '_read_only', False):
+            return
+        if self.n_domains == 1:
+            held = getattr(getattr(fds, '_fom_cache', None), '_rom_cache', None)
+        else:
+            roms = getattr(getattr(fds, '_foms_cache', None), '_roms_cache', None)
+            held = getattr(roms, '_mor_ref', None)
+        if held is not self:
+            return
+        self.save(path, results_only=True)
+        ref.save_timing()
 
     def _single_domain_beam(self) -> None:
         """S~ and Z~ of the single domain at the sweep's frequencies, from its
