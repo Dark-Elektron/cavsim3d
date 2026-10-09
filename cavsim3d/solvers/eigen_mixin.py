@@ -9,11 +9,13 @@ Provides shared functionality for eigenmode analysis across different solver typ
 
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Literal, Any
+import time
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as sl
 from scipy.optimize import linear_sum_assignment
-from scipy.sparse.linalg import ArpackNoConvergence, eigs as nearest_eigs, eigsh
+from scipy.sparse.linalg import (ArpackNoConvergence, LinearOperator, eigs as nearest_eigs,
+                                 eigsh)
 from cavsim3d.core.persistence import H5Serializer
 from cavsim3d.core.constants import MIN_EIGENVALUE, SIGMA_COPPER
 from cavsim3d.solvers.figures_of_merit import (ModePiece, beam_line, field_on_line,
@@ -926,7 +928,15 @@ class EigenMixinBase:
         one: a strongly damped mode whose best match is another mode's loaded
         resonance is left out.  The Z0 of a TE/TM mode depends on frequency:
         it is evaluated at the mode's own resonance, re-solved until the
-        frequency settles, at most *refine* times.
+        frequency settles, at most *refine* times.  Each solve computes the
+        loaded eigenpairs nearest the closed modes (shift-invert, one
+        factorisation of size r per shift), and all of them only where those
+        do not hold the closed modes' space (a strongly damped mode).  A long call reports its
+        progress every 10 s.
+
+        A loaded Q above ~1e12 is at round-off (Im w ~ 1e-12 Re w): such a
+        mode is practically unloaded, and within a cluster of near-degenerate
+        modes of that kind the individual values are not resolved.
 
         Parameters
         ----------
@@ -989,39 +999,83 @@ class EigenMixinBase:
             L, y0 = system(f)
             return (*unit_pairs(*sl.eig(L)), y0)
 
+        def nearest(f, shifts, k):
+            """The *k* eigenpairs of the loaded problem (Z0 at *f*) nearest each
+            of *shifts* (w / w0), by shift-invert.  The linearised matrix
+            L = [[0, I], [A', jG']] is never factorised: (L - s) [u; v] = [a; b]
+            is v = a + s u with (A' + s jG' - s^2) u = b - jG' a + s a, one
+            factorisation of size r per shift."""
+            y0 = admittance(f)
+            jG = 1j * ((B * y0) @ B.T) / w0
+            Ap = A / w0 ** 2
+            n2 = 2 * r
+            Lop = LinearOperator((n2, n2), dtype=complex,
+                                 matvec=lambda z: np.concatenate([z[r:], Ap @ z[:r] + jG @ z[r:]]))
+            vals, vecs = [], []
+            for sh in shifts:
+                lu = sl.lu_factor(Ap + sh * jG - sh ** 2 * np.eye(r), check_finite=False)
+
+                def opinv(z, sh=sh, lu=lu):
+                    a, b = z[:r], z[r:]
+                    u = sl.lu_solve(lu, b - jG @ a + sh * a, check_finite=False)
+                    return np.concatenate([u, a + sh * u])
+
+                v, X = nearest_eigs(Lop, k=k, sigma=sh, OPinv=LinearOperator(
+                    (n2, n2), matvec=opinv, dtype=complex))
+                vals.append(v)
+                vecs.append(X)
+            w_all, X_all = unit_pairs(np.concatenate(vals), np.hstack(vecs))
+            once = [j for j in range(len(w_all)) if not any(
+                abs(np.vdot(X_all[:, i], X_all[:, j])) > 0.999 for i in range(j))]
+            return w_all[once], X_all[:, once], y0
+
+        def distinct(w):
+            """The shifts for eigenvalues *w*: one per cluster within 0.1 %."""
+            shifts = []
+            for wi in w:
+                if all(abs(wi - sh) > 1e-3 * abs(wi) for sh in shifts):
+                    shifts.append(wi)
+            return [sh / w0 for sh in shifts]
+
         def match(modes, w_all, X_all):
             """One loaded eigenpair per closed mode, the one it overlaps most."""
             overlap = np.abs(modes.conj().T @ X_all)
             rows, picks = linear_sum_assignment(-overlap)
             return w_all[picks], X_all[:, picks], overlap[rows, picks]
 
-        def rematch(f, modes, w, fit):
-            """:func:`match` with Z0 at *f*, starting from the current eigenvalues *w*.
+        def whole(f, modes):
+            """:func:`match` against every eigenpair of the loaded problem."""
+            w_all, X_all, y0 = loaded(f)
+            return (*match(modes, w_all, X_all), y0)
 
-            A re-solve moves the eigenvalues only a little, so shift-invert at
-            each w finds the candidates; if a mode then matches clearly worse
-            than before, every eigenpair is computed."""
-            L, y0 = system(f)
-            shifts = []
-            for wi in w:
-                if all(abs(wi - s) > 1e-3 * abs(wi) for s in shifts):
-                    shifts.append(wi)
+        def spanned(modes, X):
+            """How well the candidates *X* span the closed *modes*: the smallest
+            singular value of modes^H Q, with Q an orthonormal basis of X (1:
+            exactly).  Within a near-degenerate cluster the closed eigenvectors
+            are any rotation of each other, so single overlaps can be small
+            while the cluster's space is held."""
+            if X.shape[1] < modes.shape[1]:
+                return 0.0
+            Qx, _ = np.linalg.qr(X)
+            return float(np.linalg.svd(modes.conj().T @ Qx, compute_uv=False).min())
+
+        def rematch(f, modes, w):
+            """:func:`match` with Z0 at *f*, starting from the eigenvalues *w*.
+
+            A solve moves the eigenvalues only a little from *w* (the closed
+            modes' at first, then the last solve's), so shift-invert at each w
+            finds the candidates.  If they do not hold the closed modes' space
+            (a strongly damped mode, far from its closed mode), every eigenpair
+            is computed."""
+            if len(w) + 6 >= 2 * r - 2:
+                return whole(f, modes)              # a small system: solve it whole
             try:
-                if len(w) + 4 >= 2 * r - 2:
-                    raise ValueError("small system: solve it whole")
-                parts = [nearest_eigs(L, k=len(w) + 4, sigma=s / w0) for s in shifts]
-                w_all, X_all = unit_pairs(np.concatenate([s for s, _ in parts]),
-                                          np.hstack([X for _, X in parts]))
-                once = [j for j in range(len(w_all)) if not any(
-                    abs(np.vdot(X_all[:, i], X_all[:, j])) > 0.999 for i in range(j))]
-                if len(once) < len(w):
-                    raise ValueError("too few candidates: solve it whole")
-                result = match(modes, w_all[once], X_all[:, once])
-                if np.any(result[2] < 0.9 * fit):
-                    raise ValueError("a mode matches worse: solve it whole")
-            except (ValueError, ArpackNoConvergence):
-                result = match(modes, *unit_pairs(*sl.eig(L)))
-            return (*result, y0)
+                w_all, X_all, y0 = nearest(f, distinct(w), k=len(w) + 6)
+            except ArpackNoConvergence:
+                return whole(f, modes)
+            if spanned(modes, X_all) < 0.9:
+                return whole(f, modes)
+            return (*match(modes, w_all, X_all), y0)
 
         y_ref = admittance(f_ref)
         dispersive = not np.allclose(admittance(1.01 * f_ref), y_ref)
@@ -1048,16 +1102,26 @@ class EigenMixinBase:
             groups = np.split(near, breaks) if len(near) else []
 
         found = []                          # (w, x, y0, closed mode, overlap, group)
+        t_start = t_said = time.time()
         for g, group in enumerate(groups):
+            if time.time() - t_said > 10:       # a long call is not a hang: say where it is
+                t_said = time.time()
+                pr.milestone(f"  get_external_q: group {g + 1}/{len(groups)} of closed modes "
+                             f"({f_closed[group[0]] / 1e9:.4f} GHz), {t_said - t_start:.0f} s")
             f = float(np.mean(f_closed[group]))
-            w_all, X_all, y0 = same_everywhere or loaded(f)
-            w, x, fit = match(V[:, group], w_all, X_all)
+            if same_everywhere is not None:
+                w, x, fit = match(V[:, group], *same_everywhere[:2])
+                y0 = same_everywhere[2]
+            else:
+                # from the closed modes (a loaded mode Q_L ~ 1 is not near them:
+                # it matches poorly, and every eigenpair is computed)
+                w, x, fit, y0 = rematch(f, V[:, group], 2 * np.pi * f_closed[group] + 0j)
             for _ in range(refine if dispersive else 0):
                 f_new = float(np.mean(w.real)) / (2 * np.pi)
                 if abs(f_new - f) <= 1e-7 * f:
                     break
                 f = f_new
-                w, x, fit, y0 = rematch(f, V[:, group], w, fit)
+                w, x, fit, y0 = rematch(f, V[:, group], w)
             found += [(w[k], x[:, k], y0, int(i), fit[k], g) for k, i in enumerate(group)]
 
         # a strongly damped mode can grow out of two groups: keep the closer match
@@ -1116,6 +1180,13 @@ class EigenMixinBase:
         catch both polarisations, or use the transverse R/Q of
         :meth:`get_figures_of_merit`.
 
+        ``V_complex`` is the voltage with its phase: s is the model's own
+        coordinate along *axis*, and the mode's phase is fixed for the
+        spectrum computed last, so the voltages of one mode on different
+        lines can be combined.  The parts of a mixed mode follow from
+        offsets +-d: the dipole part in x is ``(V(d, 0) - V(-d, 0)) / 2``,
+        the monopole and quadrupole parts ``(V(d, 0) + V(-d, 0)) / 2``.
+
         Parameters
         ----------
         mode_index : int
@@ -1133,8 +1204,9 @@ class EigenMixinBase:
         Returns
         -------
         dict
-            ``frequency`` [Hz], ``V`` [V], ``U`` [J] and ``RQ`` [Ohm], for the
-            mode scaled to a stored energy of 1 J.
+            ``frequency`` [Hz], ``V`` [V] (= ``abs(V_complex)``),
+            ``V_complex`` [V], ``U`` [J] and ``RQ`` [Ohm], for the mode scaled
+            to a stored energy of 1 J.
         """
         domain = domain or self._default_eigen_domain()
         freq, x = self._eigenpair(mode_index, domain)
@@ -1143,8 +1215,9 @@ class EigenMixinBase:
         pieces = self._eigen_mode_pieces(x, domain, axis)
         a = 'XYZ'.index(axis.upper())
         s = beam_line(pieces, a, span, n_points)
-        V = abs(voltage(field_on_line(pieces, a, offset, s)[0], s, w)) / np.sqrt(U)
-        return {'frequency': freq, 'V': V, 'U': 1.0, 'RQ': V ** 2 / w}
+        Vc = voltage(field_on_line(pieces, a, offset, s)[0], s, w) / np.sqrt(U)
+        V = abs(Vc)
+        return {'frequency': freq, 'V': V, 'V_complex': Vc, 'U': 1.0, 'RQ': V ** 2 / w}
 
     def get_figures_of_merit(
             self,

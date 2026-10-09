@@ -17,13 +17,14 @@ from ngsolve.webgui import Draw
 from cavsim3d.core.constants import mu0, MIN_EIGENVALUE
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
 from cavsim3d.solvers.options import (FOM_SOLVE_OPTIONS, REDUCED_SOLVE_OPTIONS,
-                                      check_solve_options, validate_sweep)
+                                      check_solve_options, reduced_sweep)
 import h5py
 import json
 from pathlib import Path
 from datetime import datetime
 import cavsim3d.utils.printing as pr
 from cavsim3d.utils.printing import read_log
+from cavsim3d.utils.threads import small_dense_blas
 import warnings
 import time
 import matplotlib.pyplot as plt
@@ -37,13 +38,14 @@ if TYPE_CHECKING:
 
 
 
-def _lossy_reduced_solve(A, C, D, B, omegas):
+def _lossy_reduced_solve(A, C, D, B, omegas, keep_states: bool = True):
     """Solve (A + jwC - w^2 (I - jD)) X = w B at every w; returns (Z, X list).
 
     A, C, D are the mass-normalised reduced operators (C, D may be None).
     Losses break the single eigendecomposition used for the lossless case,
     so each frequency is a small dense solve.  Z = j B^T X (bilinear: the
-    lossy system is complex SYMMETRIC, not Hermitian).
+    lossy system is complex SYMMETRIC, not Hermitian).  ``keep_states=False``
+    returns None for the X list.
     """
     r = A.shape[0]
     I = np.eye(r)
@@ -53,23 +55,68 @@ def _lossy_reduced_solve(A, C, D, B, omegas):
     for w in omegas:
         lhs = A + 1j * w * Cm - w ** 2 * (I - 1j * Dm)
         X = np.linalg.solve(lhs, w * B)
-        X_all.append(X)
+        if keep_states:
+            X_all.append(X)
         Z.append(1j * (B.T @ X))
-    return np.array(Z), X_all
+    return np.array(Z), (X_all if keep_states else None)
 
 
-def _real_pod_basis(snapshots: np.ndarray):
-    """(U, S) of the SVD used for the POD basis -- always a REAL basis.
+def real_snapshot_matrix(snapshots: np.ndarray) -> np.ndarray:
+    """A real, Fortran-ordered copy of the snapshots that the POD may overwrite.
 
     Complex (lossy) snapshots are split into [Re X, Im X]: a real basis keeps
     the projected operators real and the reduced system complex-symmetric,
     exactly like the full-order one.
     """
-    X = snapshots
-    if np.iscomplexobj(X):
-        X = np.hstack([X.real, X.imag])
-    U, S, _ = np.linalg.svd(X, full_matrices=False)
-    return U, S
+    X = np.asarray(snapshots)
+    if not np.iscomplexobj(X):
+        return np.array(X, dtype=float, order='F')
+    n, m = X.shape
+    out = np.empty((n, 2 * m), order='F')
+    out[:, :m] = X.real
+    out[:, m:] = X.imag
+    return out
+
+
+def _real_pod_basis(snapshots: np.ndarray, overwrite: bool = False):
+    """``(Q, U_R, S)``: the real POD basis of rank r is ``Q @ U_R[:, :r]``.
+
+    The snapshot matrix is tall and thin (n DOFs x a few hundred or thousand
+    columns). It is factored X = QR in place, and only the small R is passed
+    to the SVD: about one copy of X instead of LAPACK gesdd's several, whose
+    workspace allocation can fail on a large model. ``U_R`` is None when X has
+    no more rows than columns (Q is then the SVD's own U).
+
+    ``overwrite=True`` lets the factorisation use ``snapshots`` itself when it
+    is already real and Fortran-ordered (as :func:`real_snapshot_matrix` and
+    the beam's ``pod_snapshots`` return it).
+
+    Raises ``FloatingPointError`` when the snapshots or the singular values
+    are not finite, or the snapshots are all zero.
+    """
+    X = np.asarray(snapshots)
+    if not (overwrite and X.dtype == np.float64 and X.flags.f_contiguous):
+        X = real_snapshot_matrix(X)
+    n, m = X.shape
+    where = f"the snapshot matrix ({n} x {m}, {X.nbytes / 1e9:.2f} GB)"
+    if not np.isfinite(X).all():
+        raise FloatingPointError(f"POD: {where} holds NaN or infinite values; "
+                                 "the full-order solve that made them failed.")
+    if n > m:
+        Q, R = sl.qr(X, mode='economic', overwrite_a=True, check_finite=False)
+        U_R, S, _ = np.linalg.svd(R)
+    else:
+        Q, S, _ = np.linalg.svd(X, full_matrices=False)
+        U_R = None
+    if not np.isfinite(S).all() or not len(S) or not S[0] > 0:
+        raise FloatingPointError(
+            f"POD: the SVD of {where} returned "
+            + ("no singular values" if not len(S) else
+               "an all-zero spectrum" if np.isfinite(S).all() else
+               "NaN singular values (LAPACK could not allocate its workspace: "
+               "free memory, e.g. by running one reduction at a time)")
+            + ". The stored reduced model is left as it was.")
+    return Q, U_R, S
 
 
 def check_reduce_args(tol, max_rank=None) -> None:
@@ -85,12 +132,14 @@ def check_reduce_args(tol, max_rank=None) -> None:
 
 
 def pod_reduce(K, M, B, snapshots, C=None, D=None, tol: float = 1e-6,
-               max_rank: Optional[int] = None) -> Dict:
+               max_rank: Optional[int] = None, overwrite_snapshots: bool = False) -> Dict:
     """POD reduction of one domain's system ``(K - w^2 M) x = w B u``.
 
     The snapshots span the basis ``W``; the projected mass matrix is
     normalised to the identity, so the reduced system is
     ``(A_r - w^2 I) x_r = w B_r u`` (with ``C_r``, ``D_r`` for lossy media).
+    ``overwrite_snapshots=True`` lets the POD factor a real Fortran-ordered
+    snapshot matrix in place (it is destroyed).
 
     Returns
     -------
@@ -99,14 +148,20 @@ def pod_reduce(K, M, B, snapshots, C=None, D=None, tol: float = 1e-6,
         truncation), ``r`` (after dropping directions of ~zero mass),
         ``Q_L_inv``, ``A_r``, ``B_r``, ``C_r``, ``D_r`` (None if lossless) and
         ``n_filtered``.
+
+    Raises
+    ------
+    FloatingPointError
+        If the SVD fails (NaN singular values, e.g. when LAPACK cannot get its
+        workspace) or leaves no direction of positive mass.
     """
     check_reduce_args(tol, max_rank)
-    U, S = _real_pod_basis(snapshots)
-    r_pod = int(np.sum(S > tol * S[0])) if len(S) else 0
-    r_pod = max(r_pod, 1)
+    Q, U_R, S = _real_pod_basis(snapshots, overwrite=overwrite_snapshots)
+    r_pod = max(int(np.sum(S > tol * S[0])), 1)
     if max_rank is not None:
         r_pod = min(r_pod, int(max_rank))
-    W = U[:, :r_pod]
+    W = np.ascontiguousarray(Q[:, :r_pod] if U_R is None else Q @ U_R[:, :r_pod])
+    del Q
 
     M_r = W.T @ M @ W
     K_r = W.T @ K @ W
@@ -115,11 +170,16 @@ def pod_reduce(K, M, B, snapshots, C=None, D=None, tol: float = 1e-6,
 
     # Mass-weighted transformation A_r = L^{-T} K_r L^{-1}; directions of
     # near-zero (or negative) mass are dropped to prevent numerical blow-up.
-    lam, Q = sl.eigh(M_r)
-    min_lam = np.finfo(float).eps * np.max(np.abs(lam))
-    valid = lam > min_lam
+    lam_all, Q = sl.eigh(M_r)
+    min_lam = np.finfo(float).eps * np.max(np.abs(lam_all))
+    valid = lam_all > min_lam
     n_filtered = int(np.sum(~valid))
-    lam, Q = lam[valid], Q[:, valid]
+    lam, Q = lam_all[valid], Q[:, valid]
+    if not len(lam):
+        raise FloatingPointError(
+            f"POD: none of the {r_pod} basis vector(s) has a positive mass (projected "
+            f"mass eigenvalues {np.array2string(lam_all, precision=2)}); the reduced "
+            "model would have 0 DOFs. The stored reduced model is left as it was.")
     Q_L_inv = Q @ np.diag(1.0 / np.sqrt(lam))
 
     A_r = Q_L_inv.T @ K_r @ Q_L_inv
@@ -894,12 +954,14 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
             # Validate snapshots
             self._validate_snapshots_for_reduction()
-            # results of an earlier reduction no longer apply
-            self._beam, self._beam_per_domain, self._beam_snapshots = None, {}, {}
 
             _t_reduce_start = time.time()
             total_full = 0
             total_reduced = 0
+            # Every domain is reduced before anything is replaced: a domain that
+            # fails (pod_reduce raises) leaves the reduced model, in memory and
+            # on disk, as it was.
+            staged = {}
 
             for domain in self.domains:
                 pr.info(f"\nDomain: {domain}")
@@ -946,21 +1008,46 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
                 # POD basis (real, also for complex lossy snapshots) and the
                 # mass-normalised reduced operators
-                red = pod_reduce(K, M, B, snapshots,
-                                 C=self._C.get(domain), D=self._D.get(domain),
-                                 tol=tol, max_rank=domain_max_rank)
-                self._reduced_beam.pop(domain, None)
+                n_snapshots = snapshots.shape[1]
+                try:
+                    red = pod_reduce(K, M, B, snapshots,
+                                     C=self._C.get(domain), D=self._D.get(domain),
+                                     tol=tol, max_rank=domain_max_rank,
+                                     overwrite_snapshots=beam_in is not None)
+                except FloatingPointError as err:
+                    raise FloatingPointError(f"Reducing domain '{domain}': {err}") from err
+                del snapshots
+                reduced_beam = None
                 if beam_in is not None:
-                    self._reduced_beam[domain] = _brom.reduce_beam(
+                    reduced_beam = _brom.reduce_beam(
                         red["W"] @ red["Q_L_inv"], K, M, beam_in['data'],
                         beam_in['port_modes'], C=self._C.get(domain),
                         D=self._D.get(domain), meta=beam_in['meta'])
                     pr.info(f"  Beam: {len(beam_in['data']['affine']['nodes'])} "
                             "interpolation frequencies of its phase")
+                staged[domain] = (red, reduced_beam)
                 S, r, r_pod = red["S"], red["r"], red["r_pod"]
-                self._singular_values[domain] = S
+
+                pr.info(f"  Full DOFs: {n}")
+                pr.info(f"  Snapshots: {n_snapshots}")
+                pr.info(f"  Reduced DOFs: {r}")
+                pr.info(f"  Compression: {100*(1-r/n):.1f}%")
+                pr.debug(f"  Singular value decay: {S[0]:.2e} → {S[min(r_pod, len(S)-1)]:.2e}")
+                if red["n_filtered"]:
+                    pr.debug(f"  Filtered {red['n_filtered']}/{r_pod} near-zero mass eigenvalue(s)")
+
+                total_full += n
+                total_reduced += r
+
+            # results of an earlier reduction no longer apply
+            self._beam, self._beam_per_domain, self._beam_snapshots = None, {}, {}
+            for domain, (red, reduced_beam) in staged.items():
+                self._reduced_beam.pop(domain, None)
+                if reduced_beam is not None:
+                    self._reduced_beam[domain] = reduced_beam
+                self._singular_values[domain] = red["S"]
                 self._W[domain] = red["W"]
-                self._r[domain] = r
+                self._r[domain] = red["r"]
                 self._Q_L_inv[domain] = red["Q_L_inv"]
                 self._A_r[domain] = red["A_r"]
                 self._B_r[domain] = red["B_r"]
@@ -970,17 +1057,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                     self._C_r[domain] = red["C_r"]
                 if red["D_r"] is not None:
                     self._D_r[domain] = red["D_r"]
-
-                pr.info(f"  Full DOFs: {n}")
-                pr.info(f"  Snapshots: {snapshots.shape[1]}")
-                pr.info(f"  Reduced DOFs: {r_pod}")
-                pr.info(f"  Compression: {100*(1-r_pod/n):.1f}%")
-                pr.debug(f"  Singular value decay: {S[0]:.2e} → {S[min(r_pod, len(S)-1)]:.2e}")
-                if red["n_filtered"]:
-                    pr.debug(f"  Filtered {red['n_filtered']}/{r_pod} near-zero mass eigenvalue(s)")
-
-                total_full += n
-                total_reduced += r
+            del staged
 
             _t_reduce = time.time() - _t_reduce_start
             pr.done(f"Reduction complete: {total_full} -> {total_reduced} DOFs ({100*(1-total_reduced/total_full):.1f}% compression)")
@@ -1043,7 +1120,16 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         config : dict, optional
             Dictionary containing solve parameters
         **kwargs :
-            Individual solve parameters (solver_type, rerun, etc.)
+            Individual solve parameters:
+
+            - ``frequencies``: any array of frequencies [GHz] in place of
+              ``fmin``, ``fmax``, ``nsamples`` (sorted, repeats dropped), e.g.
+              points placed on narrow resonances.
+            - ``store_snapshots`` (default True): keep the reduced solution of
+              every frequency (n_f x r x port modes). With False it is not
+              kept or saved; a field at one frequency is then solved again
+              when asked for.
+            - ``solver_type``, ``rerun``, ``verbose``, ``compute_s_params``.
         """
         # 1. Merge config and kwargs (a full-order config may be reused: its
         # full-order options are accepted and have no effect here)
@@ -1052,20 +1138,15 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         check_solve_options(cfg, REDUCED_SOLVE_OPTIONS, also_accepted=FOM_SOLVE_OPTIONS,
                             where="rom.solve()")
 
-        # 2. Extract core parameters with defaults
-        fmin = fmin if fmin is not None else cfg.get('fmin')
-        fmax = fmax if fmax is not None else cfg.get('fmax')
-        nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
-
-        # Validate mandatory frequency range
-        if fmin is None or fmax is None:
-            raise ValueError("fmin and fmax must be provided (either directly or via config).")
-        nsamples = validate_sweep(fmin, fmax, nsamples)
+        # 2. The frequencies: a uniform grid or any array
+        new_freqs, fmin, fmax, nsamples = reduced_sweep(fmin, fmax, nsamples, cfg, kwargs,
+                                                        where="rom.solve()")
 
         # 3. Extract other options from merged cfg
         solver_type = cfg.get('solver_type', 'auto')
         rerun = cfg.get('rerun', None)   # None: auto, True: force, False: keep stored
         verbose = cfg.get('verbose')     # None: keep the console verbosity
+        store_snapshots = bool(cfg.get('store_snapshots', True))
 
         # Start file logging
         _file_handler = None
@@ -1148,7 +1229,6 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                     except Exception as e:
                         pr.warning(f"  Could not load existing ROM results: {e}")
 
-            new_freqs = np.linspace(fmin, fmax, nsamples) * 1e9
             if has_results and not rerun:
                 if rerun is False or _same_grid(self.frequencies, new_freqs):
                     pr.milestone("  Returning existing ROM results for this sweep. "
@@ -1169,7 +1249,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
             _t_rom_solve = time.time()
             if self.n_domains == 1:
-                result = self._solve_single_domain(solver_type=solver_type)
+                result = self._solve_single_domain(solver_type=solver_type,
+                                                   store_snapshots=store_snapshots)
             else:
                 result = self._solve_multi_domain(solver_type=solver_type)
 
@@ -1292,6 +1373,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                 group = f.require_group("x_r_snapshots")
                 for domain, snapshots_data in self._x_r_snapshots.items():
                     H5Serializer.save_dataset(group, domain, snapshots_data)
+            elif "x_r_snapshots" in f and self.frequencies is not None:
+                del f["x_r_snapshots"]              # an earlier sweep's
 
         # 4. Save metadata
         metadata = {
@@ -1652,8 +1735,10 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
         return rom
 
-    def _solve_single_domain(self, solver_type: str = 'auto') -> Dict:
-        """Solve single-domain reduced system."""
+    def _solve_single_domain(self, solver_type: str = 'auto',
+                             store_snapshots: bool = True) -> Dict:
+        """Solve single-domain reduced system; ``store_snapshots=False`` keeps
+        no reduced solutions (fields are then solved again on request)."""
         domain = self.domains[0]
         A_r = self._A_r[domain]
         B_r = self._B_r[domain]
@@ -1678,7 +1763,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         if C_r is not None or D_r is not None:
             # Lossy: no common eigenbasis -> one small dense solve per frequency
             self._Z_matrix, x_r_all = _lossy_reduced_solve(
-                A_r, C_r, D_r, B_r, omegas)
+                A_r, C_r, D_r, B_r, omegas, keep_states=store_snapshots)
         elif solver_type in ('auto', 'direct'):
             # ============================================================
             # Eigendecomposition approach (fast for reduced systems)
@@ -1704,8 +1789,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                 self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ Vinv_B
 
             # Snapshots: x_r[k] = w V diag(d[k]) V^{-1} B
-            x_r_all = [omegas[k] * V @ (d[k, :, None] * Vinv_B)
-                       for k in range(n_freq)]
+            x_r_all = ([omegas[k] * V @ (d[k, :, None] * Vinv_B)
+                        for k in range(n_freq)] if store_snapshots else None)
 
         else:
             # ============================================================
@@ -1727,7 +1812,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                     if info != 0:
                         gmres_failures += 1
 
-                x_r_all.append(x_r)
+                if store_snapshots:
+                    x_r_all.append(x_r)
                 self._Z_matrix[k] = 1j * B_r.T @ x_r
 
             if gmres_failures > 0:
@@ -1741,7 +1827,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         # Store reduced snapshots for field reconstruction
         # Shape: (n_freq, r, n_port_modes)
         # ================================================================
-        self._x_r_snapshots = {domain: np.array(x_r_all)}
+        self._x_r_snapshots = {domain: np.array(x_r_all)} if store_snapshots else None
 
         self._compute_s_from_z()
         self._invalidate_cache()
@@ -2017,19 +2103,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
 
         # The reduced matrices are tiny; MKL's multithreaded LAPACK is roughly
         # 900x SLOWER than single-threaded at this size (thread setup dominates).
-        try:
-            from threadpoolctl import threadpool_limits
-            _blas_limit = threadpool_limits(limits=1, user_api='blas')
-        except Exception:
-            _blas_limit = None
-
-        try:
-            results = self._solve_per_domain_inner(
-                frequencies, n_modes, results)
-        finally:
-            if _blas_limit is not None:
-                _blas_limit.unregister()
-        return results
+        with small_dense_blas():
+            return self._solve_per_domain_inner(frequencies, n_modes, results)
 
     def _domain_port_mode_pairs(self, domain: str, n_modes: int):
         """Ordered ``(local_port_idx, port, mode)`` matching B_r's columns."""
@@ -2073,7 +2148,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
             lossy = C_r is not None or D_r is not None
             if lossy:
                 Z_lossy, _ = _lossy_reduced_solve(
-                    A_r, C_r, D_r, B_r, 2 * np.pi * np.asarray(frequencies))
+                    A_r, C_r, D_r, B_r, 2 * np.pi * np.asarray(frequencies),
+                    keep_states=False)
             elif np.allclose(A_r, A_r.T.conj(), atol=1e-10):
                 lam, V = np.linalg.eigh(A_r)
                 Vinv_B = V.T.conj() @ (B_r @ I_exc)
@@ -2209,17 +2285,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                 "Use concatenated_system.plot_field() for multi-domain structures"
             )
 
-        # Single domain case
-        # Check if we have stored reduced snapshots from solve()
-        if self._x_r_snapshots is None:
-            raise ValueError(
-                "No reduced solution snapshots available. "
-                "Call solve() first to generate snapshots."
-            )
-
-        domain_snapshots = self._x_r_snapshots.get(domain)
-        if domain_snapshots is None:
-            raise ValueError(f"No snapshots for domain '{domain}'")
+        # Single domain case: the stored reduced solution, or solved again
+        states = self._reduced_states(domain, freq_idx)
 
         # Get port index
         domain_ports = self.domain_port_map[domain]
@@ -2234,18 +2301,31 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         n_modes = self._n_modes_per_port or 1
         col_idx = port_idx * n_modes + excitation_mode
 
-        # domain_snapshots shape: (n_freq, r, n_port_modes)
-        if freq_idx >= domain_snapshots.shape[0]:
-            raise ValueError(
-                f"freq_idx {freq_idx} out of range [0, {domain_snapshots.shape[0] - 1}]"
-            )
-        if col_idx >= domain_snapshots.shape[2]:
+        # states shape: (r, n_port_modes)
+        if col_idx >= states.shape[1]:
             raise ValueError(
                 f"Excitation column {col_idx} out of range. "
                 f"port_idx={port_idx}, mode={excitation_mode}"
             )
 
-        return domain_snapshots[freq_idx, :, col_idx]
+        return states[:, col_idx]
+
+    def _reduced_states(self, domain: str, freq_idx: int) -> np.ndarray:
+        """The reduced solution (r x port modes) of every port-mode excitation
+        at ``frequencies[freq_idx]``: the stored one, or solved again when the
+        sweep kept none (``solve(store_snapshots=False)``)."""
+        n_f = 0 if self.frequencies is None else len(self.frequencies)
+        if not n_f:
+            raise ValueError("No reduced solution: call solve() first.")
+        if not 0 <= freq_idx < n_f:
+            raise ValueError(f"freq_idx {freq_idx} out of range [0, {n_f - 1}]")
+        stored = (self._x_r_snapshots or {}).get(domain)
+        if stored is not None and len(stored) == n_f:
+            return stored[freq_idx]
+        w = 2 * np.pi * float(self.frequencies[freq_idx])
+        _, X = _lossy_reduced_solve(self._A_r[domain], self._C_r.get(domain),
+                                    self._D_r.get(domain), self._B_r[domain], [w])
+        return X[0]
 
     def reconstruct_field(
         self,
@@ -2401,11 +2481,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         if domain not in self._W or domain not in self._Q_L_inv:
             return False
 
-        # Check if we have snapshots from solve()
-        if self._x_r_snapshots is None:
-            return False
-
-        return True
+        # a solution from solve(): stored, or solved again on request
+        return self._x_r_snapshots is not None or self.frequencies is not None
 
     def plot_field(
         self,

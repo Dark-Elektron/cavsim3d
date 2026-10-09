@@ -66,6 +66,8 @@ of reduced parts joined with it (`proj.fds.foms.roms.concat`), after their `solv
 | `s_tilde_dict`, `z_tilde_dict` | the same keyed by label, plus `'frequencies'` |
 | `tilde_labels`, `beam_names` | (rows, columns); label → beam or path name |
 | `beam_impedance(beam=None, path=None, ports='matched')` | $Z_\parallel$ per frequency, Ω: `-z_b`; `ports='open'`: `-z_oc`. `beam`, `path`: name or label; defaults: the first beam, read on its own line |
+| `transverse_impedance(plane='x', name='dipole', ports='matched')` | $Z_\perp$ per frequency, Ω/m, in one plane, from the beams of `proj.add_transverse_beams(d, name)`: $\frac{c}{\omega}\,[Z(+,+) - Z(+,-) - Z(-,+) + Z(-,-)]/(2d)^2$ |
+| `get_hom_power(current, beam=None)` | the power the beam leaves in each port mode, W, with `current` the peak amplitude of the beam current at each frequency of the result (an array, or a function of the frequencies in Hz): `{'frequencies', 'P_lines': {label: W per frequency}, 'P_mode': {label: W}, 'P_port': {port number: W}, 'P_total': W}` |
 | `beam_field(i, beam=None, total=True)` | the beam's field at sample `i`: $E_s + E^{free}$ as a CoefficientFunction, or (`total=False`) the scattered field $E_s$ as a GridFunction (full-order results only) |
 | `plot_s_tilde()`, `plot_z_tilde()`, `plot_beam_impedance()` | plots, arguments as `plot_s()` |
 
@@ -149,6 +151,7 @@ losses are for the mode scaled to a stored energy of 1 J.
 | `Vt [MV]`, `Et [MV/m]` | transverse kick at `offset` (Panofsky–Wenzel) |
 | `R/Q_t [Ohm]` | $V_t^2/(\omega U)$ |
 | `k_kick [V/pC/m]` | kick factor, $k V_t^2/(4U)$ with $k = \omega/(\beta c)$ |
+| `Vt_x [MV]`, `R/Q_t_x [Ohm]`, `k_kick_x [V/pC/m]` (and `_y`) | the same per transverse plane (y and z for a beam along x, ...): $V_{t,u} = j\frac{\beta c}{\omega}\,\partial V/\partial u$ |
 | `Rs [Ohm]` | surface resistance used for the walls |
 | `Active Length [mm]`, `N Cells` | the normalisation used |
 | `Q_wall []`, `Q_diel []`, `Pdiel [W]` | wall and material Q, material loss (with a lossy material) |

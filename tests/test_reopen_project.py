@@ -50,6 +50,40 @@ def test_reopened_solve_with_per_port_mode_counts_is_not_rerun(tmp_path, monkeyp
     np.testing.assert_allclose(stored["S"], res["S"])
 
 
+def test_reopened_mesh_is_curved_to_the_order_it_reached(tmp_path, monkeypatch):
+    import cavsim3d.geometry.base as gb
+    real, calls = gb._curve_with_fallback, []
+
+    def cad_curves_to_2(mesh, order, known=None, **kw):  # a CAD model that fails above 2
+        calls.append((order, known))
+        return real(mesh, 2, known=known, **kw)
+
+    monkeypatch.setattr(gb, "_curve_with_fallback", cad_curves_to_2)
+    proj = EMProject("curved", base_dir=str(tmp_path), overwrite=True)
+    proj.geometry = RectangularWaveguide(a=0.1, L=0.06667, maxh=0.06)
+    proj.generate_mesh(maxh=0.06, curve_order=4)
+    assert proj.geometry.curve_order == 2 and proj.geometry.curve_order_requested == 4
+    res = proj.fds.solve(config=CFG)
+
+    calls.clear()
+    again = EMProject("curved", base_dir=str(tmp_path))
+    # the recorded mesh is curved straight to order 2 (the primitive's own
+    # constructor meshes once before, at its default order)
+    assert (4, 2) in calls and (4, None) not in calls
+    monkeypatch.setattr(again.fds, "_clear_results", lambda *a, **k: pytest.fail("re-solved"))
+    np.testing.assert_allclose(again.fds.solve(config=CFG)["S"], res["S"])
+
+    # a project saved before the reached order was recorded: not solved again either
+    conf = tmp_path / "curved" / "fds" / "config.json"
+    data = json.loads(conf.read_text())
+    for entry in data.get("geometry_history", []):
+        entry.pop("curve_order_reached", None)
+    conf.write_text(json.dumps(data))
+    old = EMProject("curved", base_dir=str(tmp_path))
+    monkeypatch.setattr(old.fds, "_clear_results", lambda *a, **k: pytest.fail("re-solved"))
+    old.fds.solve(config=CFG)
+
+
 def test_reopened_rom_keeps_port_modes(tmp_path):
     _solved(tmp_path)
     proj = EMProject("reopen", base_dir=str(tmp_path))

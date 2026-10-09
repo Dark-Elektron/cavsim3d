@@ -90,13 +90,60 @@ def _display_webgui_fallback(scene):
         pass
 
 
-def _curve_with_fallback(mesh, order: int) -> int:
+def tiny_edges(shape, rel: float = 1e-5) -> List[Tuple[float, Tuple[float, float, float]]]:
+    """``[(length [m], midpoint), ...]`` of the edges of *shape* shorter than
+    *rel* times its bounding-box diagonal, shortest first.
+
+    Sliver edges (micrometres long, left where CAD splines and fillets meet)
+    are where OCC's point projection fails when a mesh is curved past order 2.
+    """
+    try:
+        lo, hi = shape.bounding_box
+        diag = float(np.linalg.norm([hi.x - lo.x, hi.y - lo.y, hi.z - lo.z]))
+        out = {}
+        for e in shape.edges:                   # a shared edge is listed once per side
+            length = float(e.mass)
+            if length < rel * diag:
+                a, b = e.start, e.end
+                mid = ((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2)
+                out.setdefault(tuple(round(v / (rel * diag), 3) for v in mid), (length, mid))
+    except Exception:
+        return []
+    return sorted(out.values())
+
+
+def _sliver_note(shape) -> str:
+    """The sentence of a curving warning that names the sliver edges of *shape*."""
+    found = tiny_edges(shape) if shape is not None else []
+    if not found:
+        return ""
+    where = ", ".join(f"{length * 1e6:.1f} um at ({p[0] * 1e3:.2f}, {p[1] * 1e3:.2f}, "
+                      f"{p[2] * 1e3:.2f}) mm" for length, p in found[:6])
+    more = f" and {len(found) - 6} more" if len(found) > 6 else ""
+    return (f" The geometry has {len(found)} sliver edge(s), where OCC's projection "
+            f"fails: {where}{more}. Merge them into their neighbours in the CAD model "
+            "to curve further.")
+
+
+def _curve_with_fallback(mesh, order: int, known: Optional[int] = None, shape=None) -> int:
     """Curve *mesh* to *order*, else to the highest lower order that works.
 
     OCC's point projection can fail on imported CAD edges at order 3
-    (``GeomAPI_ProjectPointOnCurve::NearestPoint``) where order 2 works.
-    Returns the order used and warns when it is lower than asked.
+    (``GeomAPI_ProjectPointOnCurve::NearestPoint``) where order 2 works,
+    typically on sliver edges a few micrometres long. Returns the order used
+    and warns when it is lower than asked, naming the sliver edges of
+    *shape* (the geometry meshed) if it has any.
+
+    *known*: the order an earlier mesh of the same geometry reached (a
+    reopened project replaying its mesh). Below *order*, the mesh is curved
+    to it directly, without the attempts that failed before.
     """
+    if known is not None and int(known) < int(order):
+        try:
+            mesh.Curve(int(known))
+            return int(known)
+        except Exception:
+            order = int(known)
     try:
         mesh.Curve(order)
         return order
@@ -109,8 +156,8 @@ def _curve_with_fallback(mesh, order: int) -> int:
             continue
         warnings.warn(
             f"Curving the mesh to order {order} failed ({error}); it is curved to "
-            f"order {k} instead. Pass curve_order={k} to generate_mesh() to ask "
-            f"for that directly.", UserWarning, stacklevel=3)
+            f"order {k} instead.{_sliver_note(shape)} Pass curve_order={k} to "
+            f"generate_mesh() to ask for that directly.", UserWarning, stacklevel=3)
         return k
     raise error
 
@@ -271,14 +318,18 @@ class BaseGeometry(ABC, TaggableMixin):
         else:
             self.mesh = Mesh(OCCGeometry(self.geo).GenerateMesh(curvaturesafety=curvaturesafety))
 
-        self.curve_order = _curve_with_fallback(self.mesh, curve_order)
+        # a replayed mesh starts at the order it reached when it was made
+        known, self._curve_order_known = getattr(self, '_curve_order_known', None), None
+        self.curve_order = _curve_with_fallback(self.mesh, curve_order, known=known,
+                                                shape=self.geo)
+        self.curve_order_requested = curve_order
         # Port/boundary lists are cached from the mesh; a new mesh invalidates them.
         self._ports = None
         self._boundaries = None
         self.invalidate_tag()  # Mesh changed
 
         self._record('generate_mesh', maxh=maxh, curve_order=curve_order,
-                     curvaturesafety=curvaturesafety)
+                     curvaturesafety=curvaturesafety, curve_order_reached=self.curve_order)
         return self.mesh
 
     def _warn_if_maxh_non_binding(self, maxh: float) -> None:
@@ -364,6 +415,7 @@ class BaseGeometry(ABC, TaggableMixin):
             self.set_materials(entry.get('material_config') or {})
             return True
         if op == 'generate_mesh':
+            self._curve_order_known = entry.get('curve_order_reached')
             self.generate_mesh(maxh=entry.get('maxh'),
                                curve_order=entry.get('curve_order', 3),
                                curvaturesafety=entry.get('curvaturesafety', 2))

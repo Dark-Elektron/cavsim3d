@@ -28,8 +28,7 @@ mode open.
 ## Place the beam, and read voltages along other lines
 
 Give the transverse position in metres (`x=`, `y=` for the main axis Z). A second line
-without current reads the beam's field elsewhere, for example to estimate a transverse
-kick:
+without current reads the beam's field elsewhere:
 
 ```python
 proj.add_beam('beam', x=2e-3)                  # the same name replaces the beam
@@ -40,6 +39,40 @@ z_probe = proj.fds.fom.beam_impedance('beam', path='probe')
 
 `proj.beams` and `proj.beam_paths` list what is defined; `proj.remove_beam(name)` and
 `proj.remove_beam_path(name)` remove it, and the next `solve()` drops its results.
+
+## Compute the transverse impedance
+
+`add_transverse_beams(d)` adds two beams per transverse plane, at $\pm d$ from a centre
+(the axis unless `x=`, `y=` are given). After a solve, `transverse_impedance(plane)` gives
+$Z_\perp$ in Ω/m:
+
+```python
+proj.add_transverse_beams(0.01)                # dipole_x+, dipole_x-, dipole_y+, dipole_y-
+proj.fds.solve(fmin=0.5, fmax=1.5, nsamples=11, nportmodes=3, order=3)
+zx = proj.fds.fom.transverse_impedance('x')
+zy = proj.fds.fom.transverse_impedance('y')    # also on rom and concat
+```
+
+Each beam's field is read on both lines of its plane, and with $Z(w, s)$ the longitudinal
+impedance of the beam at $s$ read on the line at $w$,
+
+$$
+Z_\perp = \frac{c}{\omega}\,
+\frac{Z(+,+) - Z(+,-) - Z(-,+) + Z(-,-)}{(2d)^2},
+$$
+
+the mixed derivative $\partial^2 Z_\parallel/\partial u_s\,\partial u_w$ (Panofsky–Wenzel). The
+double difference keeps the part that is odd in both offsets, the dipole part: the
+monopole and quadrupole parts drop out, and so does the kick a coupler gives a monopole
+mode, which is odd in one offset only.
+
+- Take $d$ small next to the aperture radius $a$, a quarter of it or less: a sextupole
+  part is left at about $(d/a)^4$.
+- The double difference of four similar numbers amplifies their discretisation error.
+  Mesh finer than for $Z_\parallel$, and check $Z_\perp$ on two meshes.
+- Near a dipole mode below cut-off, with open ports, $Z_\perp \approx j\frac{\omega}{c}
+  (R/Q)_t\,\frac{\omega_0}{4(\omega_0 - \omega)}$, with the mode's `R/Q_t_x [Ohm]` from
+  `get_figures_of_merit()`.
 
 ## Read the coupling to the port modes
 
@@ -56,6 +89,36 @@ current, so for the port modes each port face is a magnetic wall, as in the eige
 (`get_resonant_frequencies()`). The beam passes through the faces either way. With open
 ports, a lossless structure below cut-off has a purely reactive beam impedance whose poles
 are the resonances of the eigenproblem.
+
+## Compute the HOM power per port
+
+`get_hom_power()` gives the power a beam leaves in each port mode. Each frequency of the
+result is one spectral line of the beam current, so solve at the lines first. For a train
+of equal bunches, `bunch_train_spectrum()` gives the lines and their amplitudes:
+
+```python
+from cavsim3d.analysis import bunch_train_spectrum
+
+f, I = bunch_train_spectrum(charge=1e-9, spacing=25e-9, sigma_t=30e-12, fmax=2.9)
+rom.solve(frequencies=f, store_snapshots=False)     # GHz; also concat.solve()
+P = rom.get_hom_power(I)                            # A, peak amplitude per line
+P['P_port']                                         # {'1': W, '2': W, ...}
+P['P_mode']                                         # {'1(1)': W, ...}, per port mode
+```
+
+With every port mode matched, the beam sends the wave $k\,I_p$ into a port mode, which
+carries $\tfrac12 |k|^2 |I_p|^2\,\mathrm{Re}\,Z_{ref}/|Z_{ref}|$; an evanescent mode carries
+none. Port numbers are those of the labels: `'2(1)'` is mode 1 of port 2. The current is
+$i(t) = \sum_p \mathrm{Re}\{I_p e^{j\omega_p t}\}$, so `I` holds peak amplitudes, not rms.
+
+- Carry every propagating mode of each port (`nportmodes`): a mode that is left out sees a
+  magnetic wall, and the power it would take is reflected into the others.
+- With lossless walls, the port powers add up to the power the beam loses,
+  $\tfrac12\mathrm{Re}\,Z_\parallel |I_p|^2$ per line. A difference of more than a few per cent
+  means the mesh is too coarse for $\mathrm{Re}\,Z_\parallel$.
+- A narrow resonance takes power only when a line falls within its width. The lines of a
+  real machine are fixed by the bunch spacing, so compute them at those frequencies, not
+  on a grid.
 
 ## Add a beam to a solved project
 
@@ -143,6 +206,11 @@ zpar = concat.beam_impedance()
   the walls dominates the snapshots, while the beam reads $E_z$ on its own line.
 - An imported part needs a reduced model with the beam in its own project:
   `proj.fds.fom.reduce(tol)` there, after a solve with the beam.
+- A narrow resonance (a loaded Q of 10^6 is a line 1 kHz wide at 1 GHz) falls between the
+  points of any grid. Place points on it: `get_external_q()` gives the loaded resonances,
+  and `rom.solve(frequencies=...)` (or `concat.solve`) takes any frequencies in GHz.
+- `store_snapshots=False` keeps S, Z and $\tilde{S}$ only, not the reduced solution of every
+  frequency: use it for long sweeps of large joined models.
 
 ## Get accurate beam results
 

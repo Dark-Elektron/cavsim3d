@@ -1221,12 +1221,20 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             curved = bool(np.any(self._mesh.ngmesh.Elements2D().NumPy()['curved']))
         except Exception:
             return
-        if curved:
-            pr.warning(
-                f"The beam runs past curved walls that the mesh follows to curve order "
-                f"{order}: the beam impedance is sensitive to the wall's facets (errors of "
-                f"a few per cent). Mesh with generate_mesh(curve_order="
-                f"{self.BEAM_MIN_CURVE_ORDER}) for beam results.")
+        if not curved:
+            return
+        asked = getattr(self.geometry, 'curve_order_requested', None)
+        if asked is not None and asked >= self.BEAM_MIN_CURVE_ORDER:
+            advice = (f"Curving to order {asked} failed on this geometry's CAD edges, so "
+                      "the beam results carry that error; a healed or simplified CAD "
+                      "model may curve further.")
+        else:
+            advice = (f"Mesh with generate_mesh(curve_order={self.BEAM_MIN_CURVE_ORDER}) "
+                      "for beam results.")
+        pr.warning(
+            f"The beam runs past curved walls that the mesh follows to curve order "
+            f"{order}: the beam impedance is sensitive to the wall's facets (errors of "
+            f"a few per cent). {advice}")
 
     def _beam_affine(self, beam) -> None:
         """Beam data for reduced models (docs/theory/beam_reduction.md §10.4):
@@ -2283,7 +2291,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
         # separately below)
         current_history = getattr(self.geometry, '_history', [])
         loaded_history = loaded.get('geometry_history', [])
-        keys_to_ignore = {'timestamp', 'filepath'}
+        keys_to_ignore = {'timestamp', 'filepath', 'curve_order_reached'}
         current_clean = strip_keys(current_history, keys_to_ignore)
         loaded_clean = strip_keys(loaded_history, keys_to_ignore)
         if current_clean != loaded_clean:

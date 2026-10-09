@@ -23,6 +23,10 @@ import numpy as np
 import scipy.sparse as sp
 
 from cavsim3d.solvers import beam as bm
+from cavsim3d.utils.threads import small_dense_blas
+
+#: memory [bytes] of the reduced columns evaluated at once in a sweep
+EVAL_CHUNK_BYTES = 64e6
 
 #: version of the saved reduced beam data
 REDUCED_BEAM_VERSION = 1
@@ -32,15 +36,13 @@ REDUCED_BEAM_VERSION = 1
 # Snapshots (§10.3)
 # =============================================================================
 
-def _real_columns(X: np.ndarray) -> np.ndarray:
-    X = np.asarray(X)
-    return np.hstack([X.real, X.imag]) if np.iscomplexobj(X) else X
-
-
-def _largest_singular_value(X: np.ndarray) -> float:
-    if not X.size:
+def _largest_singular_value(cols, mask=None) -> float:
+    """Largest singular value of the column blocks ``cols`` side by side
+    (rows in ``mask`` taken as zero), from their Gram matrix."""
+    cols = [c if mask is None else np.where(mask[:, None], 0.0, c) for c in cols]
+    if not sum(c.size for c in cols):
         return 0.0
-    gram = X.T @ X
+    gram = np.block([[a.T @ b for b in cols] for a in cols])
     return float(np.sqrt(max(np.linalg.eigvalsh(gram)[-1], 0.0)))
 
 
@@ -54,15 +56,29 @@ def pod_snapshots(port_snapshots: np.ndarray, beam_snapshots: np.ndarray,
     by its largest singular value: the port columns are fields per unit modal
     current, the beam columns per unit beam current, and the truncation would
     otherwise drop the smaller family.
+
+    The result is real and Fortran-ordered, filled in place, so the POD can
+    factor it without a further copy (``pod_reduce(overwrite_snapshots=True)``).
     """
-    Xb = np.array(beam_snapshots, dtype=complex)
-    Xb[~np.asarray(free, dtype=bool), :] = 0.0
-    parts = []
-    for X in (_real_columns(port_snapshots), _real_columns(Xb)):
-        s1 = _largest_singular_value(X)
+    P, Xb = np.asarray(port_snapshots), np.asarray(beam_snapshots)
+    fixed = ~np.asarray(free, dtype=bool)
+    families = []
+    for X, mask in ((P, None), (Xb, fixed)):
+        cols = (X.real, X.imag) if np.iscomplexobj(X) else (X,)
+        s1 = _largest_singular_value(cols, mask)
         if X.shape[1] and s1 > 0:
-            parts.append(X / s1)
-    return np.hstack(parts)
+            families.append((cols, mask, s1))
+    out = np.empty((P.shape[0], sum(c.shape[1] for f in families for c in f[0])),
+                   order='F')
+    j = 0
+    for cols, mask, s1 in families:
+        for c in cols:
+            block = out[:, j:j + c.shape[1]]
+            np.divide(c, s1, out=block)
+            if mask is not None:
+                block[mask, :] = 0.0
+            j += c.shape[1]
+    return out
 
 
 def missing_beam_reason(snapshots, data) -> str:
@@ -186,6 +202,12 @@ class ReducedBeam:
         r, N = B.shape
         S, L = self.n_sources, self.n_paths
         n_f = len(freqs)
+        # the reduced columns (n_f, r, N + S) of a long sweep, in pieces
+        chunk = max(1, int(EVAL_CHUNK_BYTES // (16 * r * (N + S + 1))))
+        if n_f > chunk:
+            parts = [self.evaluate(freqs[k:k + chunk], A, B, C, D)
+                     for k in range(0, n_f, chunk)]
+            return {key: np.concatenate([q[key] for q in parts]) for key in parts[0]}
         w = 2 * np.pi * freqs
         Lag = bm.lagrange_matrix(w, self.nodes)                  # (m, n_f)
 
@@ -397,6 +419,11 @@ def section_tilde(rb: ReducedBeam, frequencies, A, B, C=None, D=None,
     is.  The labels and metadata of the section's full-order S~ are kept.
     """
     freqs = np.asarray(frequencies, dtype=float)
+    with small_dense_blas():
+        return _section_tilde(rb, freqs, A, B, C, D, zref, zwave)
+
+
+def _section_tilde(rb, freqs, A, B, C, D, zref, zwave) -> Dict:
     ev = rb.evaluate(freqs, A, B, C, D)
     pm = rb.port_modes
     scale = np.ones(len(pm))
@@ -473,7 +500,8 @@ def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
     Zref = np.array([np.diag([tildes[s]['zref'][k, rowmaps[s][(p, int(m))]]
                               for (s, p, m) in ext]) for k in range(len(freqs))])
     Zt = bm.z_tilde_from_s_tilde(St, Zref)
-    return {'S_tilde': St, 'Z_tilde': Zt, 'rows': labels + setup.path_labels,
+    return {'S_tilde': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
+            'rows': labels + setup.path_labels,
             'cols': labels + setup.source_labels, 'frequencies': freqs,
             'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
             'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
@@ -499,13 +527,14 @@ class ReducedBeamJoin:
     def __call__(self, frequencies) -> Dict:
         cache: Dict[str, Dict] = {}
         tildes = []
-        for sec in self.sections:
-            key = sec['key']
-            if key not in cache:
-                cache[key] = section_tilde(sec['beam'], frequencies, sec['A'], sec['B'],
-                                           sec.get('C'), sec.get('D'),
-                                           sec.get('zref'), sec.get('zwave'))
-            tildes.append(cache[key])
-        out = join_sections(self.concat, tildes, self.setup, self.shifts)
+        with small_dense_blas():
+            for sec in self.sections:
+                key = sec['key']
+                if key not in cache:
+                    cache[key] = section_tilde(sec['beam'], frequencies, sec['A'], sec['B'],
+                                               sec.get('C'), sec.get('D'),
+                                               sec.get('zref'), sec.get('zwave'))
+                tildes.append(cache[key])
+            out = join_sections(self.concat, tildes, self.setup, self.shifts)
         out['summary'] = dict(self.summary, reduced=True)
         return out

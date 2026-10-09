@@ -124,16 +124,29 @@ def voltage(e_s: np.ndarray, s: np.ndarray, w: float, beta: float = 1.0) -> comp
 
 def transverse_voltage(pieces, a, offset, s, w, beta=1.0, step=None,
                        inside_axis=None) -> Tuple[float, float]:
-    """``(|V_t|, step)``: the transverse kick voltage at *offset* [V].
+    """``(|V_t|, step)``: the magnitude of :func:`transverse_kick` [V]."""
+    kick = transverse_kick(pieces, a, offset, s, w, beta, step, inside_axis)
+    return kick['Vt'], kick['step']
 
-    Panofsky-Wenzel, ``V_t = (beta c0 / w) |grad_t V_z|``, with the gradient
-    of the longitudinal voltage by central differences over *step* [m] in both
-    transverse directions.  A dipole mode's ``V_z`` is linear in the offset,
-    so the difference is exact for it; a monopole's is even and drops out.
+
+def transverse_kick(pieces, a, offset, s, w, beta=1.0, step=None,
+                    inside_axis=None) -> Dict[str, Any]:
+    """The transverse kick voltage at *offset*, per plane.
+
+    Panofsky-Wenzel: ``V_t,u = j (beta c0 / w) dV/du`` for each transverse
+    axis u (x and y for a beam along z), where ``V = int E_s exp(j w s /
+    (beta c0)) ds`` is the longitudinal voltage of :func:`voltage`: the
+    transverse voltage ``int (E + v x B)_u exp(j w s / (beta c0)) ds``.  The
+    gradient is a central difference over *step* [m].  A dipole mode's V is
+    linear in the offset, so the difference is exact for it; a monopole's is
+    even and drops out.
 
     Without *step*, it starts at 2% of the smallest transverse extent and
     halves until the four shifted lines stay inside the mesh wherever the beam
     line is (a narrow aperture).
+
+    Returns ``{'Vt': |V_t| [V], 'Vt_planes': (V_t,u1, V_t,u2) complex [V],
+    'planes': ('x', 'y'), 'step': step}``, the planes in axis order.
     """
     auto = step is None
     if auto:
@@ -153,8 +166,10 @@ def transverse_voltage(pieces, a, offset, s, w, beta=1.0, step=None,
         if not (auto and clipped):
             break
         step *= 0.5
-    grad = [(v[d, 1] - v[d, -1]) / (2 * step) for d in (0, 1)]
-    return float(np.sqrt(abs(grad[0]) ** 2 + abs(grad[1]) ** 2) * beta * c0 / w), step
+    planes = np.array([1j * beta * c0 / w * (v[d, 1] - v[d, -1]) / (2 * step)
+                       for d in (0, 1)])
+    return {'Vt': float(np.sqrt(np.sum(np.abs(planes) ** 2))), 'Vt_planes': planes,
+            'planes': tuple('xyz'[i] for i in range(3) if i != a), 'step': step}
 
 
 def _lattice(et, n: int):
@@ -307,7 +322,8 @@ def figures_of_merit(pieces: List[ModePiece], freq: float, U: float, P_diel: flo
     s = beam_line(pieces, a, span, n_points)
     e_s, inside = field_on_line(pieces, a, offset, s)
     V = abs(voltage(e_s, s, w, beta))
-    Vt, _step = transverse_voltage(pieces, a, offset, s, w, beta, kick_step, inside)
+    kick = transverse_kick(pieces, a, offset, s, w, beta, kick_step, inside)
+    Vt, Vt_planes = kick['Vt'], np.abs(kick['Vt_planes'])
     peaks = [surface_peaks(p, w) for p in pieces]
     Epk = max(e for e, _ in peaks)
     Hpk = max(h for _, h in peaks)
@@ -317,6 +333,7 @@ def figures_of_merit(pieces: List[ModePiece], freq: float, U: float, P_diel: flo
     # to U = 1 J: fields scale by 1/sqrt(U), powers by 1/U
     root = np.sqrt(U)
     V, Vt, Epk, Hpk = V / root, Vt / root, Epk / root, Hpk / root
+    Vt_planes = Vt_planes / root
     P_wall, P_diel = P_wall / U, P_diel / U
     length = float(active_length) if active_length else float(s[-1] - s[0])
     Eacc, Et = V / length, Vt / length
@@ -356,6 +373,12 @@ def figures_of_merit(pieces: List[ModePiece], freq: float, U: float, P_diel: flo
         "Et [MV/m]": Et * 1e-6,
         "R/Q_t [Ohm]": Vt ** 2 / w,
         "k_kick [V/pC/m]": k * Vt ** 2 / 4 * 1e-12,
+        # per plane: each polarisation of a dipole pair, and planes whose
+        # thresholds differ (the R/Q_t and k_kick of the planes add up)
+        **{f"Vt_{u} [MV]": vu * 1e-6 for u, vu in zip(kick['planes'], Vt_planes)},
+        **{f"R/Q_t_{u} [Ohm]": vu ** 2 / w for u, vu in zip(kick['planes'], Vt_planes)},
+        **{f"k_kick_{u} [V/pC/m]": k * vu ** 2 / 4 * 1e-12
+           for u, vu in zip(kick['planes'], Vt_planes)},
         "Rs [Ohm]": Rs,
         "Active Length [mm]": length * 1e3,
         "N Cells": int(n_cells),

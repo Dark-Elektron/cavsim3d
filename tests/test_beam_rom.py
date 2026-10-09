@@ -170,7 +170,7 @@ def test_reduced_beam_side_port(tmp_path):
 # --------------------------------------------------------------------------- #
 # Files, reopening, limits
 # --------------------------------------------------------------------------- #
-def test_reduced_beam_saved_and_reopened(tmp_path):
+def test_reduced_beam_saved_and_reopened(tmp_path, monkeypatch):
     p = _project(tmp_path, "saved", CellChain(n=1), CELL_BEAM)
     p.fds.solve(**TRAIN)
     rom = p.fds.fom.reduce(tol=1e-8)
@@ -190,6 +190,13 @@ def test_reduced_beam_saved_and_reopened(tmp_path):
         B = f["data"][()]
     ev = rb.evaluate(rom.frequencies, A, B)
     np.testing.assert_allclose(ev['zoc'][:, 0, 0], rom.z_tilde[:, 2, 2], rtol=1e-10)
+    # a long sweep is evaluated in pieces: the same values
+    from cavsim3d.rom import beam_reduction as brom
+    monkeypatch.setattr(brom, "EVAL_CHUNK_BYTES", 1.0)
+    for key, val in rb.evaluate(rom.frequencies, A, B).items():
+        np.testing.assert_allclose(val, ev[key], rtol=0,
+                                   atol=1e-12 * np.abs(ev[key]).max(), err_msg=key)
+    monkeypatch.undo()
 
     q = EMProject(name="saved", base_dir=str(tmp_path))
     r2 = q.fds.fom.rom

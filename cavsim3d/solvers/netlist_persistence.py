@@ -476,7 +476,7 @@ def section_config(cfg: dict) -> dict:
 def geometry_signature(geometry) -> str:
     """Hash of how a part is built: its operation history and its CAD file."""
     from cavsim3d.utils.io_utils import compute_file_hash, strip_keys
-    history = strip_keys(_jsonable(geometry.get_history()), {"timestamp"})
+    history = strip_keys(_jsonable(geometry.get_history()), {"timestamp", "curve_order_reached"})
     h = hashlib.sha1(json.dumps(history, sort_keys=True).encode())
     fp = getattr(geometry, "filepath", None)
     if fp and Path(str(fp)).is_file():
@@ -608,7 +608,8 @@ def reduce_staged_section(project_root: Path, domain: str, template: dict,
         snapshots = brom.pod_snapshots(snapshots, beam_in['snapshots'],
                                        beam_in['data']['affine']['free'])
     red = pod_reduce(mats["K"], mats["M"], mats["B"], snapshots,
-                     C=mats.get("C"), D=mats.get("D"), tol=tol, max_rank=max_rank)
+                     C=mats.get("C"), D=mats.get("D"), tol=tol, max_rank=max_rank,
+                     overwrite_snapshots=beam_in is not None)
     out = root / "fds" / "foms" / "roms" / "matrices"
     out.mkdir(parents=True, exist_ok=True)
     for name in ROM_MATS:

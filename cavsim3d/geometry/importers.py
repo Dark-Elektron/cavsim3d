@@ -3322,6 +3322,7 @@ class OCCImporter(BaseGeometry):
                 if not built:
                     geo.build()
                     built = True
+                geo._curve_order_known = entry.get('curve_order_reached')
                 geo.generate_mesh(
                     maxh=entry.get('maxh'),
                     curve_order=entry.get('curve_order', 3),

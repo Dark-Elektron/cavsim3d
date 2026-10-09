@@ -284,6 +284,13 @@ rom_q.solve(fmin=f0 * (1 - 3 / q_l) / 1e9, fmax=f0 * (1 + 3 / q_l) / 1e9, nsampl
 s21 = np.abs(np.asarray(rom_q.S_dict["1(1)2(1)"]))
 band = rom_q.frequencies[s21 >= s21.max() / np.sqrt(2)]
 print(f"   |S21| 3-dB width: Q_L = {f0 / (band[-1] - band[0]):.0f}")
+# Any frequencies [GHz] in place of a grid (frequencies=): points placed on
+# the loaded resonances that get_external_q() found.  store_snapshots=False
+# keeps S, Z (and a beam's blocks) only: a field at one frequency is solved
+# again when asked for.  Both work on concat.solve() too.
+rom_q.solve(frequencies=q["frequencies"] / 1e9, store_snapshots=False)
+print(f"   |S21| at the {len(rom_q.frequencies)} loaded resonances: "
+      f"{np.round(np.abs(np.asarray(rom_q.S_dict['1(1)2(1)'])), 3)}")
 # The unloaded Q (copper walls) of the same mode, from its closed-problem index:
 fm_q = rom_q.get_figures_of_merit(int(q["mode_index"][k]))
 print(f"   unloaded Q = {fm_q['Q []']:.0f}, G = {fm_q['G [Ohm]']:.0f} Ohm")
@@ -674,6 +681,47 @@ rel = (np.abs(concat6.beam_impedance() - fom_join6.beam_impedance())
 print(f"   reduced copies joined vs full-order join: Z_par differs by {rel.max():.1e}")
 concat6.solve(fmin=2.6, fmax=3.4, nsamples=401)           # any frequencies of the band
 print(f"   reduced join, 401 frequencies: S~ {concat6.s_tilde.shape}")
+# a long sweep of a big joined model: no coupled state kept, points where wanted
+concat6.solve(frequencies=np.r_[2.6:3.4:2001j, 3.0 + 1e-6 * np.arange(-5, 6)],
+              store_snapshots=False)
+print(f"   {len(concat6.frequencies)} frequencies, coupled states kept: "
+      f"{concat6.has_snapshots}")
+# The HOM power per port: each frequency is one spectral line of the beam
+# current (peak amplitudes), so solve at the lines of the bunch train first.
+from cavsim3d.analysis import bunch_train_spectrum   # noqa: E402
+f_lines, I_lines = bunch_train_spectrum(charge=1e-9, spacing=1 / 50e6, sigma_t=20e-12,
+                                        fmin=2.6, fmax=3.4)
+concat6.solve(frequencies=f_lines, store_snapshots=False)
+hom = concat6.get_hom_power(I_lines)
+print(f"   HOM power, {len(f_lines)} lines of a 1 nC / 20 ns train: "
+      + ", ".join(f"port {p} {w * 1e3:.2f} mW" for p, w in hom['P_port'].items()))
+# With lossless walls the ports take what the beam loses, 0.5 Re(Z_par) |I|^2
+# per line, once the mesh resolves Re(Z_par) (this coarse one does not).
+
+# 6f. Dipole modes: the kick per plane and the transverse impedance.  The two
+# polarisations of a pillbox's TM110 pair: get_figures_of_merit() gives the
+# kick per plane (Vt_x, R/Q_t_x, k_kick_x and _y), get_rq() the voltage with
+# its phase (V_complex: on lines at +-d, (V(d) - V(-d)) / 2 is a mode's dipole
+# part, (V(d) + V(-d)) / 2 its even part).  add_transverse_beams(d) adds two
+# beams per plane at +-d, and transverse_impedance(plane) is the double
+# difference of their impedances (Panofsky-Wenzel), in Ohm/m.
+proj6f = EMProject(name="pillbox_dipole", base_dir=str(WORK), overwrite=True)
+proj6f.create_primitive("pillbox", name="cav", n_cells=1, dims=[100, 100, 30, 0, 100],
+                        beampipe="both")
+proj6f.generate_mesh(maxh=0.03, curve_order=4)
+proj6f.add_transverse_beams(0.006)
+proj6f.fds.solve(fmin=1.70, fmax=1.85, nsamples=4, nportmodes=1, order=2,
+                 solver_type="direct", store_snapshots=False)
+fom6f = proj6f.fds.fom
+f6f = fom6f.get_resonant_frequencies()
+for i in np.argsort(np.abs(f6f - 1.83e9))[:2]:         # the TM110 pair
+    fm = fom6f.get_figures_of_merit(int(i))
+    v_p, v_m = (fom6f.get_rq(int(i), offset=(x, 0.0))["V_complex"] for x in (0.01, -0.01))
+    print(f"   {f6f[i] / 1e9:.4f} GHz: R/Q_t x/y = {fm['R/Q_t_x [Ohm]']:.1f}/"
+          f"{fm['R/Q_t_y [Ohm]']:.1f} Ohm, |even/dipole part| of V at x = +-10 mm "
+          f"{abs(v_p + v_m) / abs(v_p - v_m):.1e}")
+print(f"   Z_perp,x = {np.round(fom6f.transverse_impedance('x', ports='open').imag / 1e3, 1)} "
+      "j kOhm/m (open ports, below the pipe's cut-off)")
 
 print(f"All tutorial artifacts under: {WORK}")
 banner("DONE")

@@ -38,6 +38,8 @@ dependencies = [
     "numpy",
     "scipy",
     "h5py",
+    # caps the BLAS threads for the many small dense solves of reduced models
+    "threadpoolctl",
     "ngsolve==6.2.2506",
     # ngsolve 6.2.2506 links libmkl_rt.so.2 (Linux) / mkl_rt.2.dll (Windows).
     # mkl >= 2026 renamed these to .so.3 / mkl_rt.3.dll, so ngsolve's ctypes

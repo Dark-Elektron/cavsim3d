@@ -2199,6 +2199,8 @@ class Assembly(BaseGeometry):
                 obj.build()
             
             elif op == 'generate_mesh':
+                params = dict(params)
+                obj._curve_order_known = params.pop('curve_order_reached', None)
                 obj.generate_mesh(**params)
 
         if obj is not None:

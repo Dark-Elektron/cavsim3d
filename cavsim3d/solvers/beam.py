@@ -37,6 +37,7 @@ from ngsolve import (BND, VOL, BilinearForm, CoefficientFunction, Cross,
 from cavsim3d.core.constants import c0, eps0, mu0
 from cavsim3d.utils.mesh_geometry import line_crossings, line_intervals, surface_triangles
 from cavsim3d.utils.names import region_pattern
+from cavsim3d.utils.threads import small_dense_blas
 
 AXES = ('X', 'Y', 'Z')
 _COORDS = (x, y, z)
@@ -920,20 +921,33 @@ def s_tilde(Z: np.ndarray, kZ: np.ndarray, hZ: np.ndarray, zoc: np.ndarray,
     n_f, P = Z.shape[0], Z.shape[1]
     L, S = zoc.shape[1], zoc.shape[2]
     out = np.zeros((n_f, P + L, P + S), dtype=complex)
-    for i in range(n_f):
-        z0 = np.diag(Zref[i]).astype(complex)
-        sq = np.diag(np.sqrt(z0))
-        isq = np.diag(1.0 / np.sqrt(z0))
-        Zd = Z[i] + np.diag(z0)
-        try:
-            inv = np.linalg.inv(Zd)
-        except np.linalg.LinAlgError:
-            inv = np.linalg.pinv(Zd)
-        out[i, :P, :P] = isq @ (Z[i] - np.diag(z0)) @ inv @ sq
-        out[i, :P, P:] = sq @ inv @ kZ[i]
-        out[i, P:, :P] = 2 * hZ[i] @ inv @ sq
-        out[i, P:, P:] = zoc[i] - hZ[i] @ inv @ kZ[i]
+    if not n_f:
+        return out
+    z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)          # (n_f, P)
+    sq, isq = np.sqrt(z0), 1.0 / np.sqrt(z0)
+    Zdiag = z0[:, :, None] * np.eye(P)[None]
+    with small_dense_blas():
+        inv = _stacked_inv(Z + Zdiag)
+        out[:, :P, :P] = (isq[:, :, None] * (Z - Zdiag)) @ inv * sq[:, None, :]
+        out[:, :P, P:] = sq[:, :, None] * (inv @ kZ)
+        out[:, P:, :P] = 2 * (hZ @ inv) * sq[:, None, :]
+        out[:, P:, P:] = zoc - hZ @ inv @ kZ
     return out
+
+
+def _stacked_inv(A: np.ndarray) -> np.ndarray:
+    """Inverses of a stack of matrices (n, P, P); the pseudo-inverse of any
+    that is singular."""
+    try:
+        return np.linalg.inv(A)
+    except np.linalg.LinAlgError:
+        out = np.empty_like(A)
+        for i, a in enumerate(A):
+            try:
+                out[i] = np.linalg.inv(a)
+            except np.linalg.LinAlgError:
+                out[i] = np.linalg.pinv(a)
+        return out
 
 
 def matrix_labels(port_labels: List[str], setup: BeamSetup) -> Tuple[List[str], List[str]]:
@@ -1264,6 +1278,109 @@ class BeamResultMixin:
         m = self._tilde('S' if ports == 'matched' else 'Z')
         return -m[:, b['rows'].index(row), b['cols'].index(col)]
 
+    def transverse_impedance(self, plane: str = 'x', name: str = 'dipole',
+                             ports: str = 'matched') -> np.ndarray:
+        """Transverse impedance Z_perp [Ohm/m] per frequency, in one plane.
+
+        From the two beams of ``proj.add_transverse_beams(offset, name)`` in
+        ``plane``, at u = +-d from the centre: with Z(w, s) the longitudinal
+        impedance (:meth:`beam_impedance`) of source s read on line w,
+
+            Z_perp = (c0 / w) [Z(+, +) - Z(+, -) - Z(-, +) + Z(-, -)] / (2 d)^2,
+
+        the mixed derivative d^2 Z_par / (du_s du_w) by Panofsky-Wenzel.  The
+        double difference keeps the part of Z_par that is odd in both the
+        source and the witness offset: the dipole part.  The monopole and
+        quadrupole parts drop out, and so does a coupler's kick that is odd
+        in one offset only; a sextupole part is left at ~(d/a)^4 for an
+        aperture of radius a.  ``ports`` as for :meth:`beam_impedance`.
+        """
+        if ports not in ('matched', 'open'):
+            raise ValueError(f"ports must be 'matched' or 'open', got {ports!r}")
+        b = self._beam_data()
+        setup = BeamSetup.from_dict(b['setup'])
+        u = str(plane).lower()
+        names = transverse_names(setup.axis)
+        if u not in names:
+            raise ValueError(f"plane must be one of {names} for the beam axis {setup.axis}, "
+                             f"got {plane!r}")
+        lines = {l.name: l for l in setup.sources}
+        missing = [n for n in (f"{name}_{u}+", f"{name}_{u}-") if n not in lines]
+        if missing:
+            raise KeyError(f"no beams {missing}: add them with "
+                           f"proj.add_transverse_beams(offset, name={name!r}) and solve.")
+        plus, minus = lines[f"{name}_{u}+"], lines[f"{name}_{u}-"]
+        span = plus.point['xyz'.index(u)] - minus.point['xyz'.index(u)]
+        lab = {n: self._beam_label(n, sources=True) for n in (plus.name, minus.name)}
+        m = self._tilde('S' if ports == 'matched' else 'Z')
+
+        def z(witness, source):
+            return -m[:, b['rows'].index(lab[witness]), b['cols'].index(lab[source])]
+
+        z1 = (z(plus.name, plus.name) - z(plus.name, minus.name)
+              - z(minus.name, plus.name) + z(minus.name, minus.name)) / span ** 2
+        w = 2 * np.pi * np.asarray(b['frequencies'], dtype=float)
+        return c0 / w * z1
+
+    def get_hom_power(self, current, beam=None) -> Dict:
+        """Power [W] the beam leaves in every port mode, from its current spectrum.
+
+        Each frequency of this result is one spectral line of the beam
+        current, ``i(t) = sum_p Re{I_p exp(j w_p t)}``: solve at the lines
+        first (``rom.solve(frequencies=...)``, ``concat.solve(...)``;
+        :func:`cavsim3d.analysis.bunch_train_spectrum` gives them for a
+        bunch train).  With every port mode matched, the beam sends the wave
+        ``b = k I_p`` into a port mode (S~ = [[S, k], [h, z_b]],
+        docs/theory/beam.md section 9.8), which carries
+
+            P = |k|^2 |I_p|^2 Re(Z_ref) / (2 |Z_ref|)
+
+        -- none in an evanescent mode, whose reference impedance is imaginary.
+
+        Parameters
+        ----------
+        current : array or callable
+            Peak amplitudes I_p [A] at this result's frequencies (one per
+            frequency), or a function of the frequencies [Hz] that returns them.
+        beam : str, optional
+            Name or label of the beam (default: the first).
+
+        Returns
+        -------
+        dict
+            ``frequencies`` [Hz]; ``P_lines`` {port mode label: power per
+            line [W]}; ``P_mode`` {label: total [W]}; ``P_port`` {port
+            number: total [W]}, the numbers of the labels ('2(1)' is mode 1
+            of port 2); ``P_total`` [W].
+        """
+        b = self._beam_data()
+        freqs = np.asarray(b['frequencies'], dtype=float)
+        I = np.asarray(current(freqs) if callable(current) else current, dtype=complex)
+        if I.shape != freqs.shape:
+            raise ValueError(f"current: one amplitude per frequency of this result "
+                             f"({len(freqs)}), got shape {I.shape}. Solve at the beam's "
+                             "spectral lines first (solve(frequencies=...)).")
+        St = self._tilde('S')
+        n_paths = len(BeamSetup.from_dict(b['setup']).paths) if b.get('setup') else 0
+        n_modes = St.shape[1] - n_paths
+        zref = b.get('zref')
+        if zref is None or np.shape(zref) != (len(freqs), n_modes):
+            raise RuntimeError("This result holds no reference impedances of its port modes "
+                               "(saved by an older version): solve it again.")
+        col = b['cols'].index(self._beam_label(beam, sources=True))
+        zref = np.asarray(zref, dtype=complex)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            share = np.where(np.abs(zref) > 0, zref.real / np.abs(zref), 0.0)
+        P = 0.5 * np.abs(St[:, :n_modes, col]) ** 2 * (np.abs(I) ** 2)[:, None] * share
+        labels = list(b['rows'][:n_modes])
+        P_mode = {lab: float(P[:, j].sum()) for j, lab in enumerate(labels)}
+        P_port: Dict[str, float] = {}
+        for lab, p in P_mode.items():
+            port = lab.split('(')[0]
+            P_port[port] = P_port.get(port, 0.0) + p
+        return {'frequencies': freqs, 'P_lines': {lab: P[:, j] for j, lab in enumerate(labels)},
+                'P_mode': P_mode, 'P_port': P_port, 'P_total': float(P.sum())}
+
     def plot_s_tilde(self, params=None, plot_type: str = 'db', **kwargs):
         """Plot entries of S~ (keys of :attr:`s_tilde_dict`); arguments as plot_s."""
         from cavsim3d.utils.plot_mixin import PlotMixin
@@ -1302,6 +1419,10 @@ class BeamResultMixin:
 # =============================================================================
 # Joining segments through their generalised scattering matrices (§9.9)
 # =============================================================================
+
+#: memory [bytes] of the stacked block matrices a join builds at once
+JOIN_CHUNK_BYTES = 64e6
+
 
 def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
                  pairs: List[Tuple[int, int]], external: List[int],
@@ -1352,25 +1473,35 @@ def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
         T_rows[E:, E + d * L:E + (d + 1) * L] = np.eye(L)
 
     out = np.zeros((n_f, E + L, E + S), dtype=complex)
-    for k in range(n_f):
-        SR = np.zeros((N + D * L, N + D * S), dtype=complex)
-        for d in range(D):
-            blk = np.array(blocks[d][k], dtype=complex)
-            if col_phase is not None and col_phase[d] is not None:
-                blk[:, P[d]:] *= col_phase[d][k][None, :]
-            if row_phase is not None and row_phase[d] is not None:
-                blk[P[d]:, :] *= row_phase[d][k][:, None]
-            p = [pos[g] for g in modes[d]]
-            SR[np.ix_(p, p)] = blk[:P[d], :P[d]]
-            SR[np.ix_(p, range(N + d * S, N + (d + 1) * S))] = blk[:P[d], P[d]:]
-            SR[np.ix_(range(N + d * L, N + (d + 1) * L), p)] = blk[P[d]:, :P[d]]
-            SR[N + d * L:N + (d + 1) * L, N + d * S:N + (d + 1) * S] = blk[P[d]:, P[d]:]
-        G11 = SR[np.ix_(i_int, i_int)]
-        G12 = SR[np.ix_(i_int, cols_rest)]
-        G21 = SR[np.ix_(rows_rest, i_int)]
-        G22 = SR[np.ix_(rows_rest, cols_rest)]
-        J = G22 + G21 @ np.linalg.solve(F - G11, G12) if len(i_int) else G22
-        out[k] = T_rows @ J @ T_cols
+    rows_of = [[pos[g] for g in m] for m in modes]
+    # frequencies in chunks of stacked matrices: a few batched calls instead
+    # of several small ones per frequency
+    chunk = max(1, int(JOIN_CHUNK_BYTES // (16 * (N + D * L) * (N + D * S))))
+    with small_dense_blas():
+        for k0 in range(0, n_f, chunk):
+            ks = slice(k0, min(k0 + chunk, n_f))
+            nk = ks.stop - ks.start
+            SR = np.zeros((nk, N + D * L, N + D * S), dtype=complex)
+            for d in range(D):
+                blk = np.array(blocks[d][ks], dtype=complex)
+                if col_phase is not None and col_phase[d] is not None:
+                    blk[:, :, P[d]:] *= col_phase[d][ks][:, None, :]
+                if row_phase is not None and row_phase[d] is not None:
+                    blk[:, P[d]:, :] *= row_phase[d][ks][:, :, None]
+                p = np.array(rows_of[d], dtype=int)
+                cs = np.arange(N + d * S, N + (d + 1) * S)
+                rs = np.arange(N + d * L, N + (d + 1) * L)
+                SR[:, p[:, None], p[None, :]] = blk[:, :P[d], :P[d]]
+                SR[:, p[:, None], cs[None, :]] = blk[:, :P[d], P[d]:]
+                SR[:, rs[:, None], p[None, :]] = blk[:, P[d]:, :P[d]]
+                SR[:, N + d * L:N + (d + 1) * L, N + d * S:N + (d + 1) * S] = blk[:, P[d]:, P[d]:]
+            G22 = SR[:, rows_rest][:, :, cols_rest]
+            if len(i_int):
+                G11 = SR[:, i_int][:, :, i_int]
+                G12 = SR[:, i_int][:, :, cols_rest]
+                G21 = SR[:, rows_rest][:, :, i_int]
+                G22 = G22 + G21 @ np.linalg.solve(F[None] - G11, G12)
+            out[ks] = T_rows @ G22 @ T_cols
     return out
 
 
@@ -1378,18 +1509,23 @@ def z_tilde_from_s_tilde(St: np.ndarray, Zref: np.ndarray) -> np.ndarray:
     """Z~ from S~ (inverse of :func:`s_tilde`): with A = Z + Zref,
     Z from S as for the ports, k_Z = A Zref^-1/2 k, h_Z = h Zref^-1/2 A / 2,
     z_oc = z_b + h Zref^-1/2 A Zref^-1/2 k / 2."""
-    from cavsim3d.solvers.base import ParameterConverter
-    n_f = St.shape[0]
+    St = np.asarray(St, dtype=complex)
     P = Zref.shape[1]
     out = np.zeros_like(St, dtype=complex)
-    for i in range(n_f):
-        z0 = np.diag(Zref[i]).astype(complex)
-        isq = np.diag(1.0 / np.sqrt(z0))
-        Z = ParameterConverter.s_to_z(St[i, :P, :P], np.diag(z0))
-        A = Z + np.diag(z0)
-        k, h, zb = St[i, :P, P:], St[i, P:, :P], St[i, P:, P:]
-        out[i, :P, :P] = Z
-        out[i, :P, P:] = A @ isq @ k
-        out[i, P:, :P] = 0.5 * h @ isq @ A
-        out[i, P:, P:] = zb + 0.5 * h @ isq @ A @ isq @ k
+    if not St.shape[0]:
+        return out
+    z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)          # (n_f, P)
+    sq, isq = np.sqrt(z0), 1.0 / np.sqrt(z0)
+    I = np.eye(P)
+    with small_dense_blas():
+        # Z = Zref^1/2 (I - S)^-1 (I + S) Zref^1/2: S is referred to Zref
+        S = St[:, :P, :P]
+        Z = sq[:, :, None] * (_stacked_inv(I[None] - S) @ (I[None] + S)) * sq[:, None, :]
+        A = Z + z0[:, :, None] * I[None]
+        k, h, zb = St[:, :P, P:], St[:, P:, :P], St[:, P:, P:]
+        Ak = A @ (isq[:, :, None] * k)                                 # A Zref^-1/2 k
+        out[:, :P, :P] = Z
+        out[:, :P, P:] = Ak
+        out[:, P:, :P] = 0.5 * (h * isq[:, None, :]) @ A
+        out[:, P:, P:] = zb + 0.5 * (h * isq[:, None, :]) @ Ak
     return out

@@ -66,10 +66,12 @@ their columns ([How to compute the beam impedance](../how-to/beam_impedance.md))
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `fmin`, `fmax`, `nsamples` | | as above | band in GHz and number of samples |
+| `frequencies` | array of float | – | any frequencies in GHz, in place of `fmin`, `fmax` and `nsamples` (a call may not give both). Sorted, repeats dropped. Use it to place points on narrow resonances |
 | `rerun` | None, bool | `None` | as above |
 | `solver_type` | str | `"auto"` | dense solver choice for the small reduced system |
 | `verbose` | None, bool | `None` | as above |
 | `compute_s_params` | bool | `True` | (joined models) compute S from Z |
+| `store_snapshots` | bool | `True` | keep and save the reduced solution of every frequency (frequencies × reduced unknowns × port modes). `False`: S, Z and the beam blocks only; a field at one frequency is solved again when asked for. Use `False` for long sweeps of large joined models |
 
 ## Return value
 

@@ -1232,6 +1232,7 @@ class FOMCollection(PlotMixin):
         Zref = np.array([np.diag([fds._get_port_impedance(p, m, f) for (_s, p, m) in ext])
                          for f in freqs])
         beam['Z_tilde'] = _beam.z_tilde_from_s_tilde(beam['S_tilde'], Zref)
+        beam['zref'] = np.diagonal(Zref, axis1=1, axis2=2).copy()
         n = len(ext)
         concat.frequencies = freqs
         concat._S_matrix = beam['S_tilde'][:, :n, :n].copy()
@@ -2055,59 +2056,70 @@ class NetlistFOMs:
                 pr.running("Model Order Reduction")
                 pr.running("=" * 60)
 
-        for base, rec in self._components.items():
-            if rec.get("kind") == "live":
-                prev = existing.get(base)
-                if (prev is not None and prev.get("tol") == float(tol)
-                        and prev.get("max_rank") == max_rank
-                        and (prev.get("reduction") or {}).get("beam") == rec.get("beam")
-                        and (roms_dir / "matrices" / f"A_r_{base}.h5").exists()):
-                    entries.append(prev)            # reduced so already: reuse
+        try:
+            for base, rec in self._components.items():
+                if rec.get("kind") == "live":
+                    prev = existing.get(base)
+                    if (prev is not None and prev.get("tol") == float(tol)
+                            and prev.get("max_rank") == max_rank
+                            and (prev.get("reduction") or {}).get("beam") == rec.get("beam")
+                            and (roms_dir / "matrices" / f"A_r_{base}.h5").exists()):
+                        entries.append(prev)            # reduced so already: reuse
+                        continue
+                    template = rec.get("rom_template")
+                    if template is None:
+                        raise RuntimeError(
+                            f"Section '{base}' has no recorded port data (solved by an "
+                            "older version): solve the project again with rerun=True.")
+                    announce()
+                    entry = npz.reduce_staged_section(project_root, base, template,
+                                                      tol, max_rank)
+                    pr.info(f"  {base}: {entry['n_full']} -> {entry['r']} DOFs")
+                    entries.append(entry)
+                    reduced_now.append(base)
+                    changed = True
                     continue
-                template = rec.get("rom_template")
-                if template is None:
-                    raise RuntimeError(
-                        f"Section '{base}' has no recorded port data (solved by an "
-                        "older version): solve the project again with rerun=True.")
-                announce()
-                entry = npz.reduce_staged_section(project_root, base, template,
-                                                  tol, max_rank)
-                pr.info(f"  {base}: {entry['n_full']} -> {entry['r']} DOFs")
-                entries.append(entry)
-                reduced_now.append(base)
+                if rec.get("local") and base in existing \
+                        and not existing[base].get("source_rom_dir"):
+                    entries.append(existing[base])      # copied earlier: reuse
+                    continue
                 changed = True
-                continue
-            if rec.get("local") and base in existing \
-                    and not existing[base].get("source_rom_dir"):
-                entries.append(existing[base])      # copied earlier: reuse
-                continue
-            changed = True
-            if rec["kind"] == "imported" and rec.get("reduce"):
-                # Full-order results but no reduced model: reduce them here
-                # (the source is read, never written) and keep the result.
-                import tempfile as _tf
-                announce()
-                work = Path(_tf.mkdtemp(prefix="cavsim3d_reduce_"))
+                if rec["kind"] == "imported" and rec.get("reduce"):
+                    # Full-order results but no reduced model: reduce them here
+                    # (the source is read, never written) and keep the result.
+                    import tempfile as _tf
+                    announce()
+                    work = Path(_tf.mkdtemp(prefix="cavsim3d_reduce_"))
+                    try:
+                        npz.reduce_source_into(Path(rec["source"]), work, tol, max_rank)
+                        entries.append(npz.stage_rom(work, base, project_root))
+                    finally:
+                        _shutil.rmtree(work, ignore_errors=True)
+                    reduced_now.append(base)
+                    continue
+                src = Path(rec["source"])
                 try:
-                    npz.reduce_source_into(Path(rec["source"]), work, tol, max_rank)
-                    entries.append(npz.stage_rom(work, base, project_root))
-                finally:
-                    _shutil.rmtree(work, ignore_errors=True)
-                reduced_now.append(base)
-                continue
-            src = Path(rec["source"])
-            try:
-                npz.find_rom_dir(src)
-            except FileNotFoundError:
-                raise FileNotFoundError(
-                    f"Imported section '{base}' has no saved reduced model "
-                    f"under {src}. Reduce it in its own project first "
-                    "(fds.fom.reduce / fds.foms.reduce).")
-            if rec.get("mode") == "reference":
-                # read in place from the source project; nothing copied
-                entries.append(npz.reference_rom(src, base, project_root))
-            else:
-                entries.append(npz.stage_rom(src, base, project_root))
+                    npz.find_rom_dir(src)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Imported section '{base}' has no saved reduced model "
+                        f"under {src}. Reduce it in its own project first "
+                        "(fds.fom.reduce / fds.foms.reduce).")
+                if rec.get("mode") == "reference":
+                    # read in place from the source project; nothing copied
+                    entries.append(npz.reference_rom(src, base, project_root))
+                else:
+                    entries.append(npz.stage_rom(src, base, project_root))
+        except BaseException:
+            if reduced_now:
+                # The sections reduced before the failure have new files:
+                # record them, and keep the others' entries as they were.
+                done = {e.get("domain"): e for e in entries}
+                npz.write_flat_structures(project_root, [
+                    done.get(b, existing.get(b)) for b in self._components
+                    if b in done or b in existing])
+                _shutil.rmtree(roms_dir / "concat", ignore_errors=True)
+            raise
         if changed or [e.get("domain") for e in entries] != list(existing):
             npz.write_flat_structures(project_root, entries)
             # a joined model of the previous reduced models no longer applies
@@ -2297,7 +2309,8 @@ class NetlistFOMs:
         concat._S_matrix = St[:, :n_ext, :n_ext].copy()
         concat._Z_matrix = Zt[:, :n_ext, :n_ext].copy()
         concat._beam = {
-            'S_tilde': St, 'Z_tilde': Zt, 'rows': rows, 'cols': cols, 'frequencies': freqs,
+            'S_tilde': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
+            'rows': rows, 'cols': cols, 'frequencies': freqs,
             'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
             'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
             'summary': {'joined': [iname for iname, _k, _b in instances],

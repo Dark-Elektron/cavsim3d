@@ -35,7 +35,7 @@ from cavsim3d.rom.structures import ReducedStructure
 from cavsim3d.core.persistence import H5Serializer, ProjectManager
 from cavsim3d.utils.names import region_pattern
 from cavsim3d.solvers.options import (FOM_SOLVE_OPTIONS, REDUCED_SOLVE_OPTIONS,
-                                      check_solve_options, validate_sweep)
+                                      check_solve_options, reduced_sweep)
 import h5py
 import json
 from pathlib import Path
@@ -932,6 +932,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         # Physical fit-check across sections: the ROMs must share a compatible
         # (overlapping) training frequency band, else coupling is meaningless.
         self._validate_bands()
+        empty = [s for s in self.structures if int(np.shape(s.Ard)[0]) == 0]
+        if empty:
+            raise RuntimeError(
+                "The reduced model of " + ", ".join(repr(s.domain) for s in empty)
+                + " has 0 DOFs, so it cannot be joined: its reduction failed. Reduce "
+                "that part again.")
 
         _t_couple = time.time()
 
@@ -1269,9 +1275,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         with h5py.File(snap_path_dir / "snapshots.h5", "a") as f:
             if hasattr(self, 'frequencies') and self.frequencies is not None:
                 H5Serializer.save_dataset(f, "frequencies", self.frequencies)
+            if "coupled_snapshots" in f:
+                del f["coupled_snapshots"]          # an earlier sweep's
             if self._snapshots is not None:
-                if "coupled_snapshots" in f:
-                    del f["coupled_snapshots"]
                 H5Serializer.save_dataset(f, "coupled_snapshots", self._snapshots)
 
         # 4. Save eigenmodes
@@ -1405,7 +1411,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                     {'S_tilde': t['data'], 'Z_tilde': None, 'rows': t['rows'],
                      'cols': t['cols'], 'frequencies': t['frequencies'],
                      'names': t['names'], 'setup': t['setup'],
-                     'fingerprint': t['fingerprint'], 'summary': t['summary']})
+                     'fingerprint': t['fingerprint'], 'summary': t['summary'],
+                     'zref': t.get('zref')})
 
         return cs
 
@@ -1460,6 +1467,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
     ) -> Dict:
         """
         Solve the unified coupled system over a frequency range.
+
+        ``fmin``, ``fmax`` [GHz] and ``nsamples`` give a uniform grid;
+        ``frequencies=`` any array [GHz] instead (sorted, repeats dropped),
+        e.g. points placed on narrow resonances. ``store_snapshots`` (default
+        True) keeps the coupled solution of every frequency (n_f x r x
+        external port modes); with False it is not kept or saved, and a
+        field at one frequency is solved again when asked for. Other
+        options: ``solver_type``, ``rerun``, ``verbose``, ``compute_s_params``.
         """
         if getattr(self, '_scattering_join', False):
             raise RuntimeError(
@@ -1475,17 +1490,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         check_solve_options(cfg, REDUCED_SOLVE_OPTIONS, also_accepted=FOM_SOLVE_OPTIONS,
                             where="concat.solve()")
 
-        # 2. Extract core parameters with defaults
-        fmin = fmin if fmin is not None else cfg.get('fmin')
-        fmax = fmax if fmax is not None else cfg.get('fmax')
-        nsamples = nsamples if nsamples is not None else cfg.get('nsamples', 100)
-
-        if fmin is None or fmax is None:
-            raise ValueError("fmin and fmax must be provided (either directly or via config).")
-        nsamples = validate_sweep(fmin, fmax, nsamples)
+        # 2. The frequencies: a uniform grid or any array.  NOT assigned to
+        # self.frequencies until we actually solve: an early return of cached
+        # results must keep the grid those results were computed on.
+        new_freqs, fmin, fmax, nsamples = reduced_sweep(fmin, fmax, nsamples, cfg, kwargs,
+                                                        where="concat.solve()")
 
         # 3. Extract other options from merged cfg
         compute_s_params = cfg.get('compute_s_params', True)
+        store_snapshots = bool(cfg.get('store_snapshots', True))
         solver_type = cfg.get('solver_type', 'auto')
         verbose = cfg.get('verbose')     # None: keep the console verbosity
         _prev_verbosity = pr.push_verbosity(verbose)
@@ -1507,11 +1520,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             _file_handler = pr.start_file_log(self._log_path)
 
         try:
-            # 4. Requested frequency grid.  NOT assigned to self.frequencies
-            # until we actually solve: an early return of cached results must
-            # keep the grid those results were computed on.
-            new_freqs = np.linspace(fmin, fmax, nsamples) * 1e9
-
             if self.A_coupled is None:
                 raise ValueError("Must call couple() first")
 
@@ -1602,11 +1610,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             t0 = time.time()
 
             if self.is_lossy:
-                x_all = self._solve_lossy(omegas)
+                x_all = self._solve_lossy(omegas, keep=store_snapshots)
             elif solver_type == 'direct':
-                x_all = self._solve_direct(omegas, n_ext, r)
+                x_all = self._solve_direct(omegas, n_ext, r, keep=store_snapshots)
             else:
-                x_all = self._solve_iterative(omegas, n_ext, r)
+                x_all = self._solve_iterative(omegas, n_ext, r, keep=store_snapshots)
 
             _t_concat_solve = time.time() - t0
             pr.done(f"  Concat solve complete: {_t_concat_solve:.3f}s ({nsamples} frequencies)")
@@ -1617,7 +1625,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                 n_samples=nsamples, reduced_dofs=int(r), n_external=n_ext,
             )
 
-            self._snapshots = np.array(x_all)
+            self._snapshots = np.array(x_all) if store_snapshots else None
 
             if compute_s_params:
                 self._compute_s_from_z()
@@ -1690,8 +1698,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         pr.done(f"  Beam: the sections' generalised scattering matrices joined "
                 f"({time.time() - t0:.3f}s)")
 
-    def _solve_direct(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
-        """Direct eigendecomposition-based solve."""
+    def _solve_direct(self, omegas: np.ndarray, n_ext: int, r: int,
+                      keep: bool = True) -> List[np.ndarray]:
+        """Direct eigendecomposition-based solve (the states only if ``keep``)."""
         eigenvalues, V = np.linalg.eigh(self.A_coupled)
         C = V.T.conj() @ self.B_coupled
         D = self.B_coupled.T.conj() @ V
@@ -1701,7 +1710,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         x_all = []
         for k in range(len(omegas)):
             self._Z_matrix[k] = 1j * omegas[k] * (D * d[k, :]) @ C
-            x_all.append(omegas[k] * V @ (d[k, :, None] * C))
+            if keep:
+                x_all.append(omegas[k] * V @ (d[k, :, None] * C))
 
         return x_all
 
@@ -1711,8 +1721,9 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         return (getattr(self, 'C_coupled', None) is not None
                 or getattr(self, 'D_coupled', None) is not None)
 
-    def _solve_lossy(self, omegas: np.ndarray) -> List[np.ndarray]:
-        """Per-frequency dense solve of (A + jwC - w^2 (I - jD)) x = w B."""
+    def _solve_lossy(self, omegas: np.ndarray, keep: bool = True) -> List[np.ndarray]:
+        """Per-frequency dense solve of (A + jwC - w^2 (I - jD)) x = w B
+        (the states returned only if ``keep``)."""
         r = self.A_coupled.shape[0]
         I = np.eye(r)
         C = self.C_coupled if self.C_coupled is not None else np.zeros((r, r))
@@ -1721,13 +1732,15 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         for k, w in enumerate(omegas):
             lhs = self.A_coupled + 1j * w * C - w ** 2 * (I - 1j * D)
             x = np.linalg.solve(lhs, w * self.B_coupled)
-            x_all.append(x)
+            if keep:
+                x_all.append(x)
             # bilinear (B real): the lossy system is complex symmetric
             self._Z_matrix[k] = 1j * self.B_coupled.T @ x
         return x_all
 
-    def _solve_iterative(self, omegas: np.ndarray, n_ext: int, r: int) -> List[np.ndarray]:
-        """GMRES-based iterative solve."""
+    def _solve_iterative(self, omegas: np.ndarray, n_ext: int, r: int,
+                         keep: bool = True) -> List[np.ndarray]:
+        """GMRES-based iterative solve (the states returned only if ``keep``)."""
         I_ext = np.eye(n_ext, dtype=complex)
         x_all = []
         failures = 0
@@ -1751,7 +1764,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
                 if info != 0:
                     failures += 1
 
-            x_all.append(x)
+            if keep:
+                x_all.append(x)
             self._Z_matrix[k] = 1j * self.B_coupled.T.conj() @ x
 
         if failures > 0:
@@ -1765,7 +1779,35 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
 
     @property
     def has_snapshots(self) -> bool:
+        """True if the sweep kept the coupled solution of every frequency."""
         return self._snapshots is not None
+
+    @property
+    def has_solution(self) -> bool:
+        """True after a sweep: the coupled solution at any of its frequencies
+        is stored or can be solved again (``solve(store_snapshots=False)``)."""
+        return (self.A_coupled is not None and getattr(self, 'frequencies', None) is not None
+                and len(self.frequencies) > 0)
+
+    def _state_at(self, freq_idx: int) -> np.ndarray:
+        """The coupled solution (r x external port modes) at
+        ``frequencies[freq_idx]``: the stored one, or solved again."""
+        if not self.has_solution:
+            raise ValueError("No coupled solution: call solve() first.")
+        n_f = len(self.frequencies)
+        if not -n_f <= freq_idx < n_f:
+            raise ValueError(f"freq_idx {freq_idx} out of range [0, {n_f - 1}]")
+        if self._snapshots is not None and len(self._snapshots) == n_f:
+            return self._snapshots[freq_idx]
+        return self._coupled_states(self.frequencies[[freq_idx]])[0]
+
+    def _coupled_states(self, frequencies) -> np.ndarray:
+        """The coupled solutions (n_f, r, external port modes) at ``frequencies`` [Hz]."""
+        from cavsim3d.rom.reduction import _lossy_reduced_solve
+        omegas = 2 * np.pi * np.asarray(frequencies, dtype=float)
+        _, X = _lossy_reduced_solve(self.A_coupled, getattr(self, 'C_coupled', None),
+                                    getattr(self, 'D_coupled', None), self.B_coupled, omegas)
+        return np.array(X)
 
     def can_reconstruct(self) -> bool:
         """Check if field reconstruction is possible.
@@ -1912,8 +1954,8 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         E_gf : GridFunction
             Reconstructed electric field over the entire unified mesh
         """
-        if not self.has_snapshots:
-            raise ValueError("No snapshots available. Call solve() first.")
+        if not self.has_solution:
+            raise ValueError("No coupled solution: call solve() first.")
 
         if self.mesh is None:
             raise ValueError("No mesh available. Provide mesh to constructor.")
@@ -1925,7 +1967,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         col_idx = self.ports.index(excitation_port)
 
         # Map from coupled to uncoupled stacked coordinates
-        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_coupled = self._state_at(freq_idx)[:, col_idx]
         x_uncoupled = self.W_coupled @ x_coupled
 
         # Compute interface scaling factors if needed
@@ -1966,7 +2008,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         col_idx = self.ports.index(excitation_port)
         
         # Get uncoupled solution
-        x_coupled = self._snapshots[freq_idx, :, col_idx]
+        x_coupled = self._state_at(freq_idx)[:, col_idx]
         x_uncoupled = self.W_coupled @ x_coupled
         
         # Build DOF maps
@@ -2147,9 +2189,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         if freq_idx >= len(self.frequencies):
             raise ValueError(f"freq_idx {freq_idx} out of range [0, {len(self.frequencies) - 1}]")
 
-        if self._snapshots is None:
-            raise ValueError("No snapshots available.")
-
         freq = self.frequencies[freq_idx]
         omega = 2 * np.pi * freq
 
@@ -2272,7 +2311,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         ready for ``WebguiComponent.draw`` / ``netgen.webgui.Draw``.
         """
         from ngsolve import GridFunction, Norm, curl, BoundaryFromVolumeCF
-        if not self.has_snapshots:
+        if not self.has_solution:
             raise ValueError("No coupled solution — call solve() first.")
         if not (0 <= section_idx < self.n_structures):
             raise IndexError(f"section_idx {section_idx} out of range "
@@ -2283,7 +2322,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             raise KeyError(f"Port '{excitation_port}' not found: {self.ports}")
 
         col = self.ports.index(excitation_port)
-        x_uncoupled = self.W_coupled @ self._snapshots[freq_idx, :, col]
+        x_uncoupled = self.W_coupled @ self._state_at(freq_idx)[:, col]
         struct = self.structures[section_idx]
         start = self._structure_dof_offsets[section_idx]
         x_full = struct.reconstruct(x_uncoupled[start:start + struct.r])
@@ -2315,14 +2354,14 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
 
     def _section_coefficient_vectors(self, freq_idx, excitation_port=None):
         """Per-section full-order coefficient vectors from the coupled state."""
-        if not self.has_snapshots:
+        if not self.has_solution:
             raise ValueError("No coupled solution - call solve() first.")
         if excitation_port is None:
             excitation_port = self.ports[0]
         if excitation_port not in self.ports:
             raise KeyError(f"Port '{excitation_port}' not found: {self.ports}")
         col = self.ports.index(excitation_port)
-        x_uncoupled = self.W_coupled @ self._snapshots[freq_idx, :, col]
+        x_uncoupled = self.W_coupled @ self._state_at(freq_idx)[:, col]
         vecs = []
         for i, struct in enumerate(self.structures):
             start = self._structure_dof_offsets[i]
@@ -3387,13 +3426,16 @@ def reduce_concatenated_system(
     check_reduce_args(tol, max_rank)
     if concat.A_coupled is None:
         raise ValueError("System must be coupled first")
-    if concat._snapshots is None:
-        raise ValueError("No snapshots. Call solve() first.")
+    if not concat.has_solution:
+        raise ValueError("No coupled solution. Call solve() first.")
 
     r_current = concat.A_coupled.shape[0]
 
     # Collect snapshots: shape (n_freq, r_coupled, n_ext) -> (r_coupled, n_freq * n_ext)
-    W_snap = np.hstack([concat._snapshots[k] for k in range(len(concat._snapshots))])
+    states = (concat._snapshots if concat._snapshots is not None
+              and len(concat._snapshots) == len(concat.frequencies)
+              else concat._coupled_states(concat.frequencies))
+    W_snap = np.hstack([states[k] for k in range(len(states))])
 
     # SVD for POD basis.  A REAL basis (from [Re, Im] of the snapshots) keeps
     # the complex-symmetric structure of a lossy system under projection.

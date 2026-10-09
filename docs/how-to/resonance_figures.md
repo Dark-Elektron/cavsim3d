@@ -97,6 +97,12 @@ reports for m = 1; for a monopole mode on the axis they are close to zero. `kick
 sets the transverse step of the gradient in metres; by default it is 2 % of the smallest
 transverse extent, reduced until the shifted lines stay inside the beam aperture.
 
+The same values per plane are `Vt_x`, `Vt_y`, `R/Q_t_x`, `R/Q_t_y`, `k_kick_x` and
+`k_kick_y` (for a beam along z; along x the planes are y and z). The couplers split a
+dipole pair into two polarisations at angles of their own, and the thresholds of the two
+planes differ, so compare each plane with its own threshold. `R/Q_t_x + R/Q_t_y` equals
+`R/Q_t`.
+
 ### Lossy materials
 
 With a loss tangent or a conductivity on a material (see [Assign materials](materials.md)),
@@ -135,6 +141,19 @@ twice the circuit definition $V^2/(2\omega U)$.
   both transverse directions to catch both polarisations, or use the transverse R/Q above.
 - `span`: start and end of the line along the axis in metres; by default the whole model.
   Parts of the line outside the mesh, inside a conductor, contribute nothing.
+
+`rq["V"]` is the magnitude of the voltage and `rq["V_complex"]` the voltage with its
+phase. The phase refers to the model's own coordinate along the axis and to the mode as
+the last spectrum gave it, so the voltages of one mode on several lines can be combined.
+A mode that mixes multipoles (above the beam-pipe cutoff, where the couplers mix them)
+splits into its parts this way:
+
+```python
+d = 0.02                                            # m
+vp, vm = (rom.get_rq(i, offset=(x, 0.0))["V_complex"] for x in (d, -d))
+v_dipole_x = (vp - vm) / 2                          # odd in x
+v_even = (vp + vm) / 2                              # monopole and quadrupole parts
+```
 
 ## On a joined model
 

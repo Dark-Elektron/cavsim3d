@@ -458,6 +458,33 @@ class EMProject:
         self.save()
         return line
 
+    def add_transverse_beams(self, offset: float, name: str = 'dipole', **center) -> list:
+        """Add the beams a transverse impedance needs: two per transverse plane.
+
+        For the main axis Z they are ``<name>_x+`` and ``<name>_x-`` at
+        ``center +- (offset, 0)``, and ``<name>_y+``, ``<name>_y-`` at
+        ``center +- (0, offset)``; ``center`` is given as in :meth:`add_beam`
+        (``x=``, ``y=``; default the axis), ``offset`` in metres.  After a
+        solve, ``fom.transverse_impedance('x', name)`` gives Z_perp from them
+        (each beam's field is also read on the other's line).  Take
+        ``offset`` small next to the aperture: about a quarter of its radius
+        or less.  Returns the four beams.
+
+        >>> proj.add_transverse_beams(0.01)       # 10 mm around the axis
+        """
+        from cavsim3d.solvers.beam import transverse_names
+        offset = float(offset)
+        if not offset > 0 or not offset < float('inf'):
+            raise ValueError(f"add_transverse_beams: offset must be > 0 metres (got {offset!r}).")
+        base = self._beam_point('add_transverse_beams', **center)
+        added = []
+        for u in transverse_names(self.main_axis):
+            for sign, tag in ((1, '+'), (-1, '-')):
+                pos = {v: base['xyz'.index(v)] for v in transverse_names(self.main_axis)}
+                pos[u] += sign * offset
+                added.append(self.add_beam(f"{name}_{u}{tag}", **pos))
+        return added
+
     def add_beam_path(self, name: str, *, beta: float = 1.0, **position):
         """Add a voltage path: a line along ``main_axis`` without current.
 

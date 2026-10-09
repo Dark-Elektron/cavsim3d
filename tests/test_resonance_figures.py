@@ -6,7 +6,7 @@ from scipy.special import j0, j1, jv
 
 from cavsim3d.core.em_project import EMProject
 from cavsim3d.geometry.base import BaseGeometry, _curve_with_fallback
-from cavsim3d.solvers.figures_of_merit import beam_line
+from cavsim3d.solvers.figures_of_merit import beam_line, transverse_kick
 from netgen.occ import Axes, Box, Cylinder, Pnt, Z as OCC_Z
 
 C0, EPS0, MU0 = 299792458.0, 8.8541878128e-12, 4e-7 * np.pi
@@ -156,6 +156,24 @@ def test_loaded_resonances_do_not_depend_on_the_band(tmp_path):
         assert whole['frequencies'][k] == pytest.approx(f, rel=1e-6)
         assert whole['Q_L'][k] == pytest.approx(q_l, rel=1e-4)
 
+    # the eigenpairs near each closed mode (shift-invert) give what every
+    # eigenpair of the loaded problem gives, the strongly damped pair included
+    import cavsim3d.solvers.eigen_mixin as em
+    calls, real = [], em.nearest_eigs
+
+    def no_shift_invert(*_a, **_k):
+        raise em.ArpackNoConvergence("forced", np.array([]), np.array([]))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(em, "nearest_eigs", lambda *a, **k: calls.append(1) or real(*a, **k))
+        fast = rom.get_external_q(fmin=0.5, fmax=2.0)
+        assert calls                                  # the shift-invert path ran
+        mp.setattr(em, "nearest_eigs", no_shift_invert)
+        every = rom.get_external_q(fmin=0.5, fmax=2.0)
+    assert list(every['mode_index']) == list(fast['mode_index'])
+    np.testing.assert_allclose(fast['frequencies'], every['frequencies'], rtol=1e-9)
+    np.testing.assert_allclose(fast['Q_L'], every['Q_L'], rtol=1e-6)
+
 
 def test_rq_of_tm010_against_closed_form(pillbox):
     """Off the axis, outside the beam-pipe holes, the pillbox is exact."""
@@ -242,8 +260,26 @@ def test_transverse_kick_of_tm110(pillbox):
     U, _ = fds._eigen_energy(x, 'global', w)
     direct = np.hypot(abs(v_x), abs(v_y)) / np.sqrt(U)
     assert q["Vt [MV]"] * 1e6 == pytest.approx(direct, rel=0.01)
+    # per plane, with the phase: V_t,u = j (c / w) dV/du is the Lorentz-force integral
+    for key, v in (("Vt_x [MV]", v_x), ("Vt_y [MV]", v_y)):
+        assert q[key] * 1e6 == pytest.approx(abs(v) / np.sqrt(U), abs=0.01 * direct)
+    assert q["R/Q_t_x [Ohm]"] + q["R/Q_t_y [Ohm]"] == pytest.approx(q["R/Q_t [Ohm]"], rel=1e-12)
+    kick = transverse_kick([piece], 2, (0.0, 0.0), s, w)
+    assert kick['planes'] == ('x', 'y')
+    np.testing.assert_allclose(kick['Vt_planes'], [v_x, v_y], rtol=0,
+                               atol=0.01 * np.hypot(abs(v_x), abs(v_y)))
 
-    monopole = fds.get_figures_of_merit(_nearest(fds, CHI01 * C0 / (2 * np.pi * R)), span=SPAN)
+    # the phase of V: a dipole's voltage is odd in the offset, a monopole's even
+    d = 0.02
+    vp, vm = (fds.get_rq(i, offset=(sx, 0.0), span=SPAN)["V_complex"] for sx in (d, -d))
+    assert abs(vp + vm) < 1e-2 * abs(vp)
+    i010 = _nearest(fds, CHI01 * C0 / (2 * np.pi * R))
+    vp, vm = (fds.get_rq(i010, offset=(sx, 0.0), span=SPAN)["V_complex"] for sx in (d, -d))
+    assert abs(vp - vm) < 1e-2 * abs(vp)
+    assert fds.get_rq(i010, span=SPAN)["V"] == pytest.approx(
+        abs(fds.get_rq(i010, span=SPAN)["V_complex"]), rel=1e-15)
+
+    monopole = fds.get_figures_of_merit(i010, span=SPAN)
     assert monopole["R/Q_t [Ohm]"] < 1e-3 * q["R/Q_t [Ohm]"]
 
 
@@ -329,9 +365,10 @@ class _FakeMesh:
     """Curving fails above *works_up_to*."""
 
     def __init__(self, works_up_to):
-        self.works_up_to, self.curved = works_up_to, None
+        self.works_up_to, self.curved, self.tried = works_up_to, None, []
 
     def Curve(self, order):
+        self.tried.append(order)
         if order > self.works_up_to:
             raise RuntimeError("StdFail_NotDone: GeomAPI_ProjectPointOnCurve::NearestPoint")
         self.curved = order
@@ -360,3 +397,30 @@ def test_curving_falls_back_to_a_lower_order():
     assert _curve_with_fallback(_FakeMesh(3), 3) == 3
     with pytest.raises(RuntimeError, match="NearestPoint"):
         _curve_with_fallback(_FakeMesh(0), 3)
+
+
+def test_curving_fallback_names_the_sliver_edges():
+    from netgen.occ import Box, Pnt
+    from cavsim3d.geometry.base import tiny_edges
+    # a step of 2 micrometres where two boxes meet: four edges 2 um long
+    shape = (Box(Pnt(0, 0, 0), Pnt(0.1, 0.05, 0.2))
+             + Box(Pnt(0, 0, 0.2), Pnt(0.1, 0.05 + 2e-6, 0.3)))
+    found = tiny_edges(shape)
+    assert len(found) == 2 and all(length == pytest.approx(2e-6) for length, _ in found)
+    assert {round(p[0], 6) for _, p in found} == {0.0, 0.1}
+    assert tiny_edges(Box(Pnt(0, 0, 0), Pnt(0.1, 0.05, 0.2))) == []
+    with pytest.warns(UserWarning, match=r"2 sliver edge\(s\).*2\.0 um at \(0\.00, 50\.00, 200\.00\) mm"):
+        assert _curve_with_fallback(_FakeMesh(works_up_to=2), 4, shape=shape) == 2
+
+
+def test_curving_starts_at_the_order_reached_before():
+    import warnings
+    mesh = _FakeMesh(works_up_to=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")              # nothing failed: no warning
+        assert _curve_with_fallback(mesh, 4, known=2) == 2
+    assert mesh.tried == [2] and mesh.curved == 2
+    # a known order that fails after all: the usual fallback from there
+    mesh = _FakeMesh(works_up_to=1)
+    with pytest.warns(UserWarning, match="order 2 failed.*order 1"):
+        assert _curve_with_fallback(mesh, 4, known=2) == 1

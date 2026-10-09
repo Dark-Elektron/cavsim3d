@@ -88,6 +88,26 @@ No version has been released yet. The entries compare with the code published on
   every `concat.solve()`.
 - With a beam defined, `generate_mesh()` curves the mesh to order 4 unless `curve_order`
   is given. The solve warns when a beam runs past curved walls meshed to a lower order.
+- **Transverse beam impedance.** `proj.add_transverse_beams(d)` adds two beams per
+  transverse plane at +-d, and `transverse_impedance(plane)` on every result with a beam
+  gives Z_perp in Ohm/m from the double difference of their impedances (Panofsky-Wenzel):
+  the dipole part, without the monopole and quadrupole parts or a coupler's kick.
+- `get_hom_power(current)` on every result with a beam: the power the beam leaves in each
+  port mode and port, from the amplitudes of the beam current's spectral lines at the
+  result's frequencies. `cavsim3d.analysis.bunch_train_spectrum()` gives the lines of a
+  train of Gaussian bunches. Joined models now keep the reference impedances of their
+  port modes with S~.
+- The transverse kick per plane: `get_figures_of_merit()` adds `Vt_x`, `Vt_y`,
+  `R/Q_t_x`, `R/Q_t_y`, `k_kick_x` and `k_kick_y` (the planes across the beam axis), and
+  `get_rq()` returns the voltage with its phase as `V_complex`, so the multipole parts of
+  a mixed mode can be separated from lines at opposite offsets.
+- `rom.solve(frequencies=...)` and `concat.solve(frequencies=...)` take any array of
+  frequencies in GHz in place of `fmin`, `fmax` and `nsamples`, for example points on the
+  narrow resonances that `get_external_q()` finds.
+- `rom.solve(store_snapshots=False)` and `concat.solve(store_snapshots=False)` keep and
+  save S, Z and the beam blocks only, not the reduced solution of every frequency (709 MB
+  for a module of two reduced cavities at 6001 frequencies). A field at one frequency is
+  then solved again when asked for, and `concat.reduce()` solves the states it needs.
 
 ### Changed
 
@@ -153,7 +173,15 @@ No version has been released yet. The entries compare with the code published on
   notebooks and the site small. Uncomment them to see the geometry when running a
   notebook.
 - Dependencies: `gmsh`, `tqdm`, `termcolor` and the `full` extra were removed; `dev` and
-  `docs` extras were added. `requirements.txt` installs `-e .[dev]`.
+  `docs` extras were added. `requirements.txt` installs `-e .[dev]`. `threadpoolctl` is
+  now a dependency.
+- The POD factors the snapshot matrix as X = QR in place and passes only R to the SVD:
+  about one copy of the snapshots in memory instead of several, which matters for a large
+  model with a beam.
+- The beam blocks of a reduced model and the joins of reduced sections run on one BLAS
+  thread, and the join is computed for many frequencies at once. Measured on a module of
+  eight reduced cavities on 16 cores, the join ran 10 times slower on every thread than
+  on four, and about 100 times slower with three such processes at once.
 
 ### Deprecated
 
@@ -232,6 +260,24 @@ No version has been released yet. The entries compare with the code published on
   `solve()`: the request was compared with the largest count instead of the request
   saved. When a changed request does recompute stored results, the console now lists
   what changed.
+- `get_external_q()` on a joined model with TE/TM ports (whose Z0 depends on frequency)
+  computed every eigenpair of the loaded problem, of size 2r, for each group of closed
+  modes and up to ten times more while refining: on four joined copies of a cavity
+  (r = 1093) it had not finished after an hour. Each solve now computes the eigenpairs
+  near the group's modes by shift-invert, with one factorisation of size r per shift,
+  and every eigenpair only where those do not hold the group's modes (a strongly damped
+  mode); a long call reports its progress. On 32 joined copies of an iris cavity
+  (r = 993, 256 resonances) the call takes 50 s instead of 284 s, with the same results.
+- A project whose mesh could not be curved to the order asked for recorded the order
+  asked, so every reopening tried it again, failed and warned again. The order reached
+  is recorded too, and a reopened mesh is curved to it directly. The warning names the
+  sliver edges (micrometres long) where OCC's projection fails, and with a beam the
+  solve no longer advises an order that has already failed.
+- A reduction whose SVD failed (LAPACK could not allocate its workspace, and returned NaN
+  singular values) gave a reduced model of 0 DOFs, reported it as complete, and saved it
+  over the good one; the joins built from it then failed with "Null space empty". The
+  reduction now raises `FloatingPointError` and the stored reduced model stays as it was,
+  in memory and on disk. A join of a section with 0 DOFs names that section.
 - A project saved with empty port modes crashed at the next solve.
 - Confirmation prompts failed in scripted runs (nbconvert, papermill); with nobody to
   answer, they count as "no".
