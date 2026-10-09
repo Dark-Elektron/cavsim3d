@@ -48,7 +48,7 @@ def test_join_in_one_batch_or_many(monkeypatch):
     whole = bm.join_s_tilde(*args)
     monkeypatch.setattr(bm, "JOIN_CHUNK_BYTES", 1.0)            # one frequency per batch
     np.testing.assert_allclose(bm.join_s_tilde(*args), whole, rtol=1e-13, atol=1e-15)
-    E, D, L, S = len(args[3]), len(args[0]), 2, 2
+    E, L, S = len(args[3]), 2, 2
     assert whole.shape == (30, E + L, E + S)
 
 

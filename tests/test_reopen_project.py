@@ -8,6 +8,7 @@ import json
 import warnings
 
 import numpy as np
+import pytest
 
 from cavsim3d.core.em_project import EMProject
 from cavsim3d.geometry.primitives import RectangularWaveguide

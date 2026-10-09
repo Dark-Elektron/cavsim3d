@@ -3179,10 +3179,6 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
     def coupled_dofs(self) -> int:
         return self.A_coupled.shape[0] if self.A_coupled is not None else 0
 
-    @property
-    def has_solution(self) -> bool:
-        return self.frequencies is not None
-
     def get_coupled_dimensions(self) -> Dict[str, int]:
         return {
             'n_structures': self.n_structures,
