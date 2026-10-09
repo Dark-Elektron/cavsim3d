@@ -227,6 +227,11 @@ No version has been released yet. The entries compare with the code published on
   analytical references were also given Hz where they take GHz. `tesla.ipynb` ran only
   where its project had been saved before, and `multi_rwg.ipynb` ended in an unfinished
   line.
+- A reopened project solved with port mode counts given per port
+  (`nportmodes={'port1': 5, 'port2': 3}`) discarded its sweep and solved it again at every
+  `solve()`: the request was compared with the largest count instead of the request
+  saved. When a changed request does recompute stored results, the console now lists
+  what changed.
 - A project saved with empty port modes crashed at the next solve.
 - Confirmation prompts failed in scripted runs (nbconvert, papermill); with nobody to
   answer, they count as "no".

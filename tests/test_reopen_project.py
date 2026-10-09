@@ -32,6 +32,24 @@ def test_reopened_solve_returns_stored_results(tmp_path):
     np.testing.assert_allclose(again["Z"], res["Z"])
 
 
+def test_reopened_solve_with_per_port_mode_counts_is_not_rerun(tmp_path, monkeypatch):
+    cfg = dict(CFG, nportmodes={'port1': 2, 'port2': 1})
+    proj = EMProject("perport", base_dir=str(tmp_path), overwrite=True)
+    proj.geometry = RectangularWaveguide(a=0.1, L=0.06667, maxh=0.06)
+    res = proj.fds.solve(config=cfg)
+
+    again = EMProject("perport", base_dir=str(tmp_path))
+    assert again.fds._compare_loaded_config(
+        cfg['fmin'], cfg['fmax'], cfg['nsamples'], cfg['order'],
+        cfg['nportmodes']) == []
+
+    def _no_recompute(*_a, **_k):
+        raise AssertionError("the stored sweep was discarded and solved again")
+    monkeypatch.setattr(again.fds, "_clear_results", _no_recompute)
+    stored = again.fds.solve(config=cfg)
+    np.testing.assert_allclose(stored["S"], res["S"])
+
+
 def test_reopened_rom_keeps_port_modes(tmp_path):
     _solved(tmp_path)
     proj = EMProject("reopen", base_dir=str(tmp_path))

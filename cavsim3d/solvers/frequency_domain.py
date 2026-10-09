@@ -2271,8 +2271,13 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
             diffs.append(f"order: {loaded.get('order')} -> {order}")
         if nedelec is not None and nedelec != loaded.get('nedelec', 'second'):
             diffs.append(f"nedelec: {loaded.get('nedelec', 'second')} -> {nedelec}")
-        if nportmodes is not None and nportmodes != loaded.get('n_modes_per_port'):
-            diffs.append(f"nportmodes: {loaded.get('n_modes_per_port')} -> {nportmodes}")
+        # The request as given (int or per-port dict); n_modes_per_port is only
+        # its maximum, so a per-port request never equals it.
+        spec = loaded.get('nportmodes_spec')
+        if spec is None:
+            spec = loaded.get('n_modes_per_port')
+        if nportmodes is not None and nportmodes != spec:
+            diffs.append(f"nportmodes: {spec} -> {nportmodes}")
 
         # Geometry history (timestamps/filepaths stripped — files are hashed
         # separately below)
@@ -2587,9 +2592,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 pr.info("  The port solutions were not stored (store_snapshots=False): "
                         "the beam needs them, so everything is solved again.")
             recompute = rerun is True or bool(diffs)
-            if rerun is None and diffs and self._has_valid_results():
-                pr.info("  The request differs from the stored results -> "
-                        "recomputing (pass rerun=False to keep the stored ones).")
+            stored = (self._has_valid_results()
+                      or (self._loaded_config or {}).get('fmin') is not None)
+            if rerun is None and diffs and stored:
+                pr.milestone("  The request differs from the stored results -> "
+                             "recomputing (pass rerun=False to keep the stored ones):\n"
+                             + "".join(f"    - {d}\n" for d in diffs).rstrip())
 
             # --- Mesh synchronization and validation ---
             self._sync_and_validate_mesh()
