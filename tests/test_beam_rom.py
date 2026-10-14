@@ -88,7 +88,7 @@ def _rom_against_fom(tmp_path, make, cfg, beam, n_fine=17, tol=1e-8):
 
 
 def _assert_close(rom, fom, s_tol, zb_tol, kh_tol):
-    A, R = rom.s_tilde, fom.s_tilde
+    A, R = rom.s_csc, fom.s_csc
     P = A.shape[1] - 1
     assert rom.tilde_labels == fom.tilde_labels
     assert np.abs(A - R)[:, :P, :P].max() < s_tol
@@ -142,8 +142,8 @@ def test_reduced_beam_between_snapshots(tmp_path):
     """Beam off the axis of a cell: the lift on the walls carries the beam."""
     rom, fom = _rom_against_fom(tmp_path, lambda: CellChain(n=1), TRAIN, CELL_BEAM)
     _assert_close(rom, fom, s_tol=1e-8, zb_tol=1e-5, kh_tol=1e-4)    # measured 3e-7 (z_b)
-    assert rom.has_beam and rom.s_tilde.shape == (17, 3, 3)
-    np.testing.assert_allclose(rom.s_tilde[:, :2, :2], rom._S_matrix, atol=1e-12)
+    assert rom.has_beam and rom.s_csc.shape == (17, 3, 3)
+    np.testing.assert_allclose(rom.s_csc[:, :2, :2], rom._S_matrix, atol=1e-12)
 
 
 @pytest.mark.parametrize("tand", [0.0, 0.05])
@@ -175,9 +175,9 @@ def test_reduced_beam_saved_and_reopened(tmp_path, monkeypatch):
     p.fds.solve(**TRAIN)
     rom = p.fds.fom.reduce(tol=1e-8)
     rom.solve(2.6, 3.4, 11)
-    St = rom.s_tilde
+    St = rom.s_csc
     rom_dir = tmp_path / "saved" / "fds" / "fom" / "rom"
-    for f in ("matrices/beam_global.h5", "s_tilde/s_tilde_global.h5",
+    for f in ("matrices/beam_global.h5", "s_csc/s_csc_global.h5",
               "z_tilde/z_tilde_global.h5", "snapshots_beam/snapshots_beam_global.h5"):
         assert (rom_dir / f).exists(), f
 
@@ -201,9 +201,9 @@ def test_reduced_beam_saved_and_reopened(tmp_path, monkeypatch):
     q = EMProject(name="saved", base_dir=str(tmp_path))
     r2 = q.fds.fom.rom
     assert r2.has_beam
-    np.testing.assert_allclose(r2.s_tilde, St, rtol=1e-12)
+    np.testing.assert_allclose(r2.s_csc, St, rtol=1e-12)
     r2.solve(2.7, 3.3, 7)                        # a new sweep after reopening
-    assert r2.s_tilde.shape == (7, 3, 3)
+    assert r2.s_csc.shape == (7, 3, 3)
 
     # beyond the band of the beam data (snapshots' band + 10 % each side)
     with pytest.raises(ValueError, match="beam data hold"):
@@ -219,7 +219,7 @@ def test_reduced_model_without_a_beam(tmp_path):
     assert not rom.has_beam and not rom._reduced_beam
     rom_dir = tmp_path / "plain" / "fds" / "fom" / "rom"
     assert not (rom_dir / "matrices" / "beam_global.h5").exists()
-    assert not (rom_dir / "s_tilde").exists()
+    assert not (rom_dir / "s_csc").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -231,25 +231,25 @@ def test_reduced_copies_join(tmp_path):
     one piece as closely as the full-order join does."""
     one = _project(tmp_path, "one", CellChain(n=2), CELL_BEAM)
     one.fds.solve(**dict(TRAIN, nsamples=17), store_snapshots=False)
-    ref = one.fds.fom.s_tilde
+    ref = one.fds.fom.s_csc
 
     chain = EMProject(name="chain", base_dir=str(tmp_path), overwrite=True)
     chain.add("cell", CellChain(n=1), n=2)
     chain.add_beam('beam', **CELL_BEAM)
     chain.fds.solve(**TRAIN)
-    fom_join = chain.fds.foms.concatenate().s_tilde
+    fom_join = chain.fds.foms.concatenate().s_csc
     concat = chain.fds.foms.reduce(tol=1e-8).concatenate()
     concat.solve(2.6, 3.4, 9)
     assert concat.tilde_labels == (['1(1)', '2(1)', 'b(1)'], ['1(1)', '2(1)', 'b(1)'])
-    assert np.abs(concat.s_tilde - fom_join).max() < 1e-4 * np.abs(fom_join).max()
-    np.testing.assert_allclose(concat.s_tilde[:, :2, :2], concat._S_matrix, atol=1e-10)
+    assert np.abs(concat.s_csc - fom_join).max() < 1e-4 * np.abs(fom_join).max()
+    np.testing.assert_allclose(concat.s_csc[:, :2, :2], concat._S_matrix, atol=1e-10)
     concat.solve(2.6, 3.4, 17)
-    St = concat.s_tilde
+    St = concat.s_csc
     assert St.shape == (17, 3, 3)
     assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                   # measured 3.1e-3
     assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=2e-2)           # measured 0.6 %
     assert (tmp_path / "chain" / "fds" / "foms" / "roms" / "matrices" / "beam_cell.h5").exists()
-    assert (tmp_path / "chain" / "fds" / "foms" / "roms" / "concat" / "s_tilde" / "s_tilde.h5").exists()
+    assert (tmp_path / "chain" / "fds" / "foms" / "roms" / "concat" / "s_csc" / "s_csc.h5").exists()
 
 
 def test_imported_reduced_part_joins(tmp_path):
@@ -277,15 +277,15 @@ def test_imported_reduced_part_joins(tmp_path):
         concat.solve(2.6, 3.4, 13)
         # two reductions of the same results (the part's own project, and the
         # staged files): h, read on the beam line, differs at 7e-7 relative
-        assert (np.abs(concat.s_tilde - expected.s_tilde).max()
-                < 1e-5 * np.abs(expected.s_tilde).max())
+        assert (np.abs(concat.s_csc - expected.s_csc).max()
+                < 1e-5 * np.abs(expected.s_csc).max())
         assert _tree_hash(tmp_path / "cell") == before
         reopened = EMProject(name=f"imp_{mode}", base_dir=str(tmp_path))
         c2 = reopened.fds.foms.roms.concat
         assert c2.has_beam
-        np.testing.assert_allclose(c2.s_tilde, concat.s_tilde, atol=1e-12)
+        np.testing.assert_allclose(c2.s_csc, concat.s_csc, atol=1e-12)
         c2.solve(2.7, 3.3, 5)
-        assert c2.s_tilde.shape == (5, 3, 3)
+        assert c2.s_csc.shape == (5, 3, 3)
 
     # a project solved with the beam but not reduced: reduced here, read-only
     src2 = _project(tmp_path, "cell_full", CellChain(n=1), CELL_BEAM)
@@ -297,8 +297,8 @@ def test_imported_reduced_part_joins(tmp_path):
     p.fds.solve(**TRAIN)
     concat = p.fds.foms.reduce(tol=1e-8).concatenate()
     concat.solve(2.6, 3.4, 13)
-    assert (np.abs(concat.s_tilde - expected.s_tilde).max()
-            < 1e-5 * np.abs(expected.s_tilde).max())
+    assert (np.abs(concat.s_csc - expected.s_csc).max()
+            < 1e-5 * np.abs(expected.s_csc).max())
     assert _tree_hash(tmp_path / "cell_full") == before2
 
 
@@ -331,4 +331,4 @@ def test_reduced_glued_parts_join(tmp_path):
     z, z_ref = concat.beam_impedance(), fom_join.beam_impedance()
     assert np.max(np.abs(z - z_ref) / np.abs(z_ref)) < 1e-5            # measured 6e-8
     concat.solve(3.0, 4.0, 17)
-    assert concat.s_tilde.shape == (17, 7, 7)
+    assert concat.s_csc.shape == (17, 7, 7)

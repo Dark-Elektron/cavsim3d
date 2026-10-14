@@ -1,4 +1,4 @@
-"""Model order reduction with the beam (docs/theory/beam_reduction.md §10).
+"""Model order reduction with the beam (docs/theory/beam_reduction.md §11).
 
 The beam column of a full-order sweep is reduced with the port columns into
 one basis (§10.3).  Its load and outputs change shape with frequency through
@@ -94,13 +94,13 @@ def missing_beam_reason(snapshots, data) -> str:
 def staged_beam_inputs(fom_dir, tag: str) -> Optional[Dict]:
     """The beam inputs of a reduction from a section's full-order files in
     ``fom_dir`` (``fds/fom`` or the flat ``fds/foms`` tree, files suffixed
-    ``tag``): field snapshots, beam data and the metadata of its S~.  None
+    ``tag``): field snapshots, beam data and the metadata of its S~_CSC.  None
     without a beam, or (reported) without the field snapshots of the beam."""
     import h5py
     import cavsim3d.utils.printing as pr
     from cavsim3d.core.persistence import H5Serializer
     fom_dir = Path(fom_dir)
-    tilde = bm.load_tilde(fom_dir / "s_tilde" / f"s_tilde_{tag}.h5")
+    tilde = bm.load_tilde(bm.find_csc_file(fom_dir, tag))
     if tilde is None:
         return None
     snaps = None
@@ -411,12 +411,12 @@ def reduce_beam(V: np.ndarray, K, M, data: Dict, port_modes, C=None, D=None,
 
 def section_tilde(rb: ReducedBeam, frequencies, A, B, C=None, D=None,
                   zref: Optional[Callable] = None, zwave: Optional[Callable] = None) -> Dict:
-    """S~ and Z~ of one reduced section at ``frequencies`` [Hz].
+    """Z~ and S~_CSC of one reduced section at ``frequencies`` [Hz].
 
     ``zref(port, mode, f)`` is the reference impedance of a port mode,
     ``zwave`` the wave impedance its mode was normalised to: a port mode
     referred to another impedance (a TEM line) is rescaled as the reported Z
-    is.  The labels and metadata of the section's full-order S~ are kept.
+    is.  The labels and metadata of the section's full-order S~_CSC are kept.
     """
     freqs = np.asarray(frequencies, dtype=float)
     with small_dense_blas():
@@ -440,17 +440,17 @@ def _section_tilde(rb, freqs, A, B, C, D, zref, zwave) -> Dict:
     kZ = dsc[None, :, None] * ev['kZ']
     hZ = ev['hZ'] * dsc[None, None, :]
     Zt = bm.z_tilde(Z, kZ, hZ, ev['zoc'])
-    St, zr = None, None
+    Sc, zr = None, None
     if zref is not None:
         Zref = np.array([np.diag([zref(p, m, f) for p, m in pm]) for f in freqs])
-        St = bm.s_tilde(Z, kZ, hZ, ev['zoc'], Zref)
+        Sc = bm.s_csc_from_z_tilde(Zt, Zref)
         zr = np.array([np.diag(z) for z in Zref])
     setup = bm.BeamSetup.from_dict(rb.setup)
     numbers: Dict[str, int] = {}
     labels = [f"{numbers.setdefault(p, len(numbers) + 1)}({m + 1})" for p, m in pm]
     rows, cols = bm.matrix_labels(labels, setup)
     meta = rb.meta
-    return {'Z_tilde': Zt, 'S_tilde': St, 'rows': rows, 'cols': cols,
+    return {'Z_tilde': Zt, 'S_csc': Sc, 'rows': rows, 'cols': cols,
             'frequencies': freqs.copy(),
             'names': meta.get('names') or {lab: line.name for lab, line in
                                           zip(setup.path_labels, setup.paths)},
@@ -462,10 +462,10 @@ def _section_tilde(rb, freqs, A, B, C, D, zref, zwave) -> Dict:
 
 def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
                   shifts: Optional[Sequence[float]] = None) -> Dict:
-    """S~ (and Z~) of sections joined at their cuts (docs/theory/beam.md §9.9).
+    """S~_CSC (and Z~) of sections joined at their cuts (docs/theory/beam.md §9.10).
 
     ``concat``: a coupled system whose structure ``i`` is section ``i``, with
-    its connections defined; ``tildes[i]``: that section's S~ (with its
+    its connections defined; ``tildes[i]``: that section's S~_CSC (with its
     ``port_modes`` and ``zref``) at the common frequencies; ``shifts[i]``:
     the section's position along the beam axis in the frame of the first
     (None: every section in one frame).  A section at z_i sees the beam's
@@ -478,7 +478,7 @@ def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
     kp_over_w = [1.0 / (l.beta * bm.c0) for l in setup.paths]
     blocks, block_modes, col_phase, row_phase = [], [], [], []
     for i, t in enumerate(tildes):
-        blocks.append(np.asarray(t['S_tilde']))
+        blocks.append(np.asarray(t['S_csc']))
         block_modes.append([concat.port_mode_map[(i, p, int(m))] for p, m in t['port_modes']])
         z = 0.0 if shifts is None else float(shifts[i])
         col_phase.append(np.exp(-1j * np.outer(w, k_over_w) * z))
@@ -489,7 +489,7 @@ def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
         pairs += [(concat.port_mode_map[(sa, pa, m)], concat.port_mode_map[(sb, pb, m)])
                   for m in range(n)]
     external = list(concat._external_port_modes)
-    St = bm.join_s_tilde(blocks, block_modes, pairs, external, col_phase, row_phase)
+    St = bm.join_s_csc(blocks, block_modes, pairs, external, col_phase, row_phase)
 
     ext = [concat._global_to_local[g] for g in external]
     labels, numbers = [], {}
@@ -499,8 +499,8 @@ def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
     rowmaps = [{(p, int(m)): r for r, (p, m) in enumerate(t['port_modes'])} for t in tildes]
     Zref = np.array([np.diag([tildes[s]['zref'][k, rowmaps[s][(p, int(m))]]
                               for (s, p, m) in ext]) for k in range(len(freqs))])
-    Zt = bm.z_tilde_from_s_tilde(St, Zref)
-    return {'S_tilde': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
+    Zt = bm.z_tilde_from_s_csc(St, Zref)
+    return {'S_csc': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
             'rows': labels + setup.path_labels,
             'cols': labels + setup.source_labels, 'frequencies': freqs,
             'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
@@ -509,7 +509,7 @@ def join_sections(concat, tildes: Sequence[Dict], setup: "bm.BeamSetup",
 
 
 class ReducedBeamJoin:
-    """The beam of a coupled system of reduced sections: their S~ joined at
+    """The beam of a coupled system of reduced sections: their S~_CSC joined at
     any frequency (§10.7).  ``sections[i]``: the reduced model of structure
     ``i`` -- a dict with ``beam`` (:class:`ReducedBeam`), ``A``, ``B``, ``C``,
     ``D``, ``zref``, ``zwave`` and ``key`` (sections with the same key share

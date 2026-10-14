@@ -25,7 +25,7 @@ def _segments(rng, D=4, Pd=6, L=2, S=2, n_f=30):
     return blocks, modes, pairs, external, col, row
 
 
-def test_s_tilde_and_z_tilde_convert_into_each_other():
+def test_s_csc_and_z_tilde_convert_into_each_other():
     rng = np.random.default_rng(0)
     n_f, P, L, S = 12, 5, 2, 3
     Z = rng.standard_normal((n_f, P, P)) + 1j * rng.standard_normal((n_f, P, P))
@@ -34,20 +34,21 @@ def test_s_tilde_and_z_tilde_convert_into_each_other():
     hZ = rng.standard_normal((n_f, L, P)) + 1j * rng.standard_normal((n_f, L, P))
     zoc = rng.standard_normal((n_f, L, S)) + 1j * rng.standard_normal((n_f, L, S))
     Zref = np.array([np.diag(rng.uniform(50.0, 400.0, P)) for _ in range(n_f)]).astype(complex)
-    St = bm.s_tilde(Z, kZ, hZ, zoc, Zref)
-    np.testing.assert_allclose(bm.z_tilde_from_s_tilde(St, Zref), bm.z_tilde(Z, kZ, hZ, zoc),
+    St = bm.s_csc_from_z_tilde(bm.z_tilde(Z, kZ, hZ, zoc), Zref)
+    np.testing.assert_allclose(bm.z_tilde_from_s_csc(St, Zref), bm.z_tilde(Z, kZ, hZ, zoc),
                                rtol=0, atol=1e-11 * np.abs(Z).max())
     # one frequency at a time: the same matrices
     for i in (0, n_f - 1):
-        one = bm.s_tilde(Z[i:i + 1], kZ[i:i + 1], hZ[i:i + 1], zoc[i:i + 1], Zref[i:i + 1])
+        one = bm.s_csc_from_z_tilde(bm.z_tilde(Z[i:i + 1], kZ[i:i + 1], hZ[i:i + 1],
+                                               zoc[i:i + 1]), Zref[i:i + 1])
         np.testing.assert_allclose(one[0], St[i], rtol=1e-13)
 
 
 def test_join_in_one_batch_or_many(monkeypatch):
     args = _segments(np.random.default_rng(1))
-    whole = bm.join_s_tilde(*args)
+    whole = bm.join_s_csc(*args)
     monkeypatch.setattr(bm, "JOIN_CHUNK_BYTES", 1.0)            # one frequency per batch
-    np.testing.assert_allclose(bm.join_s_tilde(*args), whole, rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(bm.join_s_csc(*args), whole, rtol=1e-13, atol=1e-15)
     E, L, S = len(args[3]), 2, 2
     assert whole.shape == (30, E + L, E + S)
 
@@ -65,5 +66,5 @@ def test_join_runs_on_one_blas_thread(monkeypatch):
         return solve(*a, **k)
 
     monkeypatch.setattr(np.linalg, "solve", recording_solve)
-    bm.join_s_tilde(*_segments(np.random.default_rng(2)))
+    bm.join_s_csc(*_segments(np.random.default_rng(2)))
     assert seen and all(s == {1} for s in seen)

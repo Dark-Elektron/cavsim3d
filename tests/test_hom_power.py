@@ -73,7 +73,7 @@ def test_reduced_and_joined_models_give_the_same_power(tmp_path, monkeypatch):
     from cavsim3d.solvers import beam as bm
     from cavsim3d.solvers.concatenation import ConcatenatedSystem
     folder, _ = concat._results_dir()
-    zref = bm.load_tilde(folder / "s_tilde" / "s_tilde.h5")['zref']
+    zref = bm.load_tilde(folder / "s_csc" / "s_csc.h5")['zref']
     np.testing.assert_allclose(zref, concat._beam['zref'])
     loaded = ConcatenatedSystem.load(folder)
     np.testing.assert_allclose(loaded._beam['zref'], zref)

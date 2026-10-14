@@ -60,22 +60,23 @@ def _safe_filename(name: str) -> str:
 
 def _save_beam_files(path: Path, tag: str, beam: Optional[Dict], solver, domain: str) -> None:
     """Write (or, without a beam, remove) the beam files of one section:
-    z_tilde/, s_tilde/, snapshots_beam/ and matrices/beam_<section>.h5."""
-    files = [path / "z_tilde" / f"z_tilde_{tag}.h5",
-             path / "s_tilde" / f"s_tilde_{tag}.h5",
+    z_tilde/, s_csc/, snapshots_beam/ and matrices/beam_<section>.h5."""
+    files = [_beam.tilde_file(path, 'Z', tag),
+             _beam.tilde_file(path, 'CSC', tag),
              path / "snapshots_beam" / f"snapshots_beam_{tag}.h5",
              path / "matrices" / f"beam_{tag}.h5"]
+    _beam.remove_legacy_csc(path, tag)
     if not beam:
         for f in files:
             if f.exists():
                 f.unlink()
-        for folder in ("z_tilde", "s_tilde", "snapshots_beam"):
+        for folder in ("z_tilde", "s_csc", "snapshots_beam"):
             d = path / folder
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         return
     _beam.save_tilde(files[0], beam, 'Z')
-    _beam.save_tilde(files[1], beam, 'S')
+    _beam.save_tilde(files[1], beam, 'CSC')
     raw = getattr(solver, '_beam_raw', {}).get(domain) if solver is not None else None
     if raw is not None and raw.get('snapshots') is not None:
         files[2].parent.mkdir(parents=True, exist_ok=True)
@@ -89,8 +90,8 @@ def _save_beam_files(path: Path, tag: str, beam: Optional[Dict], solver, domain:
 
 
 def _join_domain_beams(concat, fds, blocks: List[Dict]) -> Dict:
-    """S~ of the joined model from the per-domain S~ (one per structure of
-    ``concat``, in the order of ``fds.domains``)."""
+    """S~_CSC of the joined model from the per-domain S~_CSC (one per structure
+    of ``concat``, in the order of ``fds.domains``)."""
     modes, labels_ext = [], []
     for s_idx, domain in enumerate(fds.domains):
         modes.append([concat.port_mode_map[(s_idx, pn, m)]
@@ -106,12 +107,12 @@ def _join_domain_beams(concat, fds, blocks: List[Dict]) -> Dict:
         s_idx, port, m = concat._global_to_local[g]
         n = numbers.setdefault((s_idx, port), len(numbers) + 1)
         labels_ext.append(f"{n}({m + 1})")
-    St = _beam.join_s_tilde([b['S_tilde'] for b in blocks], modes, pairs, external)
+    St = _beam.join_s_csc([b['S_csc'] for b in blocks], modes, pairs, external)
     first = blocks[0]
     n_ext = len(external)
     rows = labels_ext + list(first['rows'][len(first['rows']) - (St.shape[1] - n_ext):])
     cols = labels_ext + list(first['cols'][len(first['cols']) - (St.shape[2] - n_ext):])
-    return {'S_tilde': St, 'Z_tilde': None, 'rows': rows, 'cols': cols,
+    return {'S_csc': St, 'Z_tilde': None, 'rows': rows, 'cols': cols,
             'frequencies': np.asarray(first['frequencies']), 'names': first.get('names', {}),
             'setup': first.get('setup'), 'fingerprint': first.get('fingerprint'),
             'summary': {'joined': list(fds.domains)}}
@@ -119,12 +120,12 @@ def _join_domain_beams(concat, fds, blocks: List[Dict]) -> Dict:
 
 def _load_beam_files(path: Path, tag: str) -> Optional[Dict]:
     """The beam results of one section, or None."""
-    z = _beam.load_tilde(path / "z_tilde" / f"z_tilde_{tag}.h5")
-    s_ = _beam.load_tilde(path / "s_tilde" / f"s_tilde_{tag}.h5")
+    z = _beam.load_tilde(_beam.tilde_file(path, 'Z', tag))
+    s_ = _beam.load_tilde(_beam.find_csc_file(path, tag))
     if z is None and s_ is None:
         return None
     meta = z or s_
-    return {'Z_tilde': z['data'] if z else None, 'S_tilde': s_['data'] if s_ else None,
+    return {'Z_tilde': z['data'] if z else None, 'S_csc': s_['data'] if s_ else None,
             'rows': meta['rows'], 'cols': meta['cols'], 'frequencies': meta['frequencies'],
             'names': meta['names'], 'setup': meta['setup'],
             'fingerprint': meta['fingerprint'], 'summary': meta['summary'],
@@ -142,7 +143,8 @@ class FOMResult(PlotMixin, BeamResultMixin):
     Wrapper around a single solved FOM (one domain or a global coupled result).
 
     Solved with a beam (``proj.add_beam``), it also holds the generalised
-    matrices ``s_tilde`` / ``z_tilde`` (see :class:`~cavsim3d.solvers.beam.BeamResultMixin`).
+    matrices ``z_tilde``, ``s_csc``, ``s_tilde`` and ``y_tilde`` (see
+    :class:`~cavsim3d.solvers.beam.BeamResultMixin`).
 
     Attributes
     ----------
@@ -931,7 +933,7 @@ class FOMCollection(PlotMixin):
             If no concatenated system has been computed yet.
         """
         if self._concat_cache is None and self._saved_scattering_join():
-            # a join through the parts' S~ (beam) is rebuilt from their files
+            # a join through the parts' S~_CSC (beam) is rebuilt from their files
             self.concatenate()
         if self._concat_cache is None:
             raise RuntimeError(
@@ -941,7 +943,7 @@ class FOMCollection(PlotMixin):
         return self._concat_cache
 
     def _saved_scattering_join(self) -> bool:
-        """True if the project holds a join through the parts' S~ (beam)."""
+        """True if the project holds a join through the parts' S~_CSC (beam)."""
         fds = self._fds_ref
         root = getattr(fds, '_project_path', None)
         if root is None or not all(f.has_beam for f in self._foms):
@@ -1081,7 +1083,7 @@ class FOMCollection(PlotMixin):
 
         fds = self._fds_ref
         blocks = [getattr(fds, '_beam_tilde', {}).get(d) for d in fds.domains]
-        if blocks and all(b is not None and b.get('S_tilde') is not None for b in blocks):
+        if blocks and all(b is not None and b.get('S_csc') is not None for b in blocks):
             return self._concatenate_scattering(blocks)
 
         # Warn about matrix size
@@ -1194,8 +1196,8 @@ class FOMCollection(PlotMixin):
     def _concatenate_scattering(self, blocks: List[Dict]):
         """Join the parts through their generalised scattering matrices.
 
-        With a beam, every part's S~ (port modes and beams) is joined at the
-        cuts (CSC-BEAM, docs/theory/beam.md §9.9): the joined S, Z and S~ at
+        With a beam, every part's S~_CSC (port modes and beams) is joined at
+        the cuts (CSC-BEAM, docs/theory/beam.md §9.10): the joined S, Z and S~_CSC at
         the full-order frequencies, without any full-order matrices.  Other
         frequencies need reduced models of the parts (not available with a
         beam yet).
@@ -1231,11 +1233,11 @@ class FOMCollection(PlotMixin):
         ext = [concat._global_to_local[g] for g in concat._external_port_modes]
         Zref = np.array([np.diag([fds._get_port_impedance(p, m, f) for (_s, p, m) in ext])
                          for f in freqs])
-        beam['Z_tilde'] = _beam.z_tilde_from_s_tilde(beam['S_tilde'], Zref)
+        beam['Z_tilde'] = _beam.z_tilde_from_s_csc(beam['S_csc'], Zref)
         beam['zref'] = np.diagonal(Zref, axis1=1, axis2=2).copy()
         n = len(ext)
         concat.frequencies = freqs
-        concat._S_matrix = beam['S_tilde'][:, :n, :n].copy()
+        concat._S_matrix = beam['S_csc'][:, :n, :n].copy()
         concat._Z_matrix = beam['Z_tilde'][:, :n, :n].copy()
         concat._beam = beam
         concat._scattering_join = True
@@ -1993,7 +1995,7 @@ class NetlistFOMs:
         self._fds_ref = fds_ref
         self._config = fom_config
         self._roms_cache = None
-        self._concat_cache = None               # joined with the beam (S~)
+        self._concat_cache = None               # joined with the beam (S~_CSC)
 
     @property
     def _root(self) -> Path:
@@ -2165,8 +2167,8 @@ class NetlistFOMs:
         """Join the parts at the full-order level -- with a beam only.
 
         With beams (``proj.add_beam``) the parts are joined through their
-        generalised scattering matrices S~ (port modes and beams, see
-        :meth:`_concatenate_scattering`): the joined S, Z and S~ at the
+        CSC-BEAM matrices S~_CSC (port modes and beams, see
+        :meth:`_concatenate_scattering`): the joined S, Z and S~_CSC at the
         full-order frequencies, without any matrices.  Without a beam the
         pipeline is FOM -> ROM -> Concatenation: ``fds.foms.reduce(tol).concatenate()``.
         """
@@ -2196,9 +2198,9 @@ class NetlistFOMs:
         return self._concat_cache
 
     def _section_tilde(self, base: str) -> Optional[Dict]:
-        """S~ of section ``base``: from this project's flat tree, else (a part
-        referenced in place) from its own project."""
-        t = _beam.load_tilde(self._root / "fds" / "foms" / "s_tilde" / f"s_tilde_{base}.h5")
+        """S~_CSC of section ``base``: from this project's flat tree, else (a
+        part referenced in place) from its own project."""
+        t = _beam.load_tilde(_beam.find_csc_file(self._root / "fds" / "foms", base))
         rec = self._components.get(base, {})
         if t is None and rec.get("kind") == "imported" and rec.get("mode") == "reference":
             from cavsim3d.solvers import netlist_persistence as npz
@@ -2206,13 +2208,13 @@ class NetlistFOMs:
         return t
 
     def _concatenate_scattering(self, announce: bool = True):
-        """Join the parts through their generalised scattering matrices (beam).
+        """Join the parts through their CSC-BEAM matrices (beam).
 
-        Every copy of a part is joined with the S~ of its part, solved with
+        Every copy of a part is joined with the S~_CSC of its part, solved with
         the beams where they run through it (in the part's own frame).  A copy
         placed at z_i along the axis sees the beam's phase exp(-j k_b z_i):
         its beam columns get that factor and its path rows exp(+j k_b z_i)
-        (docs/theory/beam.md §9.9); the beam voltages of the copies add.
+        (docs/theory/beam.md §9.10); the beam voltages of the copies add.
         Ports are joined as for the reduced models (the faces that face each
         other, checked mode by mode).  The result is saved in
         ``fds/foms/concat/``.
@@ -2293,7 +2295,7 @@ class NetlistFOMs:
             pairs += [(concat.port_mode_map[(sa, pa, m)], concat.port_mode_map[(sb, pb, m)])
                       for m in range(n)]
         external = list(concat._external_port_modes)
-        St = _beam.join_s_tilde(blocks, block_modes, pairs, external, col_phase, row_phase)
+        St = _beam.join_s_csc(blocks, block_modes, pairs, external, col_phase, row_phase)
 
         labels, numbers = [], {}
         ext = [concat._global_to_local[g] for g in external]
@@ -2301,7 +2303,7 @@ class NetlistFOMs:
             n = numbers.setdefault((s_idx, port), len(numbers) + 1)
             labels.append(f"{n}({m + 1})")
         Zref = np.array([np.diag([lookups[s](p, m, f) for (s, p, m) in ext]) for f in freqs])
-        Zt = _beam.z_tilde_from_s_tilde(St, Zref)
+        Zt = _beam.z_tilde_from_s_csc(St, Zref)
         rows = labels + setup.path_labels
         cols = labels + setup.source_labels
         n_ext = len(ext)
@@ -2309,7 +2311,7 @@ class NetlistFOMs:
         concat._S_matrix = St[:, :n_ext, :n_ext].copy()
         concat._Z_matrix = Zt[:, :n_ext, :n_ext].copy()
         concat._beam = {
-            'S_tilde': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
+            'S_csc': St, 'Z_tilde': Zt, 'zref': np.diagonal(Zref, axis1=1, axis2=2).copy(),
             'rows': rows, 'cols': cols, 'frequencies': freqs,
             'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
             'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),

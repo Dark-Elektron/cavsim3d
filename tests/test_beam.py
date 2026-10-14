@@ -28,6 +28,7 @@ import pytest
 from cavsim3d.core.em_project import EMProject
 from cavsim3d.core.constants import eps0
 from cavsim3d.geometry.base import BaseGeometry
+from cavsim3d.solvers import beam as bm
 from cavsim3d.solvers import sweep_checkpoint as sc
 from cavsim3d.solvers.beam import BeamLine, BeamSetup
 from netgen.occ import Box, Glue, Pnt
@@ -199,7 +200,7 @@ def test_uniform_guide_beam_field_is_the_pipes(tmp_path):
     p.add_beam('off', x=0.03, y=0.02)
     res = p.fds.solve(**dict(CFG, nsamples=1, order=3))
     fom = p.fds.fom
-    St = res['S_tilde']
+    St = res['S_csc']
     assert St.shape == (1, 4, 4)
     assert np.all(np.abs(fom.beam_impedance('on')) < 2e-3)      # measured 4e-4 Ohm
     assert np.all(np.abs(fom.beam_impedance('off')) < 5e-3)     # measured 2e-3 Ohm
@@ -267,7 +268,7 @@ def test_glued_parts_joined_match_one_piece(tmp_path):
     assert pa.fds.internal_ports == ['port3']
     assert all(f.has_beam for f in pa.fds.foms)
     joined = pa.fds.foms.concatenate()
-    assert joined.has_beam and joined.s_tilde.shape == (2, 7, 7)
+    assert joined.has_beam and joined.s_csc.shape == (2, 7, 7)
 
     pb = EMProject(name="one", base_dir=str(tmp_path), overwrite=True)
     pb.geometry = StepGuide()
@@ -287,7 +288,7 @@ def test_glued_parts_joined_match_one_piece(tmp_path):
 
     # the join is restored when the project is reopened
     pc = EMProject(name="parts", base_dir=str(tmp_path))
-    np.testing.assert_allclose(pc.fds.foms.concat.s_tilde, joined.s_tilde, rtol=1e-10)
+    np.testing.assert_allclose(pc.fds.foms.concat.s_csc, joined.s_csc, rtol=1e-10)
 
 
 def test_coupled_copies_join_like_one_piece(tmp_path):
@@ -298,14 +299,14 @@ def test_coupled_copies_join_like_one_piece(tmp_path):
     one.geometry = CellChain(n=2)
     one.add_beam('beam', **CELL_BEAM)
     one.fds.solve(**CELL_CFG)
-    ref = one.fds.fom.s_tilde
+    ref = one.fds.fom.s_csc
 
     chain = EMProject(name="chain", base_dir=str(tmp_path), overwrite=True)
     chain.add("cell", CellChain(n=1), n=2)
     chain.add_beam('beam', **CELL_BEAM)
     chain.fds.solve(**CELL_CFG)
     joined = chain.fds.foms.concatenate()
-    St = joined.s_tilde
+    St = joined.s_csc
     assert St.shape == ref.shape == (3, 3, 3)
     assert joined.tilde_labels == (['1(1)', '2(1)', 'b(1)'], ['1(1)', '2(1)', 'b(1)'])
     assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                     # measured 2.6e-3
@@ -314,8 +315,8 @@ def test_coupled_copies_join_like_one_piece(tmp_path):
         assert np.abs(St[block] - ref[block]).max() < 6e-2 * np.abs(ref[block]).max()
     # the joined model is saved, and the parts' beam files are in the flat tree
     root = tmp_path / "chain"
-    assert (root / "fds" / "foms" / "s_tilde" / "s_tilde_cell.h5").exists()
-    assert (root / "fds" / "foms" / "concat" / "s_tilde" / "s_tilde.h5").exists()
+    assert (root / "fds" / "foms" / "s_csc" / "s_csc_cell.h5").exists()
+    assert (root / "fds" / "foms" / "concat" / "s_csc" / "s_csc.h5").exists()
     with pytest.raises(RuntimeError, match="full-order"):
         joined.solve(fmin=2.6, fmax=3.4, nsamples=5)
 
@@ -334,18 +335,18 @@ def test_imported_part_gets_its_beam_columns_here(tmp_path):
     live.add("cell", CellChain(n=1), n=2)
     live.add_beam('beam', **CELL_BEAM)
     live.fds.solve(**CELL_CFG)
-    expected = live.fds.foms.concatenate().s_tilde
+    expected = live.fds.foms.concatenate().s_csc
 
     for mode in ('reference', 'copy'):
         p = EMProject(name=f"imp_{mode}", base_dir=str(tmp_path), overwrite=True)
         p.import_project(tmp_path / "cell", name="cell", n=2, mode=mode)
         p.add_beam('beam', **CELL_BEAM)
         p.fds.solve(**CELL_CFG)
-        assert np.abs(p.fds.foms.concatenate().s_tilde - expected).max() < 1e-9
-        assert (tmp_path / f"imp_{mode}" / "fds" / "foms" / "s_tilde" / "s_tilde_cell.h5").exists()
+        assert np.abs(p.fds.foms.concatenate().s_csc - expected).max() < 1e-9
+        assert (tmp_path / f"imp_{mode}" / "fds" / "foms" / "s_csc" / "s_csc_cell.h5").exists()
         assert _tree_hash(tmp_path / "cell") == before
         reopened = EMProject(name=f"imp_{mode}", base_dir=str(tmp_path))
-        assert np.abs(reopened.fds.foms.concat.s_tilde - expected).max() < 1e-9
+        assert np.abs(reopened.fds.foms.concat.s_csc - expected).max() < 1e-9
 
 
 def test_coupled_beam_removed_and_added_again(tmp_path):
@@ -355,7 +356,7 @@ def test_coupled_beam_removed_and_added_again(tmp_path):
     chain.add("cell", CellChain(n=1), n=2)
     chain.add_beam('beam', **CELL_BEAM)
     chain.fds.solve(**CELL_CFG)
-    first = chain.fds.foms.concatenate().s_tilde
+    first = chain.fds.foms.concatenate().s_csc
     root = tmp_path / "chain"
     s_before = (root / "fds" / "foms" / "s" / "s_cell.h5").read_bytes()
 
@@ -369,7 +370,7 @@ def test_coupled_beam_removed_and_added_again(tmp_path):
 
     chain.add_beam('beam', **CELL_BEAM)
     chain.fds.solve(**CELL_CFG)
-    assert np.abs(chain.fds.foms.concatenate().s_tilde - first).max() < 1e-9
+    assert np.abs(chain.fds.foms.concatenate().s_csc - first).max() < 1e-9
 
 
 def test_side_port_the_beam_does_not_cross(tmp_path):
@@ -402,7 +403,7 @@ def test_no_beam_bit_identical_and_added_later(tmp_path):
     ra = with_beam.fds.solve(**CFG)
     later = _guide(tmp_path, "later", beam=False)
     r0 = later.fds.solve(**CFG)
-    assert 'S_tilde' not in r0 and not later.fds.fom.has_beam
+    assert 'S_csc' not in r0 and not later.fds.fom.has_beam
     # the port results do not depend on the beam
     np.testing.assert_array_equal(ra['S'], r0['S'])
     np.testing.assert_array_equal(ra['Z'], r0['Z'])
@@ -412,7 +413,7 @@ def test_no_beam_bit_identical_and_added_later(tmp_path):
     rb = later.fds.solve(**CFG)          # only the beam columns are solved
     np.testing.assert_array_equal(rb['S'], S0)
     np.testing.assert_array_equal(rb['Z'], Z0)
-    np.testing.assert_allclose(rb['S_tilde'], ra['S_tilde'], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(rb['S_csc'], ra['S_csc'], rtol=1e-9, atol=1e-12)
 
     # reopened, then a beam: the same
     plain = _guide(tmp_path, "plain", beam=False)
@@ -420,7 +421,7 @@ def test_no_beam_bit_identical_and_added_later(tmp_path):
     reopened = EMProject(name="plain", base_dir=str(tmp_path))
     reopened.add_beam('beam', x=0.05, y=0.025)
     rc = reopened.fds.solve(**CFG)
-    np.testing.assert_allclose(rc['S_tilde'], ra['S_tilde'], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(rc['S_csc'], ra['S_csc'], rtol=1e-9, atol=1e-12)
 
 
 def test_files_reopen_and_remove(tmp_path):
@@ -428,16 +429,16 @@ def test_files_reopen_and_remove(tmp_path):
     p.fds.solve(**CFG)
     root = tmp_path / "files"
     fom = root / "fds" / "fom"
-    for f in ("z_tilde/z_tilde_global.h5", "s_tilde/s_tilde_global.h5",
+    for f in ("z_tilde/z_tilde_global.h5", "s_csc/s_csc_global.h5",
               "snapshots_beam/snapshots_beam_global.h5", "matrices/beam_global.h5"):
         assert (fom / f).exists(), f
     assert (root / "fds" / "port_modes" / "beam_port_fields.pkl").exists()
     assert json.loads((root / "project.json").read_text())["beam"]["lines"][0]["name"] == 'beam'
-    St = p.fds.fom.s_tilde
+    St = p.fds.fom.s_csc
 
     q = EMProject(name="files", base_dir=str(tmp_path))
     assert list(q.beams) == ['beam']
-    np.testing.assert_array_equal(q.fds.fom.s_tilde, St)
+    np.testing.assert_array_equal(q.fds.fom.s_csc, St)
     assert q.fds.fom.tilde_labels == (['1(1)', '2(1)', 'b(1)'], ['1(1)', '2(1)', 'b(1)'])
     q.fds.solve(**CFG)                                  # same request: nothing to do
     assert q.fds.fom.has_beam
@@ -445,18 +446,61 @@ def test_files_reopen_and_remove(tmp_path):
     S_ports = q.fds.fom._S_matrix.copy()
     q.remove_beam('beam')
     r = q.fds.solve(**CFG)                              # beam results dropped
-    assert 'S_tilde' not in r and not q.fds.fom.has_beam
+    assert 'S_csc' not in r and not q.fds.fom.has_beam
     np.testing.assert_array_equal(r['S'], S_ports)
-    assert not any((fom / d).exists() for d in ("z_tilde", "s_tilde", "snapshots_beam"))
+    assert not any((fom / d).exists() for d in ("z_tilde", "s_csc", "s_tilde", "snapshots_beam"))
     assert not (fom / "matrices" / "beam_global.h5").exists()
     assert not (root / "fds" / "port_modes" / "beam_port_fields.pkl").exists()
+
+
+def test_generalised_matrices_of_a_solve(tmp_path):
+    """Z~ assembled, S~_CSC, S~ and Y~ converted from it (docs/theory/beam_conversions.md);
+    a project saved with S~_CSC in s_tilde/ (older versions) still opens."""
+    p = EMProject(name="gen", base_dir=str(tmp_path), overwrite=True)
+    geo = SlabGuide()
+    geo.set_materials({'slab': {'eps_r': 4.0, 'tan_delta': 0.5}})
+    p.geometry = geo
+    p.add_beam('beam', x=0.025, y=0.015)
+    cfg = dict(fmin=2.0, fmax=3.0, nsamples=2, nportmodes=1, order=2, solver_type='direct')
+    res = p.fds.solve(**cfg)
+    fom = p.fds.fom
+    zref = np.asarray(fom._beam['zref'])
+    Zref = zref[:, :, None] * np.eye(2)[None]
+    Zt, Sc = fom.z_tilde, fom.s_csc
+    np.testing.assert_allclose(Sc, bm.s_csc_from_z_tilde(Zt, Zref), rtol=1e-12)
+    np.testing.assert_allclose(fom.s_tilde, bm.s_tilde_from_z_tilde(Zt, Zref), rtol=1e-9, atol=1e-12)
+    J = np.diag([1.0, 1.0, -1.0])
+    np.testing.assert_allclose(fom.y_tilde @ (J @ Zt), np.broadcast_to(np.eye(3), Zt.shape),
+                               atol=1e-9)
+    for key in ('Z_tilde', 'S_csc', 'S_tilde', 'Y_tilde'):
+        assert res[key].shape == (2, 3, 3), key
+    np.testing.assert_allclose(res['S_tilde'], fom.s_tilde)
+    # the beam entry: the matched beam impedance against R_b = eta_0, lossy: |s_bb| < 1
+    zpar = fom.beam_impedance()
+    np.testing.assert_allclose(fom.s_tilde_dict['b(1)b(1)'],
+                               (zpar - bm.BEAM_ZREF) / (zpar + bm.BEAM_ZREF), rtol=1e-9)
+    assert np.all(zpar.real > 0) and np.all(np.abs(fom.s_tilde[:, 2, 2]) < 1)
+    fom.beam_zref = 50.0
+    np.testing.assert_allclose(bm.z_tilde_from_s_tilde(fom.s_tilde, Zref, 50.0), Zt,
+                               rtol=1e-8, atol=1e-8 * np.abs(Zt).max())
+    del fom.beam_zref
+
+    # S~_CSC saved by an older version, in s_tilde/
+    folder = tmp_path / "gen" / "fds" / "fom"
+    (folder / "s_csc").rename(folder / "s_tilde")
+    (folder / "s_tilde" / "s_csc_global.h5").rename(folder / "s_tilde" / "s_tilde_global.h5")
+    q = EMProject(name="gen", base_dir=str(tmp_path))
+    np.testing.assert_array_equal(q.fds.fom.s_csc, Sc)
+    np.testing.assert_allclose(q.fds.fom.s_tilde, fom.s_tilde, rtol=1e-12)
+    q.fds.solve(**dict(cfg, rerun=True))                # saved again: today's folder only
+    assert (folder / "s_csc" / "s_csc_global.h5").exists() and not (folder / "s_tilde").exists()
 
 
 def test_direct_and_iterative_beam_columns_agree(tmp_path):
     rd = _guide(tmp_path, "direct").fds.solve(**CFG)
     ri = _guide(tmp_path, "iterative").fds.solve(**dict(CFG, solver_type='iterative'))
-    scale = np.abs(rd['S_tilde']).max()
-    np.testing.assert_allclose(ri['S_tilde'], rd['S_tilde'], atol=1e-6 * scale)
+    scale = np.abs(rd['S_csc']).max()
+    np.testing.assert_allclose(ri['S_csc'], rd['S_csc'], atol=1e-6 * scale)
 
 
 # --------------------------------------------------------------------------- #
@@ -481,11 +525,11 @@ def test_beam_definition_and_labels(tmp_path):
     rows, cols = fom.tilde_labels
     assert rows == ['1(1)', '2(1)', 'b(1)', 'b(2)'] and cols == ['1(1)', '2(1)', 'b(1)']
     assert fom.beam_names == {'b(1)': 'beam', 'b(2)': 'probe'}
-    d = fom.s_tilde_dict
-    np.testing.assert_array_equal(d['b(1)b(1)'], fom.s_tilde[:, 2, 2])     # z_b
-    np.testing.assert_array_equal(d['b(1)2(1)'], fom.s_tilde[:, 1, 2])     # k: beam -> port 2
-    np.testing.assert_array_equal(d['1(1)b(2)'], fom.s_tilde[:, 3, 0])     # h: port 1 -> probe
-    np.testing.assert_array_equal(fom.beam_impedance(), -fom.s_tilde[:, 2, 2])
+    d = fom.s_csc_dict
+    np.testing.assert_array_equal(d['b(1)b(1)'], fom.s_csc[:, 2, 2])     # z_b
+    np.testing.assert_array_equal(d['b(1)2(1)'], fom.s_csc[:, 1, 2])     # k: beam -> port 2
+    np.testing.assert_array_equal(d['1(1)b(2)'], fom.s_csc[:, 3, 0])     # h: port 1 -> probe
+    np.testing.assert_array_equal(fom.beam_impedance(), -fom.s_csc[:, 2, 2])
     np.testing.assert_array_equal(fom.beam_impedance('beam', path='probe'),
                                   fom.beam_impedance('b(1)', path='b(2)'))
     with pytest.raises(KeyError, match="no beam"):
@@ -561,7 +605,7 @@ def test_interrupted_beam_sweep_resumes(tmp_path, monkeypatch):
     monkeypatch.setattr(sc.SweepCheckpoint, "write", counting)
     res = p.fds.solve(**cfg)
     assert computed[0] == 2                              # only the missing samples
-    np.testing.assert_allclose(res['S_tilde'], ref['S_tilde'], rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(res['S_csc'], ref['S_csc'], rtol=1e-12, atol=1e-14)
 
     # a different beam: the samples of the old one are not reused
     q = _guide(tmp_path, "moved")

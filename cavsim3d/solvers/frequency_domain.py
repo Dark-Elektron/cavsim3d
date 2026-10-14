@@ -1062,9 +1062,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
     def _imported_tilde_fits(self, base: str, comp, beam, cfg: Dict) -> bool:
         """True if the beam results of an imported part answer the request: the
-        S~ in this project's flat tree (computed here, or copied with the part)
-        or, for a part referenced in place, its own -- for these beams and the
-        requested frequencies."""
+        S~_CSC in this project's flat tree (computed here, or copied with the
+        part) or, for a part referenced in place, its own -- for these beams and
+        the requested frequencies."""
         from cavsim3d.solvers import beam as bm
         from cavsim3d.solvers import netlist_persistence as npz
         want = np.linspace(cfg['fmin'], cfg['fmax'], int(cfg['nsamples'])) * 1e9
@@ -1078,7 +1078,7 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                         and np.allclose(t['frequencies'], want, rtol=1e-9, atol=0))
 
         root = Path(self._project_path)
-        if fits(root / "fds" / "foms" / "s_tilde" / f"s_tilde_{base}.h5"):
+        if fits(bm.find_csc_file(root / "fds" / "foms", base)):
             return True
         src = Path(getattr(comp, 'project_path', comp))
         return (getattr(comp, 'mode', 'copy') == 'reference' and src.exists()
@@ -3925,10 +3925,12 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
     def _compute_beam_tilde(self, compute_s_params: bool) -> None:
         """Generalised matrices of every system solved with a beam.
 
-        Z~ = [[Z, k_Z], [h_Z, z_oc]] in the normalisation of the reported Z;
-        S~ = [[S, k], [h, z_b]] with the same reference impedances as S.  TEM
+        Assembles Z~ = [[Z, k_Z], [h_Z, z_oc]] in the normalisation of the
+        reported Z and converts it to S~_CSC = [[S, k], [h, z_b]] with the
+        same reference impedances as S (docs/theory/beam_conversions.md).  TEM
         ports are rescaled to the line reference exactly as Z is
-        (k_Z -> D k_Z, h_Z -> h_Z D); S~ does not depend on that scaling.
+        (k_Z -> D k_Z, h_Z -> h_Z D); S~_CSC does not depend on that scaling.
+        S~ and Y~ are converted from these when read.
         """
         from cavsim3d.solvers import beam as bm
         setup = self.beam_setup
@@ -3947,11 +3949,11 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     kZ = d[None, :, None] * kZ
                     hZ = hZ * d[None, None, :]
                 Zt = bm.z_tilde(Z, kZ, hZ, zoc)
-                St = None
+                Sc = None
                 zref = None
                 if compute_s_params:
                     Zref = np.array([self._get_impedance_matrix(f) for f in self.frequencies])
-                    St = bm.s_tilde(Z, kZ, hZ, zoc, Zref)
+                    Sc = bm.s_csc_from_z_tilde(Zt, Zref)
                     zref = np.array([np.diag(z) for z in Zref])
                 port_modes = ([(str(p), int(m)) for p, m in self._port_mode_order]
                               if self._port_mode_order and len(self._port_mode_order) == n
@@ -3961,9 +3963,9 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                 Z = self._domain_dict_to_matrix(key, self._Z_per_domain[key])
                 labels = [f"{pi + 1}({m + 1})" for (pi, _pn, m) in order]
                 # the per-domain Z is reported in the modes' own normalisation;
-                # S~ uses the line reference of TEM ports, as the per-domain S
+                # S~_CSC uses the line reference of TEM ports, as the per-domain S
                 Zt = bm.z_tilde(Z, kZ, hZ, zoc)
-                St = None
+                Sc = None
                 zref = None
                 port_modes = [(str(pn), int(m)) for (_pi, pn, m) in order]
                 if compute_s_params:
@@ -3978,15 +3980,15 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
                     Zref = np.array([np.diag([self._get_port_impedance(pn, m, f)
                                               for (_pi, pn, m) in order])
                                      for f in self.frequencies])
-                    St = bm.s_tilde(Zs, d[None, :, None] * kZ, hZ * d[None, None, :], zoc,
-                                    Zref)
+                    Sc = bm.s_csc_from_z_tilde(
+                        bm.z_tilde(Zs, d[None, :, None] * kZ, hZ * d[None, None, :], zoc), Zref)
                     zref = np.array([np.diag(z) for z in Zref])
             rows, cols = bm.matrix_labels(labels, setup)
             system = self._beam_systems.get(key)
             ports = list(dict.fromkeys(p for p, _m in (port_modes or [])))
             port_records, fingerprints = self._port_join_records(ports)
             self._beam_tilde[key] = {
-                'Z_tilde': Zt, 'S_tilde': St, 'rows': rows, 'cols': cols,
+                'Z_tilde': Zt, 'S_csc': Sc, 'rows': rows, 'cols': cols,
                 'frequencies': np.asarray(self.frequencies).copy(),
                 'names': {lab: line.name for lab, line in zip(setup.path_labels, setup.paths)},
                 'setup': setup.to_dict(), 'fingerprint': setup.fingerprint(),
@@ -4175,16 +4177,14 @@ class FrequencyDomainSolver(BaseEMSolver, FDSEigenMixin):
 
         # Beam: generalised matrices (with labels) per system
         if self._beam_tilde:
+            from cavsim3d.solvers import beam as bm
             if 'global' in self._beam_tilde and global_method is not None:
-                t = self._beam_tilde['global']
-                results['Z_tilde'] = t['Z_tilde']
-                results['S_tilde'] = t['S_tilde'] if compute_s_params else None
-                results['tilde_labels'] = (t['rows'], t['cols'])
+                results.update(bm.results_entries(self._beam_tilde['global']))
             if per_domain:
                 results['Z_tilde_per_domain'] = {
                     d: t['Z_tilde'] for d, t in self._beam_tilde.items() if d != 'global'}
-                results['S_tilde_per_domain'] = {
-                    d: t['S_tilde'] for d, t in self._beam_tilde.items() if d != 'global'}
+                results['S_csc_per_domain'] = {
+                    d: t['S_csc'] for d, t in self._beam_tilde.items() if d != 'global'}
 
         # Snapshots
         results['snapshots'] = self.snapshots.copy()

@@ -35,8 +35,10 @@ import numpy as np
 FOM_MATS = ("K", "M", "B", "C", "D")   # C, D only exist for lossy sections
 ROM_MATS = ("A_r", "B_r", "W", "Q_L_inv", "C_r", "D_r")
 RESULT_DIRS = ("s", "z", "eigenmodes", "snapshots")
-# with a beam: the generalised matrices, the beam's own field and its data
-BEAM_DIRS = ("z_tilde", "s_tilde", "snapshots_beam")
+# with a beam: the generalised matrices Z~ and S~_CSC, the beam's own field
+# and its data (s_tilde/ holds the S~_CSC of an older version)
+BEAM_DIRS = ("z_tilde", "s_csc", "snapshots_beam")
+LEGACY_BEAM_DIRS = {"s_tilde": "s_csc"}
 
 # The solve options that decide a section's full-order results: a section
 # staged with the same values (and the same geometry) is reused, not re-solved.
@@ -86,6 +88,18 @@ def _pick(folder: Path, base: str, src_domain: str) -> Optional[Path]:
         if f.exists():
             return f
     return None
+
+
+def _copy_legacy_beam_dirs(src_root: Path, dst_root: Path, src_domain: str,
+                           domain: str) -> None:
+    """Copy the beam files an older version saved under another folder name
+    (``s_tilde/``: S~_CSC) to the folder of today's name, renamed to ``domain``,
+    unless the source also has them under that name."""
+    for old, new in LEGACY_BEAM_DIRS.items():
+        f = src_root / old / f"{old}_{src_domain}.h5"
+        if f.exists() and not (src_root / new / f"{new}_{src_domain}.h5").exists():
+            (dst_root / new).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst_root / new / f"{new}_{domain}.h5")
 
 
 def _copy_result_dir(src: Path, dst: Path, src_domain: str, domain: str) -> None:
@@ -159,6 +173,7 @@ def stage_fom(source_project: Path, domain: str, project_root: Path) -> None:
             shutil.copy2(f, foms_dir / "matrices" / f"{base}_{domain}.h5")
     for rd in RESULT_DIRS + BEAM_DIRS:
         _copy_result_dir(fom / rd, foms_dir / rd, src_domain, domain)
+    _copy_legacy_beam_dirs(fom, foms_dir, src_domain, domain)
 
     _stage_mesh(source_project, domain, project_root)
     _stage_geometry(source_project, domain, project_root)
@@ -189,6 +204,7 @@ def stage_rom(source_project: Path, domain: str, project_root: Path) -> dict:
             dst.unlink()                     # of an earlier staging
     for rd in RESULT_DIRS + BEAM_DIRS:
         _copy_result_dir(rom / rd, roms_dir / rd, src_domain, domain)
+    _copy_legacy_beam_dirs(rom, roms_dir, src_domain, domain)
 
     # Fold shared metadata INTO the structure entry, rekeyed to this domain.
     sm["domain"] = domain
@@ -353,19 +369,19 @@ def read_imports(project_root: Path) -> dict:
 def remove_section_beam_files(project_root: Path, domain: str) -> None:
     """Delete a section's beam results from the flat ``fds/foms`` tree."""
     foms = Path(project_root) / "fds" / "foms"
-    for f in [foms / d / f"{d}_{domain}.h5" for d in BEAM_DIRS] +              [foms / "matrices" / f"beam_{domain}.h5"]:
+    for f in [foms / d / f"{d}_{domain}.h5" for d in BEAM_DIRS + tuple(LEGACY_BEAM_DIRS)] +              [foms / "matrices" / f"beam_{domain}.h5"]:
         if f.exists():
             f.unlink()
 
 
 def source_tilde_file(project: Path) -> Optional[Path]:
-    """The S~ file (beam results) of a single-section project, or None."""
+    """The S~_CSC file (beam results) of a single-section project, or None."""
     try:
         fom = find_fom_dir(Path(project))
     except FileNotFoundError:
         return None
-    f = fom / "s_tilde" / f"s_tilde_{_source_domain(fom)}.h5"
-    return f if f.exists() else None
+    from cavsim3d.solvers.beam import find_csc_file
+    return find_csc_file(fom, _source_domain(fom))
 
 
 def has_field_snapshots(project: Path) -> bool:

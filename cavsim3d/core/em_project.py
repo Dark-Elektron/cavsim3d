@@ -412,7 +412,7 @@ class EMProject:
     #
     # A beam is a line current of 1 A travelling along +main_axis at the speed
     # of light; the solve adds one column per beam and one row per voltage
-    # path to the generalised matrices s_tilde / z_tilde.  Every beam is also a
+    # path to the generalised matrices z_tilde / s_csc.  Every beam is also a
     # path; add_beam_path adds paths without current.  The same name replaces.
 
     def _beam_point(self, where: str, **position) -> tuple:
@@ -442,7 +442,7 @@ class EMProject:
         metres (``x=``, ``y=`` for the default main axis Z); left out, they
         are 0 (the axis).  A beam of the same name is replaced.  ``beta`` must
         be 1 for now.  The next ``proj.fds.solve()`` adds the beam's column
-        and its voltage row to ``s_tilde`` / ``z_tilde`` (labels ``b(1)``,
+        and its voltage row to ``z_tilde`` / ``s_csc`` (labels ``b(1)``,
         ...); ``fom.beam_impedance(name)`` gives Z_par.  Returns the beam.
 
         >>> proj.add_beam('beam')                 # on the axis
@@ -488,8 +488,8 @@ class EMProject:
     def add_beam_path(self, name: str, *, beta: float = 1.0, **position):
         """Add a voltage path: a line along ``main_axis`` without current.
 
-        Its voltage v = int E_a exp(j k_b s) ds adds a row to ``s_tilde`` /
-        ``z_tilde`` (e.g. to read the field of a beam away from its own
+        Its voltage v = int E_a exp(j k_b s) ds adds a row to ``z_tilde`` /
+        ``s_csc`` (e.g. to read the field of a beam away from its own
         line).  Position keywords as in :meth:`add_beam`.  Returns the path.
         """
         from cavsim3d.solvers.beam import BeamLine

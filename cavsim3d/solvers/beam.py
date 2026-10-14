@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -895,11 +896,24 @@ def _sparse_columns(cols, rel_tol: float = 1e-15) -> sp.csc_matrix:
 
 
 # =============================================================================
-# Generalised matrices
+# Generalised matrices (docs/theory/beam.md §9.7-9.9) and their conversions
+# (docs/theory/beam_conversions.md)
 # =============================================================================
+#
+# The solve assembles Z~, whose inputs are the currents the field equations
+# prescribe; every other matrix is a conversion of it.  Z~ and S~_CSC have a
+# row per voltage path (the beams first, then the paths without current) and
+# a column per beam; S~ and Y~ are square, over the port modes and the beams.
+# In S~ and Y~ the beam is a port with the voltage u = -v (J = diag(1, -1)).
+
+#: reference impedance R_b [Ohm] of a beam's waves in S~: eta_b = 1/(v_b eps_b),
+#: the E/H ratio of the beam's own field -- eta_0 for beta = 1 in vacuum
+BEAM_ZREF = float(mu0 * c0)
+
 
 def z_tilde(Z: np.ndarray, kZ: np.ndarray, hZ: np.ndarray, zoc: np.ndarray) -> np.ndarray:
-    """[[Z, k_Z], [h_Z, z_oc]] per frequency."""
+    """Z~ = [[Z, k_Z], [h_Z, z_oc]] per frequency (§9.7): port and beam
+    voltages per port and beam current, every port mode open."""
     n_f, P = Z.shape[0], Z.shape[1]
     L, S = zoc.shape[1], zoc.shape[2]
     out = np.zeros((n_f, P + L, P + S), dtype=complex)
@@ -910,19 +924,26 @@ def z_tilde(Z: np.ndarray, kZ: np.ndarray, hZ: np.ndarray, zoc: np.ndarray) -> n
     return out
 
 
-def s_tilde(Z: np.ndarray, kZ: np.ndarray, hZ: np.ndarray, zoc: np.ndarray,
-            Zref: np.ndarray) -> np.ndarray:
-    """[[S, k], [h, z_b]] per frequency (docs/theory/beam.md §9.8).
+def n_port_modes(labels: Sequence[str]) -> int:
+    """Number of port modes among the row or column labels of a generalised
+    matrix (the beams and paths are 'b(1)', 'b(2)', ...)."""
+    return sum(1 for lab in labels if not str(lab).startswith('b('))
 
-    ``Zref`` (n_f, P, P) is the diagonal reference impedance of the port modes:
+
+def s_csc_from_z_tilde(Zt: np.ndarray, Zref: np.ndarray) -> np.ndarray:
+    """S~_CSC = [[S, k], [h, z_b]] from Z~ (§10.5): the port modes get waves,
+    the beam keeps its current and voltage.
+
+    ``Zref`` (n_f, P, P) is the diagonal reference impedance of the P port modes:
     S = Zref^1/2 (Z + Zref)^-1 (Z - Zref) Zref^-1/2,  k = Zref^1/2 (Z + Zref)^-1 k_Z,
     h = 2 h_Z (Z + Zref)^-1 Zref^1/2,  z_b = z_oc - h_Z (Z + Zref)^-1 k_Z.
     """
-    n_f, P = Z.shape[0], Z.shape[1]
-    L, S = zoc.shape[1], zoc.shape[2]
-    out = np.zeros((n_f, P + L, P + S), dtype=complex)
-    if not n_f:
+    Zt = np.asarray(Zt, dtype=complex)
+    out = np.zeros_like(Zt)
+    if not Zt.shape[0]:
         return out
+    P = Zref.shape[1]
+    Z, kZ, hZ, zoc = Zt[:, :P, :P], Zt[:, :P, P:], Zt[:, P:, :P], Zt[:, P:, P:]
     z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)          # (n_f, P)
     sq, isq = np.sqrt(z0), 1.0 / np.sqrt(z0)
     Zdiag = z0[:, :, None] * np.eye(P)[None]
@@ -935,9 +956,156 @@ def s_tilde(Z: np.ndarray, kZ: np.ndarray, hZ: np.ndarray, zoc: np.ndarray,
     return out
 
 
-def _stacked_inv(A: np.ndarray) -> np.ndarray:
-    """Inverses of a stack of matrices (n, P, P); the pseudo-inverse of any
-    that is singular."""
+def z_tilde_from_s_csc(Sc: np.ndarray, Zref: np.ndarray) -> np.ndarray:
+    """Z~ from S~_CSC (§10.5, inverse of :func:`s_csc_from_z_tilde`): with
+    A = Z + Zref, Z from S as for the ports, k_Z = A Zref^-1/2 k,
+    h_Z = h Zref^-1/2 A / 2, z_oc = z_b + h Zref^-1/2 A Zref^-1/2 k / 2."""
+    Sc = np.asarray(Sc, dtype=complex)
+    P = Zref.shape[1]
+    out = np.zeros_like(Sc, dtype=complex)
+    if not Sc.shape[0]:
+        return out
+    z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)          # (n_f, P)
+    sq, isq = np.sqrt(z0), 1.0 / np.sqrt(z0)
+    I = np.eye(P)
+    with small_dense_blas():
+        # Z = Zref^1/2 (I - S)^-1 (I + S) Zref^1/2: S is referred to Zref
+        S = Sc[:, :P, :P]
+        Z = sq[:, :, None] * (_stacked_inv(I[None] - S) @ (I[None] + S)) * sq[:, None, :]
+        A = Z + z0[:, :, None] * I[None]
+        k, h, zb = Sc[:, :P, P:], Sc[:, P:, :P], Sc[:, P:, P:]
+        Ak = A @ (isq[:, :, None] * k)                                 # A Zref^-1/2 k
+        out[:, :P, :P] = Z
+        out[:, :P, P:] = Ak
+        out[:, P:, :P] = 0.5 * (h * isq[:, None, :]) @ A
+        out[:, P:, P:] = zb + 0.5 * (h * isq[:, None, :]) @ Ak
+    return out
+
+
+def _signs(n_ports: int, n_beams: int) -> np.ndarray:
+    """Diagonal of J: +1 for the port modes, -1 for the beams (u = -v)."""
+    return np.concatenate([np.ones(n_ports), -np.ones(n_beams)])
+
+
+def y_tilde_from_z_tilde(Zt: np.ndarray, n_ports: int) -> np.ndarray:
+    """Y~ = (J Z~)^-1 (§10.2): port and beam currents per port voltage and
+    beam port voltage u = -v, every port mode short-circuited.
+
+    Square, over the ``n_ports`` port modes and the beams (rows of paths
+    without current are left out).  NaN at a frequency where Z~ is singular:
+    a beam without impedance short-circuits its port.
+    """
+    Zt = np.asarray(Zt, dtype=complex)
+    n = Zt.shape[2]
+    JZ = _signs(n_ports, n - n_ports)[None, :, None] * Zt[:, :n, :]
+    with small_dense_blas():
+        return _stacked_inv(JZ, singular=np.nan)
+
+
+def z_tilde_from_y_tilde(Yt: np.ndarray, n_ports: int) -> np.ndarray:
+    """Z~ = J Y~^-1 (§10.2), over the port modes and the beams."""
+    Yt = np.asarray(Yt, dtype=complex)
+    with small_dense_blas():
+        inv = _stacked_inv(Yt, singular=np.nan)
+    return _signs(n_ports, Yt.shape[1] - n_ports)[None, :, None] * inv
+
+
+def _wave_references(Zref: np.ndarray, n_beams: int, zref_beam: float) -> np.ndarray:
+    """Diagonal of R~ = diag(Zref, R_b 1) per frequency, (n_f, P + S)."""
+    z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)
+    return np.concatenate([z0, np.full((z0.shape[0], n_beams), complex(zref_beam))], axis=1)
+
+
+def s_tilde_from_z_tilde(Zt: np.ndarray, Zref: np.ndarray,
+                         zref_beam: float = BEAM_ZREF) -> np.ndarray:
+    """S~ = 1 - 2 R~^1/2 (J Z~ + R~)^-1 R~^1/2 (§10.3), with
+    R~ = diag(Zref, R_b): every port, the beams included, with waves.
+
+    Dimensionless and square, over the port modes and the beams.  ``Zref``
+    (n_f, P, P) as for :func:`s_csc_from_z_tilde`; ``zref_beam`` is R_b [Ohm].
+    """
+    Zt = np.asarray(Zt, dtype=complex)
+    P, n = Zref.shape[1], Zt.shape[2]
+    r = _wave_references(Zref, n - P, zref_beam)
+    sq = np.sqrt(r)
+    E = np.eye(n)[None]
+    A = _signs(P, n - P)[None, :, None] * Zt[:, :n, :] + r[:, :, None] * E
+    with small_dense_blas():
+        return E - 2 * sq[:, :, None] * _stacked_inv(A) * sq[:, None, :]
+
+
+def z_tilde_from_s_tilde(St: np.ndarray, Zref: np.ndarray,
+                         zref_beam: float = BEAM_ZREF) -> np.ndarray:
+    """Z~ = J R~^1/2 (1 + S~)(1 - S~)^-1 R~^1/2 (§10.3, inverse of
+    :func:`s_tilde_from_z_tilde`), over the port modes and the beams."""
+    St = np.asarray(St, dtype=complex)
+    P, n = Zref.shape[1], St.shape[2]
+    sq = np.sqrt(_wave_references(Zref, n - P, zref_beam))
+    E = np.eye(n)[None]
+    with small_dense_blas():
+        z = (E + St) @ _stacked_inv(E - St)
+    return _signs(P, n - P)[None, :, None] * (sq[:, :, None] * z * sq[:, None, :])
+
+
+def s_tilde_from_s_csc(Sc: np.ndarray, n_ports: int,
+                       zref_beam: float = BEAM_ZREF) -> np.ndarray:
+    """S~ from S~_CSC (§10.6): the port waves stay, the beam's current and
+    voltage become waves, so no reference impedance of a port mode enters.
+
+    With Q = (R_b 1 - z_b)^-1:
+    S~ = [[S + k Q h, 2 R_b^1/2 k Q], [-R_b^1/2 Q h, -Q (R_b 1 + z_b)]].
+    Square, over the ``n_ports`` port modes and the beams.
+    """
+    Sc = np.asarray(Sc, dtype=complex)
+    P, n = n_ports, Sc.shape[2]
+    S, k, h, zb = Sc[:, :P, :P], Sc[:, :P, P:], Sc[:, P:n, :P], Sc[:, P:n, P:]
+    rb = complex(zref_beam)
+    E = np.eye(n - P)[None]
+    out = np.zeros((Sc.shape[0], n, n), dtype=complex)
+    with small_dense_blas():
+        Q = _stacked_inv(rb * E - zb)
+        out[:, :P, :P] = S + k @ Q @ h
+        out[:, :P, P:] = 2 * np.sqrt(rb) * (k @ Q)
+        out[:, P:, :P] = -np.sqrt(rb) * (Q @ h)
+        out[:, P:, P:] = -Q @ (rb * E + zb)
+    return out
+
+
+def s_csc_from_s_tilde(St: np.ndarray, n_ports: int,
+                       zref_beam: float = BEAM_ZREF) -> np.ndarray:
+    """S~_CSC from S~ (§10.6, inverse of :func:`s_tilde_from_s_csc`): with
+    W = (1 - S~_bb)^-1, S = S~_pp + S~_pb W S~_bp, k = R_b^1/2 S~_pb W,
+    h = -2 R_b^1/2 W S~_bp, z_b = -R_b W (1 + S~_bb)."""
+    St = np.asarray(St, dtype=complex)
+    P, n = n_ports, St.shape[2]
+    Spp, Spb, Sbp, Sbb = St[:, :P, :P], St[:, :P, P:], St[:, P:, :P], St[:, P:, P:]
+    rb = complex(zref_beam)
+    E = np.eye(n - P)[None]
+    out = np.zeros_like(St)
+    with small_dense_blas():
+        W = _stacked_inv(E - Sbb)
+        out[:, :P, :P] = Spp + Spb @ W @ Sbp
+        out[:, :P, P:] = np.sqrt(rb) * (Spb @ W)
+        out[:, P:, :P] = -2 * np.sqrt(rb) * (W @ Sbp)
+        out[:, P:, P:] = -rb * (W @ (E + Sbb))
+    return out
+
+
+def results_entries(tilde: Dict) -> Dict[str, Optional[np.ndarray]]:
+    """The generalised matrices of a beam result for a results dict:
+    ``Z_tilde``, ``S_csc`` (as stored), ``S_tilde`` and ``Y_tilde``
+    (converted, R_b = :data:`BEAM_ZREF`) and ``tilde_labels``."""
+    Zt, Sc = tilde.get('Z_tilde'), tilde.get('S_csc')
+    P = n_port_modes(tilde['cols'])
+    return {'Z_tilde': Zt, 'S_csc': Sc,
+            'S_tilde': s_tilde_from_s_csc(Sc, P) if Sc is not None else None,
+            'Y_tilde': y_tilde_from_z_tilde(Zt, P) if Zt is not None else None,
+            'tilde_labels': (list(tilde['rows']), list(tilde['cols']))}
+
+
+def _stacked_inv(A: np.ndarray, singular=None) -> np.ndarray:
+    """Inverses of a stack of matrices (n, P, P); for any that is singular,
+    the pseudo-inverse, or ``singular`` everywhere if that is given."""
     try:
         return np.linalg.inv(A)
     except np.linalg.LinAlgError:
@@ -946,7 +1114,7 @@ def _stacked_inv(A: np.ndarray) -> np.ndarray:
             try:
                 out[i] = np.linalg.inv(a)
             except np.linalg.LinAlgError:
-                out[i] = np.linalg.pinv(a)
+                out[i] = np.linalg.pinv(a) if singular is None else singular
         return out
 
 
@@ -970,11 +1138,51 @@ def labelled_dict(matrix: np.ndarray, rows: List[str], cols: List[str],
 # Stored results
 # =============================================================================
 
+#: folders of the saved generalised matrices: Z~ and S~_CSC (S~ and Y~ are
+#: converted from them when read).  Older versions saved S~_CSC in s_tilde/,
+#: which is read as such.
+TILDE_DIRS = {'Z': "z_tilde", 'CSC': "s_csc"}
+LEGACY_CSC_DIR = "s_tilde"
+_TILDE_KEYS = {'Z': 'Z_tilde', 'CSC': 'S_csc'}
+
+
+def tilde_file(folder, which: str, tag: Optional[str] = None) -> Path:
+    """Where the matrix ``which`` ('Z' or 'CSC') of section ``tag`` is saved
+    in ``folder`` (no ``tag``: the one matrix of a joined model)."""
+    d = TILDE_DIRS[which]
+    return Path(folder) / d / (f"{d}_{tag}.h5" if tag is not None else f"{d}.h5")
+
+
+def _legacy_csc_file(folder, tag: Optional[str] = None) -> Path:
+    d = LEGACY_CSC_DIR
+    return Path(folder) / d / (f"{d}_{tag}.h5" if tag is not None else f"{d}.h5")
+
+
+def find_csc_file(folder, tag: Optional[str] = None) -> Optional[Path]:
+    """The saved S~_CSC of section ``tag`` in ``folder``, also from the
+    s_tilde/ folder of an older version; None if there is none."""
+    for f in (tilde_file(folder, 'CSC', tag), _legacy_csc_file(folder, tag)):
+        if f.exists():
+            return f
+    return None
+
+
+def remove_legacy_csc(folder, tag: Optional[str] = None) -> None:
+    """Delete the s_tilde/ file an older version saved for section ``tag``
+    (and the folder, once empty)."""
+    f = _legacy_csc_file(folder, tag)
+    if f.exists():
+        f.unlink()
+    if f.parent.is_dir() and not any(f.parent.iterdir()):
+        f.parent.rmdir()
+
+
 def save_tilde(path, tilde: Dict, which: str) -> None:
-    """Write one generalised matrix (``which``: 'Z' or 'S') with its labels."""
+    """Write one generalised matrix (``which``: 'Z' for Z~, 'CSC' for S~_CSC)
+    with its labels."""
     import h5py
     from cavsim3d.core.persistence import H5Serializer
-    data = tilde.get(f'{which}_tilde')
+    data = tilde.get(_TILDE_KEYS[which])
     if data is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -997,7 +1205,7 @@ def save_tilde(path, tilde: Dict, which: str) -> None:
             f.attrs["ports"] = json.dumps(tilde['ports'], default=float)
         if tilde.get('fingerprints') is not None:
             f.attrs["mode_fingerprints"] = json.dumps(tilde['fingerprints'], default=float)
-        if which == 'S' and tilde.get('zref') is not None:
+        if which == 'CSC' and tilde.get('zref') is not None:
             f.create_dataset("zref", data=H5Serializer.to_complex_h5(np.asarray(tilde['zref'])))
 
 
@@ -1152,7 +1360,7 @@ def port_fields(system: "BeamSystem") -> Dict:
 # =============================================================================
 
 class _MatrixView:
-    """Minimal PlotMixin host for a labelled dict (plots of S~ and Z~)."""
+    """Minimal PlotMixin host for a labelled dict (plots of S~, S~_CSC and Z~)."""
 
     def __init__(self, frequencies, s_dict=None, z_dict=None):
         self.frequencies = frequencies
@@ -1183,12 +1391,18 @@ class _MatrixView:
 class BeamResultMixin:
     """Generalised matrices of a result solved with a beam.
 
-    The host sets ``self._beam`` to a dict with ``Z_tilde`` and/or
-    ``S_tilde`` (n_freqs, rows, cols), ``rows``, ``cols``, ``frequencies``
-    and ``names`` (label -> beam/path name).
+    The host sets ``self._beam`` to a dict with ``Z_tilde`` and/or ``S_csc``
+    (n_freqs, rows, cols), ``rows``, ``cols``, ``frequencies``, ``names``
+    (label -> beam/path name) and, with ``S_csc``, ``zref`` (the reference
+    impedance of every port mode per frequency).  S~ and Y~ are converted
+    from these when read (docs/theory/beam_conversions.md).
     """
 
     _beam: Optional[Dict] = None
+
+    #: reference impedance R_b [Ohm] of the beam's waves in :attr:`s_tilde`;
+    #: set it on a result to refer S~ to another value
+    beam_zref: float = BEAM_ZREF
 
     @property
     def has_beam(self) -> bool:
@@ -1203,27 +1417,56 @@ class BeamResultMixin:
         return b
 
     def _tilde(self, which: str) -> np.ndarray:
-        m = self._beam_data().get(f'{which}_tilde')
+        """The stored Z~ (``which='Z'``) or S~_CSC (``'CSC'``); Z~ of a model
+        that holds S~_CSC only (a joined model read back) is converted."""
+        b = self._beam_data()
+        m = b.get(_TILDE_KEYS[which])
+        if m is None and which == 'Z' and b.get('S_csc') is not None                 and b.get('zref') is not None:
+            zref = np.asarray(b['zref'], dtype=complex)
+            m = z_tilde_from_s_csc(b['S_csc'], zref[:, :, None] * np.eye(zref.shape[1])[None])
         if m is None:
-            raise RuntimeError(f"{which}~ is not available for this result.")
+            name = "Z~" if which == 'Z' else "S~_CSC"
+            raise RuntimeError(f"{name} is not available for this result.")
         return m
 
-    @property
-    def s_tilde(self) -> np.ndarray:
-        """S~ = [[S, k], [h, z_b]], shape (n_freqs, port modes + paths,
-        port modes + beams): waves and beam voltages out per wave and beam
-        current in (docs/theory/beam.md §9.8)."""
-        return self._tilde('S')
+    def _n_ports(self) -> int:
+        """Number of port modes in the generalised matrices."""
+        return n_port_modes(self._beam_data()['cols'])
 
     @property
     def z_tilde(self) -> np.ndarray:
-        """Z~ = [[Z, k_Z], [h_Z, z_oc]]: port and beam voltages per port and beam
-        current, every port mode open (docs/theory/beam.md §9.7)."""
+        """Z~ = [[Z, k_Z], [h_Z, z_oc]] [Ohm]: port and beam voltages per port
+        and beam current, every port mode open (docs/theory/beam.md §9.7).
+        Shape (n_freqs, port modes + paths, port modes + beams)."""
         return self._tilde('Z')
 
     @property
+    def s_csc(self) -> np.ndarray:
+        """S~_CSC = [[S, k], [h, z_b]] of the CSC-BEAM method: waves and beam
+        voltages out per wave and beam current in, every port mode matched
+        (docs/theory/beam.md §9.8).  Mixed units: S is dimensionless, k and h
+        are in sqrt(Ohm), z_b in Ohm.  Shape as :attr:`z_tilde`."""
+        return self._tilde('CSC')
+
+    @property
+    def s_tilde(self) -> np.ndarray:
+        """S~: outgoing waves per incoming wave, the beam included as a port
+        with the voltage u = -v and the reference impedance :attr:`beam_zref`
+        (docs/theory/beam.md §9.8).  Dimensionless, shape
+        (n_freqs, port modes + beams, port modes + beams)."""
+        return s_tilde_from_s_csc(self.s_csc, self._n_ports(), self.beam_zref)
+
+    @property
+    def y_tilde(self) -> np.ndarray:
+        """Y~ = (J Z~)^-1 [S]: port and beam currents per port voltage and beam
+        port voltage u = -v, every port mode short-circuited
+        (docs/theory/beam.md §9.9).  Shape as :attr:`s_tilde`."""
+        return y_tilde_from_z_tilde(self.z_tilde, self._n_ports())
+
+    @property
     def tilde_labels(self) -> Tuple[List[str], List[str]]:
-        """(rows, columns) of S~ and Z~: '1(1)', ... then 'b(1)', ..."""
+        """(rows, columns) of Z~ and S~_CSC: '1(1)', ... then 'b(1)', ...
+        S~ and Y~ use the columns for both."""
         b = self._beam_data()
         return list(b['rows']), list(b['cols'])
 
@@ -1232,20 +1475,31 @@ class BeamResultMixin:
         """Beam/path label -> name, e.g. {'b(1)': 'beam'}."""
         return dict(self._beam_data().get('names', {}))
 
-    def _labelled(self, which: str) -> Dict[str, np.ndarray]:
+    def _labelled(self, matrix: np.ndarray, square: bool = False) -> Dict[str, np.ndarray]:
         b = self._beam_data()
-        return labelled_dict(self._tilde(which), b['rows'], b['cols'], b['frequencies'])
-
-    @property
-    def s_tilde_dict(self) -> Dict[str, np.ndarray]:
-        """S~ keyed like S_dict, excitation first: 'b(1)b(1)' is z_b,
-        'b(1)2(1)' is k (beam -> port 2 mode 1), '1(1)b(1)' is h."""
-        return self._labelled('S')
+        rows = b['cols'] if square else b['rows']
+        return labelled_dict(matrix, rows, b['cols'], b['frequencies'])
 
     @property
     def z_tilde_dict(self) -> Dict[str, np.ndarray]:
         """Z~ keyed like Z_dict ('b(1)b(1)' is z_oc)."""
-        return self._labelled('Z')
+        return self._labelled(self.z_tilde)
+
+    @property
+    def s_csc_dict(self) -> Dict[str, np.ndarray]:
+        """S~_CSC keyed like S_dict, excitation first: 'b(1)b(1)' is z_b,
+        'b(1)2(1)' is k (beam -> port 2 mode 1), '1(1)b(1)' is h."""
+        return self._labelled(self.s_csc)
+
+    @property
+    def s_tilde_dict(self) -> Dict[str, np.ndarray]:
+        """S~ keyed like S_dict ('b(1)b(1)' is the beam's reflection)."""
+        return self._labelled(self.s_tilde, square=True)
+
+    @property
+    def y_tilde_dict(self) -> Dict[str, np.ndarray]:
+        """Y~ keyed like Z_dict ('b(1)b(1)' is the beam admittance)."""
+        return self._labelled(self.y_tilde, square=True)
 
     def _beam_label(self, name, sources: bool) -> str:
         b = self._beam_data()
@@ -1275,7 +1529,7 @@ class BeamResultMixin:
         col = self._beam_label(beam, sources=True)
         row = col if path is None else self._beam_label(path, sources=False)
         b = self._beam_data()
-        m = self._tilde('S' if ports == 'matched' else 'Z')
+        m = self._tilde('CSC' if ports == 'matched' else 'Z')
         return -m[:, b['rows'].index(row), b['cols'].index(col)]
 
     def transverse_impedance(self, plane: str = 'x', name: str = 'dipole',
@@ -1312,7 +1566,7 @@ class BeamResultMixin:
         plus, minus = lines[f"{name}_{u}+"], lines[f"{name}_{u}-"]
         span = plus.point['xyz'.index(u)] - minus.point['xyz'.index(u)]
         lab = {n: self._beam_label(n, sources=True) for n in (plus.name, minus.name)}
-        m = self._tilde('S' if ports == 'matched' else 'Z')
+        m = self._tilde('CSC' if ports == 'matched' else 'Z')
 
         def z(witness, source):
             return -m[:, b['rows'].index(lab[witness]), b['cols'].index(lab[source])]
@@ -1330,7 +1584,7 @@ class BeamResultMixin:
         first (``rom.solve(frequencies=...)``, ``concat.solve(...)``;
         :func:`cavsim3d.analysis.bunch_train_spectrum` gives them for a
         bunch train).  With every port mode matched, the beam sends the wave
-        ``b = k I_p`` into a port mode (S~ = [[S, k], [h, z_b]],
+        ``b = k I_p`` into a port mode (S~_CSC = [[S, k], [h, z_b]],
         docs/theory/beam.md section 9.8), which carries
 
             P = |k|^2 |I_p|^2 Re(Z_ref) / (2 |Z_ref|)
@@ -1360,7 +1614,7 @@ class BeamResultMixin:
             raise ValueError(f"current: one amplitude per frequency of this result "
                              f"({len(freqs)}), got shape {I.shape}. Solve at the beam's "
                              "spectral lines first (solve(frequencies=...)).")
-        St = self._tilde('S')
+        St = self._tilde('CSC')
         n_paths = len(BeamSetup.from_dict(b['setup']).paths) if b.get('setup') else 0
         n_modes = St.shape[1] - n_paths
         zref = b.get('zref')
@@ -1385,6 +1639,12 @@ class BeamResultMixin:
         """Plot entries of S~ (keys of :attr:`s_tilde_dict`); arguments as plot_s."""
         from cavsim3d.utils.plot_mixin import PlotMixin
         view = _MatrixView(self._beam_data()['frequencies'], s_dict=self.s_tilde_dict)
+        return PlotMixin.plot_s(view, params=params, plot_type=plot_type, **kwargs)
+
+    def plot_s_csc(self, params=None, plot_type: str = 'db', **kwargs):
+        """Plot entries of S~_CSC (keys of :attr:`s_csc_dict`); arguments as plot_s."""
+        from cavsim3d.utils.plot_mixin import PlotMixin
+        view = _MatrixView(self._beam_data()['frequencies'], s_dict=self.s_csc_dict)
         return PlotMixin.plot_s(view, params=params, plot_type=plot_type, **kwargs)
 
     def plot_z_tilde(self, params=None, plot_type: str = 'db', **kwargs):
@@ -1417,32 +1677,32 @@ class BeamResultMixin:
 
 
 # =============================================================================
-# Joining segments through their generalised scattering matrices (§9.9)
+# Joining segments through their CSC-BEAM matrices (§9.10)
 # =============================================================================
 
 #: memory [bytes] of the stacked block matrices a join builds at once
 JOIN_CHUNK_BYTES = 64e6
 
 
-def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
+def join_s_csc(blocks: List[np.ndarray], modes: List[List[int]],
                  pairs: List[Tuple[int, int]], external: List[int],
                  col_phase: Optional[List[np.ndarray]] = None,
                  row_phase: Optional[List[np.ndarray]] = None) -> np.ndarray:
-    """S~ of segments joined at their cuts (docs/theory/beam.md §9.9).
+    """S~_CSC of segments joined at their cuts (docs/theory/beam.md §9.10).
 
-    ``blocks[d]``: S~ of segment d, (n_f, P_d + L, P_d + S); ``modes[d]``:
+    ``blocks[d]``: S~_CSC of segment d, (n_f, P_d + L, P_d + S); ``modes[d]``:
     the global index of each of its P_d port modes; ``pairs``: the global
     port-mode indices joined at a cut (the wave leaving one face enters the
     other); ``external``: the global indices kept, in their order.
 
     A segment solved with the beams' global phase (one coordinate for the
     whole model) sees the same beam current as the others, and the beam
-    voltages of the segments add: d = (1, 1, ...) in §9.9.  A segment solved
+    voltages of the segments add: d = (1, 1, ...) in §9.10.  A segment solved
     in its own frame, shifted by z_d along the axis, gets the phase of its
     position: ``col_phase[d]`` (n_f, S) multiplies its beam columns
     (exp(-j k_b z_d)) and ``row_phase[d]`` (n_f, L) its path rows
     (exp(+j k_b z_d)).
-    Returns S~ of the joined model, (n_f, len(external) + L, len(external) + S).
+    Returns S~_CSC of the joined model, (n_f, len(external) + L, len(external) + S).
     """
     D = len(blocks)
     n_f = blocks[0].shape[0]
@@ -1504,28 +1764,3 @@ def join_s_tilde(blocks: List[np.ndarray], modes: List[List[int]],
             out[ks] = T_rows @ G22 @ T_cols
     return out
 
-
-def z_tilde_from_s_tilde(St: np.ndarray, Zref: np.ndarray) -> np.ndarray:
-    """Z~ from S~ (inverse of :func:`s_tilde`): with A = Z + Zref,
-    Z from S as for the ports, k_Z = A Zref^-1/2 k, h_Z = h Zref^-1/2 A / 2,
-    z_oc = z_b + h Zref^-1/2 A Zref^-1/2 k / 2."""
-    St = np.asarray(St, dtype=complex)
-    P = Zref.shape[1]
-    out = np.zeros_like(St, dtype=complex)
-    if not St.shape[0]:
-        return out
-    z0 = np.diagonal(Zref, axis1=1, axis2=2).astype(complex)          # (n_f, P)
-    sq, isq = np.sqrt(z0), 1.0 / np.sqrt(z0)
-    I = np.eye(P)
-    with small_dense_blas():
-        # Z = Zref^1/2 (I - S)^-1 (I + S) Zref^1/2: S is referred to Zref
-        S = St[:, :P, :P]
-        Z = sq[:, :, None] * (_stacked_inv(I[None] - S) @ (I[None] + S)) * sq[:, None, :]
-        A = Z + z0[:, :, None] * I[None]
-        k, h, zb = St[:, :P, P:], St[:, P:, :P], St[:, P:, P:]
-        Ak = A @ (isq[:, :, None] * k)                                 # A Zref^-1/2 k
-        out[:, :P, :P] = Z
-        out[:, :P, P:] = Ak
-        out[:, P:, :P] = 0.5 * (h * isq[:, None, :]) @ A
-        out[:, P:, P:] = zb + 0.5 * (h * isq[:, None, :]) @ Ak
-    return out

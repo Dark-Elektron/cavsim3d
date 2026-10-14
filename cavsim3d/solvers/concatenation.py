@@ -365,7 +365,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         # Snapshot storage (populated by solve())
         self._snapshots: Optional[np.ndarray] = None
 
-        # Beam: the reduced sections' S~, joined at the frequencies of every
+        # Beam: the reduced sections' S~_CSC, joined at the frequencies of every
         # solve (docs/theory/beam_reduction.md §10.7); set by concatenate()
         self._beam_join = None
         self._beam = None
@@ -1228,7 +1228,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         Save ConcatenatedSystem data to disk.
 
         ``results_only=True`` writes what a sweep produced -- S/Z, the
-        snapshots and the beam's S~ -- and leaves the coupled matrices, the
+        snapshots and the beam's S~_CSC -- and leaves the coupled matrices, the
         eigenmodes and the metadata, which change only with the coupling (a
         folder without them is saved in full).
         """
@@ -1284,11 +1284,12 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
         if not results_only:
             self.save_eigenmodes()
 
-        # 5. Beam: S~ of the joined model
+        # 5. Beam: S~_CSC of the joined model
         from cavsim3d.solvers import beam as _bm
-        tilde_file = path / "s_tilde" / "s_tilde.h5"
+        tilde_file = _bm.tilde_file(path, 'CSC')
+        _bm.remove_legacy_csc(path)
         if getattr(self, '_beam', None):
-            _bm.save_tilde(tilde_file, self._beam, 'S')
+            _bm.save_tilde(tilde_file, self._beam, 'CSC')
         elif tilde_file.exists():
             tilde_file.unlink()
 
@@ -1301,7 +1302,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             "n_internal": self._n_internal,
             "n_external": self._n_external,
             "n_modes_per_port": self._n_modes_per_port,
-            # joined through the parts' S~ (beam): no matrices
+            # joined through the parts' S~_CSC (beam): no matrices
             "scattering_join": bool(getattr(self, '_scattering_join', False)),
             "timestamp": datetime.now().isoformat()
         }
@@ -1404,11 +1405,11 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             if log_file.exists():
                 cs._log_path = str(log_file)
 
-        # Beam: S~ of the joined model
+        # Beam: S~_CSC of the joined model (Z~ is converted from it when read)
         from cavsim3d.solvers import beam as _bm
-        t = _bm.load_tilde(path / "s_tilde" / "s_tilde.h5")
+        t = _bm.load_tilde(_bm.find_csc_file(path))
         cs._beam = (None if t is None else
-                    {'S_tilde': t['data'], 'Z_tilde': None, 'rows': t['rows'],
+                    {'S_csc': t['data'], 'Z_tilde': None, 'rows': t['rows'],
                      'cols': t['cols'], 'frequencies': t['frequencies'],
                      'names': t['names'], 'setup': t['setup'],
                      'fingerprint': t['fingerprint'], 'summary': t['summary'],
@@ -1684,7 +1685,7 @@ class ConcatenatedSystem(BaseEMSolver, ConcatEigenMixin, PlotMixin, BeamResultMi
             project.save_timing()
 
     def _update_beam(self) -> None:
-        """S~ of the joined reduced sections at this sweep's frequencies
+        """S~_CSC of the joined reduced sections at this sweep's frequencies
         (docs/theory/beam_reduction.md §10.7), unless it is there already."""
         join = getattr(self, '_beam_join', None)
         if join is None or getattr(self, 'frequencies', None) is None:

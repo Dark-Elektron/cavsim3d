@@ -868,7 +868,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
     def _beam_inputs(self, domain: str) -> Optional[Dict]:
         """The full-order beam column of ``domain`` that the reduction needs:
         its field snapshots, its beam data with the interpolation part, the
-        (port, mode) of the columns of B and the metadata of its S~.  None
+        (port, mode) of the columns of B and the metadata of its S~_CSC.  None
         without a beam; a beam whose sweep kept no field snapshots is reported
         and left out."""
         from cavsim3d.solvers import beam as _bm
@@ -1294,8 +1294,8 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
             'x_r': getattr(self, '_x_r_snapshots', None),
         }
         if getattr(self, '_beam', None):
-            out['Z_tilde'] = self._beam.get('Z_tilde')
-            out['S_tilde'] = self._beam.get('S_tilde')
+            from cavsim3d.solvers import beam as _bm
+            out.update(_bm.results_entries(self._beam))
         return out
 
     # =========================================================================
@@ -1310,7 +1310,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         and S/Z parameters, snapshots, and eigenmodes to their respective folders.
 
         ``results_only=True`` writes what a sweep produced -- S/Z, the reduced
-        snapshots, the beam's S~/Z~ and the metadata -- and leaves the reduced
+        snapshots, the beam's Z~/S~_CSC and the metadata -- and leaves the reduced
         matrices, the structure metadata and the eigenmodes, which change only
         with :meth:`reduce` (a folder without them is saved in full).
         """
@@ -1359,7 +1359,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                             H5Serializer.save_dataset(f, "data", res['S'])
 
         # 2b. Beam: the reduced beam column of every domain (matrices/), and
-        #     S~, Z~ and the reduced beam columns of the last sweep
+        #     Z~, S~_CSC and the reduced beam columns of the last sweep
         self._save_beam(path, results_only=results_only)
 
         # 3. Save snapshots and frequencies
@@ -1484,10 +1484,11 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                             H5Serializer.save_dataset(f_indiv, "data", mdict.get(domain))
 
     def _beam_files(self, path: Path, domain: str) -> Dict[str, Path]:
+        from cavsim3d.solvers import beam as _bm
         tag = domain.replace('/', '_')
         return {'beam': path / "matrices" / f"beam_{tag}.h5",
-                'Z': path / "z_tilde" / f"z_tilde_{tag}.h5",
-                'S': path / "s_tilde" / f"s_tilde_{tag}.h5",
+                'Z': _bm.tilde_file(path, 'Z', tag),
+                'CSC': _bm.tilde_file(path, 'CSC', tag),
                 'snapshots': path / "snapshots_beam" / f"snapshots_beam_{tag}.h5"}
 
     def _save_beam(self, path: Path, results_only: bool = False) -> None:
@@ -1497,6 +1498,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         from cavsim3d.solvers import beam as _bm
         for domain in self.domains:
             files = self._beam_files(path, domain)
+            _bm.remove_legacy_csc(path, domain.replace('/', '_'))
             rb = getattr(self, '_reduced_beam', {}).get(domain)
             tilde = (getattr(self, '_beam', None) if self.n_domains == 1
                      else getattr(self, '_beam_per_domain', {}).get(domain))
@@ -1504,7 +1506,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                 rb.save(files['beam'])
             if tilde and rb is not None:
                 _bm.save_tilde(files['Z'], tilde, 'Z')
-                _bm.save_tilde(files['S'], tilde, 'S')
+                _bm.save_tilde(files['CSC'], tilde, 'CSC')
                 yb = getattr(self, '_beam_snapshots', {}).get(domain)
                 if yb is not None:
                     files['snapshots'].parent.mkdir(parents=True, exist_ok=True)
@@ -1516,7 +1518,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
             for key, f in files.items():
                 if f.exists() and (key != 'beam' or rb is None):
                     f.unlink()
-        for folder in ("z_tilde", "s_tilde", "snapshots_beam"):
+        for folder in ("z_tilde", "s_csc", "snapshots_beam"):
             d = path / folder
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
@@ -1532,11 +1534,12 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
             if rb is None:
                 continue
             self._reduced_beam[domain] = rb
-            z, s_ = _bm.load_tilde(files['Z']), _bm.load_tilde(files['S'])
+            z = _bm.load_tilde(files['Z'])
+            s_ = _bm.load_tilde(_bm.find_csc_file(path, domain.replace('/', '_')))
             meta = z or s_
             if meta is None:
                 continue
-            tilde = {'Z_tilde': z['data'] if z else None, 'S_tilde': s_['data'] if s_ else None,
+            tilde = {'Z_tilde': z['data'] if z else None, 'S_csc': s_['data'] if s_ else None,
                      'rows': meta['rows'], 'cols': meta['cols'],
                      'frequencies': meta['frequencies'], 'names': meta['names'],
                      'setup': meta['setup'], 'fingerprint': meta['fingerprint'],
@@ -1706,7 +1709,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
                     if rom._S_matrix is None and "S_matrix" in f:
                         rom._S_matrix = H5Serializer.load_dataset(f["S_matrix"])
 
-        # 3b. Beam: the reduced beam columns and the last sweep's S~ / Z~
+        # 3b. Beam: the reduced beam columns and the last sweep's Z~ / S~_CSC
         rom._load_beam(path)
 
         # 4. Load eigenmodes
@@ -1867,7 +1870,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         ref.save_timing()
 
     def _single_domain_beam(self) -> None:
-        """S~ and Z~ of the single domain at the sweep's frequencies, from its
+        """Z~ and S~_CSC of the single domain at the sweep's frequencies, from its
         reduced beam column (docs/theory/beam_reduction.md §10.5)."""
         domain = self.domains[0]
         self._beam, self._beam_snapshots = None, {}
@@ -2013,7 +2016,7 @@ class ModelOrderReduction(BaseEMSolver, ROMEigenMixin, PlotMixin, BeamResultMixi
         concat.couple()
         if others is None and self._reduced_beam and all(
                 d in self._reduced_beam for d in self.domains):
-            # the domains' S~ joined at every solve of the coupled system
+            # the domains' S~_CSC joined at every solve of the coupled system
             # (one beam frame: the parts are glued); docs/theory/beam_reduction.md §10.7
             from cavsim3d.solvers.beam import BeamSetup
             wave = getattr(self, '_port_wave_impedance_func', None)
