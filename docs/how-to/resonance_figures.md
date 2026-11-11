@@ -172,6 +172,6 @@ order of the parts list, and `offset` is taken in each part's own coordinates, s
 parts must share their transverse axis.
 
 **See also:** [Find resonances and look at fields](../tutorials/basics/resonances_and_fields.ipynb)
-(tutorial); [Cavity figures of merit: validation](../tutorials/benchmarks/figures_of_merit.ipynb)
-(benchmark); [Ports and port modes](../explanation/ports.md#loaded-resonances) (explanation);
+(tutorial); [Figures of merit of a pillbox cavity](../tutorials/benchmarks/figures_of_merit.ipynb)
+(tutorial); [Ports and port modes](../explanation/ports.md#loaded-resonances) (explanation);
 [Results](../reference/results.md#figures-of-merit) (reference).
