@@ -309,9 +309,13 @@ def test_coupled_copies_join_like_one_piece(tmp_path):
     St = joined.s_csc
     assert St.shape == ref.shape == (3, 3, 3)
     assert joined.tilde_labels == (['1(1)', '2(1)', 'b(1)'], ['1(1)', '2(1)', 'b(1)'])
-    assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                     # measured 2.6e-3
-    assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=2e-2)            # z_b: 0.6 %
-    for block in (np.s_[:, :2, 2], np.s_[:, 2, :2]):                    # k and h: 1.5, 2.4 %
+    # The cell is meshed a little differently per platform (1041 elements on Windows,
+    # 1024 on Linux and macOS), and the join's error moves with it.  Measured on
+    # Windows / Linux: port block 2.6e-3 / 3.1e-3, z_b 0.6 / 2.5 %, k 1.5 / 2.1 %,
+    # h 2.4 / 3.1 %.
+    assert np.abs(St - ref)[:, :2, :2].max() < 1e-2
+    assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=3e-2)
+    for block in (np.s_[:, :2, 2], np.s_[:, 2, :2]):
         assert np.abs(St[block] - ref[block]).max() < 6e-2 * np.abs(ref[block]).max()
     # the joined model is saved, and the parts' beam files are in the flat tree
     root = tmp_path / "chain"
@@ -404,13 +408,15 @@ def test_no_beam_bit_identical_and_added_later(tmp_path):
     later = _guide(tmp_path, "later", beam=False)
     r0 = later.fds.solve(**CFG)
     assert 'S_csc' not in r0 and not later.fds.fom.has_beam
-    # the port results do not depend on the beam
-    np.testing.assert_array_equal(ra['S'], r0['S'])
-    np.testing.assert_array_equal(ra['Z'], r0['Z'])
+    # the port results do not depend on the beam.  Two projects solved on their own
+    # agree to round-off, not bit for bit on every platform (macOS: 5e-11 relative)
+    np.testing.assert_allclose(ra['S'], r0['S'], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(ra['Z'], r0['Z'], rtol=1e-9, atol=1e-12)
 
     S0, Z0 = r0['S'].copy(), r0['Z'].copy()
     later.add_beam('beam', x=0.05, y=0.025)
     rb = later.fds.solve(**CFG)          # only the beam columns are solved
+    # the same project: its port results are kept bit for bit
     np.testing.assert_array_equal(rb['S'], S0)
     np.testing.assert_array_equal(rb['Z'], Z0)
     np.testing.assert_allclose(rb['S_csc'], ra['S_csc'], rtol=1e-9, atol=1e-12)
@@ -605,7 +611,9 @@ def test_interrupted_beam_sweep_resumes(tmp_path, monkeypatch):
     monkeypatch.setattr(sc.SweepCheckpoint, "write", counting)
     res = p.fds.solve(**cfg)
     assert computed[0] == 2                              # only the missing samples
-    np.testing.assert_allclose(res['S_csc'], ref['S_csc'], rtol=1e-12, atol=1e-14)
+    # another project: equal to round-off, not bit for bit on every platform
+    # (macOS: 2e-10 relative)
+    np.testing.assert_allclose(res['S_csc'], ref['S_csc'], rtol=1e-9, atol=1e-12)
 
     # a different beam: the samples of the old one are not reused
     q = _guide(tmp_path, "moved")

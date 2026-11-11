@@ -246,8 +246,10 @@ def test_reduced_copies_join(tmp_path):
     concat.solve(2.6, 3.4, 17)
     St = concat.s_csc
     assert St.shape == (17, 3, 3)
-    assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                   # measured 3.1e-3
-    assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=2e-2)           # measured 0.6 %
+    # as for the full-order join in test_beam.py, the cell's mesh differs by platform;
+    # measured on Windows / Linux
+    assert np.abs(St - ref)[:, :2, :2].max() < 1e-2                   # 3.1e-3 / 3.1e-3
+    assert np.allclose(St[:, 2, 2], ref[:, 2, 2], rtol=3e-2)           # 0.6 % / 2.5 %
     assert (tmp_path / "chain" / "fds" / "foms" / "roms" / "matrices" / "beam_cell.h5").exists()
     assert (tmp_path / "chain" / "fds" / "foms" / "roms" / "concat" / "s_csc" / "s_csc.h5").exists()
 
