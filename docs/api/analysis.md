@@ -31,7 +31,7 @@ The convergence of an iterative full-order solve is plotted by the result itself
 ## Beam current spectra
 
 The spectral lines of a bunch train, for the HOM power of a structure
-(`get_hom_power()`, see [How to compute the beam impedance](../how-to/beam_impedance.md#compute-the-hom-power-per-port)).
+(`get_hom_power()`<!-- , see [How to compute the beam impedance](../how-to/beam_impedance.md#compute-the-hom-power-per-port) -->).
 
 ::: cavsim3d.analysis.beam
     options:

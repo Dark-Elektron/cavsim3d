@@ -4,9 +4,13 @@ site_url: !ENV [SITE_URL, "https://dark-elektron.github.io/cavsim3d/"]
 repo_url: https://github.com/Dark-Elektron/cavsim3d
 repo_name: Dark-Elektron/cavsim3d
 
-# project folders written by running the tutorial notebooks (gitignored too)
+# project folders written by running the tutorial notebooks (gitignored too), and
+# pages not published yet: the Mathematical Theory and the beam documentation
 exclude_docs: |
   simulations/
+  theory/
+  tutorials/beam/
+  how-to/beam_impedance.md
 
 theme:
   name: material
@@ -114,14 +118,15 @@ nav:
           - tutorials/ports/index.md
           - "Carry several modes per port": tutorials/ports/multimode_ports.ipynb
           - "Coaxial line with a dielectric window": tutorials/tem_transmission_line.ipynb
-      - Beams:
-          - tutorials/beam/index.md
-          - "Compute a beam impedance": tutorials/beam/collimator_impedance.ipynb
-          - "Add a beam to a solved cavity": tutorials/beam/beam_on_solved_cavity.ipynb
-          - "Beam past a lossy absorber": tutorials/beam/lossy_absorber.ipynb
-          - "Join parts with a beam": tutorials/beam/beam_through_parts.ipynb
-          - "Beam impedance of the TESLA cavity": tutorials/beam/tesla_beam_impedance.ipynb
-          - "A module of two TESLA cavities": tutorials/beam/tesla_module.ipynb
+      # Beams: not published yet
+      # - Beams:
+      #     - tutorials/beam/index.md
+      #     - "Compute a beam impedance": tutorials/beam/collimator_impedance.ipynb
+      #     - "Add a beam to a solved cavity": tutorials/beam/beam_on_solved_cavity.ipynb
+      #     - "Beam past a lossy absorber": tutorials/beam/lossy_absorber.ipynb
+      #     - "Join parts with a beam": tutorials/beam/beam_through_parts.ipynb
+      #     - "Beam impedance of the TESLA cavity": tutorials/beam/tesla_beam_impedance.ipynb
+      #     - "A module of two TESLA cavities": tutorials/beam/tesla_module.ipynb
       - Applications:
           - tutorials/applications/index.md
           - "A chain of three TESLA cavities": tutorials/tesla_cavity_chain.ipynb
@@ -139,7 +144,7 @@ nav:
       - Control recomputation and resume a sweep: how-to/rerun_and_resume.md
       - Build a reliable reduced model: how-to/reduce_well.md
       - Get the figures of merit of resonances: how-to/resonance_figures.md
-      - Compute the beam impedance: how-to/beam_impedance.md
+      # - Compute the beam impedance: how-to/beam_impedance.md
       - Compare with CST Studio Suite: how-to/compare_with_cst.md
       - Export results: how-to/export_results.md
       - Reuse and share projects: how-to/reuse_and_share.md
@@ -150,18 +155,19 @@ nav:
       - Ports and port modes: explanation/ports.md
       - Parts, joins and netlists: explanation/parts_and_joins.md
       - The project folder: explanation/project_layout.md
-  - Mathematical Theory:
-      - theory/index.md
-      - "1. Maxwell's equations": theory/maxwell.md
-      - "2. Variational formulation": theory/variational.md
-      - "3. Port modes": theory/ports.md
-      - "4. Z-parameters": theory/z_parameters.md
-      - "5. Reference impedances and S-parameters": theory/s_parameters.md
-      - "6. Model order reduction": theory/reduction.md
-      - "7. Concatenation": theory/concatenation.md
-      - "8. Resonant modes": theory/resonances.md
-      - "9. Beam excitation": theory/beam.md
-      - "10. Model order reduction with the beam": theory/beam_reduction.md
+  # Mathematical Theory: not published yet
+  # - Mathematical Theory:
+  #     - theory/index.md
+  #     - "1. Maxwell's equations": theory/maxwell.md
+  #     - "2. Variational formulation": theory/variational.md
+  #     - "3. Port modes": theory/ports.md
+  #     - "4. Z-parameters": theory/z_parameters.md
+  #     - "5. Reference impedances and S-parameters": theory/s_parameters.md
+  #     - "6. Model order reduction": theory/reduction.md
+  #     - "7. Concatenation": theory/concatenation.md
+  #     - "8. Resonant modes": theory/resonances.md
+  #     - "9. Beam excitation": theory/beam.md
+  #     - "10. Model order reduction with the beam": theory/beam_reduction.md
   - Reference:
       - reference/index.md
       - solve() options: reference/solve_options.md

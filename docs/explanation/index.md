@@ -17,6 +17,8 @@ the background matters.
 - **[The project folder](project_layout.md)**: what is saved where, and when saved results
   are reused or recomputed.
 
+<!-- not published yet:
 The equations behind these pages -- the variational form, the port eigenproblems, the
 Z-to-S conversion, the reduction, the join and the resonances -- are derived in
 [Mathematical Theory](../theory/index.md).
+-->

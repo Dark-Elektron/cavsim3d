@@ -49,8 +49,10 @@ config written for the full-order solve: its full-order options have no effect t
 | `solver_type` | `"auto"`, `"direct"`, `"iterative"` | `"auto"` | `"auto"`: factorise when the factorisation fits in 60 % of the free memory (estimated from the unknowns and the matrix entries), otherwise solve iteratively; `"direct"`: sparse factorisation (PARDISO; NGSolve's sparse Cholesky on macOS); `"iterative"`: Krylov solver with a preconditioner. One factorisation or preconditioner per sample serves every port mode and beam |
 | `iterative_opts` | dict | `{"method": "cocg", "precond": "bddc", "maxsteps": 500, "tol": 1e-8, "printrates": False}` | settings of the iterative solver; given keys replace the defaults. `method`: `"cocg"` (conjugate gradients for complex-symmetric systems; a solve that stops at `maxsteps` or breaks down is finished by GMRES) or `"gmres"`. `tol`: relative to the right-hand side, so the start vector from the previous sample saves steps without tightening it |
 
+<!-- not published yet:
 Beams are not `solve()` options: `proj.add_beam()` defines them, and every solve then adds
 their columns ([How to compute the beam impedance](../how-to/beam_impedance.md)).
+-->
 
 ### Several parts or domains
 

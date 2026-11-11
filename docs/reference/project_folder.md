@@ -23,10 +23,13 @@ material name for its full-order files.
 | `config.json` | the request the results belong to (band, samples, order, element kind, port settings, materials) and the beam definition of the stored beam results (`beam`) |
 | `solve.log` | log of the last full-order solve |
 | `port_modes/port_modes.pkl` | port modes |
-| `port_modes/beam_port_fields.pkl` | with a beam: the beam's electrostatic potential on every port face it crosses |
 | `imports.json` | imported projects: source path, mode (`reference` / `copy`), fingerprint |
 | `sections.json` | parts of a chain solved in this project: the solve settings, geometry and beams (in the part's own frame) each was solved for, and its port data (reused by the next `solve()`, and needed to reduce it again) |
 | `checkpoint/<sweep>/sample_*.npz` | finished samples of a running sweep; deleted when the sweep completes |
+
+<!-- not published yet:
+| `port_modes/beam_port_fields.pkl` | with a beam: the beam's electrostatic potential on every port face it crosses |
+-->
 
 ## Stage folders
 
@@ -44,6 +47,7 @@ plus `metadata.json` and, where applicable, `reduce.log`, `solve.log` and
 `structures.json` (the reduced parts' ports, port-mode fingerprints and training band, used
 to join and to import them).
 
+<!-- not published yet:
 With a beam, a full-order stage folder also holds, per part (`<part>` is `global` for a
 single part):
 
@@ -67,6 +71,7 @@ chain of repeated or imported parts, each part's beam files sit in `fds/foms/` u
 part's name, also for a part imported by reference (its beam columns are computed in this
 project). A joined model with a beam (`fds/foms/concat/`, `fds/foms/roms/concat/`) holds
 its $\tilde{S}$ in `s_tilde/s_tilde.h5`.
+-->
 
 | Stage | Single part | Several parts |
 |---|---|---|

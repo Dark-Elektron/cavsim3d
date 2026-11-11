@@ -30,6 +30,7 @@ instead of `S` and `Z` (`Z_per_domain`, `S_per_domain`, `domain_port_map`); for 
 `rom.solve()`, `roms.solve()` and `concat.solve()` return `frequencies`, `S`, `Z`, `S_dict`,
 `Z_dict` with the same layout.
 
+<!-- not published yet:
 With a beam (`proj.add_beam()`), the dictionary also holds:
 
 | Key | Type | Content |
@@ -78,6 +79,7 @@ beam 1 into port 2 mode 1, `'1(1)b(2)'` is $h$ from port 1 mode 1 onto path 2.
 $k$ and $h$ carry the beam's phase $e^{\mp j k_b s}$ along the main axis, with $s$ measured in
 the model's frame; for repeated or imported parts, that is the frame of the first part.
 $z_b$ does not depend on it.
+-->
 
 ## Result objects
 
@@ -168,9 +170,12 @@ in %.
 | `fmin`, `fmax` (inputs) | GHz |
 | `frequencies` (outputs), `get_resonant_frequencies()`, `get_external_q()`, `get_rq()` | Hz |
 | `get_rq()`: `RQ`, `V`, `U` | ohm, V, J (the mode scaled to U = 1 J) |
-| beam: current, $z_b$, $z_{oc}$, $Z_\parallel$, $k$, $h$ | 1 A; ohm; $\sqrt{\Omega}$ |
 | `get_figures_of_merit()` | the unit in each key |
 | `chain_eigenfrequencies()`, `RWGAnalytical` / `CWGAnalytical` inputs and outputs | GHz |
 | Z | ohm |
 | time convention | $e^{+j\omega t}$ |
 | port mode normalisation | $\int |E_t|^2\,dS = 1$ |
+
+<!-- not published yet:
+| beam: current, $z_b$, $z_{oc}$, $Z_\parallel$, $k$, $h$ | 1 A; ohm; $\sqrt{\Omega}$ |
+-->
